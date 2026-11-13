@@ -162,6 +162,9 @@ struct ContentView: View {
     private var leagueChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if !store.liveChannels.isEmpty {
+                    liveChip
+                }
                 hotChip
                 ForEach(League.allCases) { league in
                     let selected = store.selectedLeague == league.rawValue
@@ -183,6 +186,26 @@ struct ContentView: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
         }
+    }
+
+    /// The 🔴 Trực tiếp chip: every match live right now across all
+    /// leagues, same as the TV versions (owner sync request,
+    /// 2026-11-13). Hidden when nothing is live.
+    private var liveChip: some View {
+        let selected = store.selectedLeague == PlaylistStore.liveTabValue
+        return Button {
+            store.selectedLeague = PlaylistStore.liveTabValue
+        } label: {
+            Text("🔴 Trực tiếp")
+                .font(.subheadline.weight(selected ? .bold : .regular))
+                .foregroundStyle(selected ? .white : .white.opacity(0.7))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(selected ? Color.red : Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     /// The 🔥 Hot chip: matches the source sites themselves flag hot,
@@ -207,10 +230,18 @@ struct ContentView: View {
     // MARK: - League list (bucket sections)
 
     private var leagueList: some View {
+        if store.selectedLeague == PlaylistStore.liveTabValue {
+            return AnyView(liveList)
+        }
         if store.selectedLeague == PlaylistStore.hotTabValue {
             return AnyView(hotList)
         }
         return AnyView(leagueBucketList)
+    }
+
+    private var liveList: some View {
+        bucketList(channels: store.liveChannels,
+                   emptyText: "Hiện không có trận nào đang đá. Các trận sắp tới nằm ở mục Hot và các giải.")
     }
 
     private var hotList: some View {
@@ -325,7 +356,7 @@ struct ContentView: View {
     }
 
     private var footerRow: some View {
-        Text("Đá Banh v1.6 • \(store.channels.count) trận")
+        Text("Đá Banh v1.7 • \(store.channels.count) trận")
             .font(.caption)
             .foregroundStyle(.white.opacity(0.35))
             .frame(maxWidth: .infinity, alignment: .center)
@@ -402,7 +433,7 @@ private struct FeaturedCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                LogoTile(channel: channel, size: 54, corner: 12)
+                CardArt(channel: channel, crestSize: 40, logoSize: 54)
                 Text(channel.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -412,7 +443,7 @@ private struct FeaturedCard: View {
             }
             Spacer(minLength: 0)
             HStack(spacing: 8) {
-                Text("● ĐANG ĐÁ")
+                Text(channel.kickoff.map { "● ĐANG ĐÁ · \(max(1, Int(Date().timeIntervalSince($0) / 60)))'" } ?? "● ĐANG ĐÁ")
                     .font(.caption2.bold())
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)
@@ -454,32 +485,49 @@ private struct MatchCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // Four-state status block, same language as the TV
+            // versions: LIVE + minute / kickoff time / ↺ PHÁT LẠI /
+            // 📺 KÊNH — so a replay source is never mistaken for a
+            // live one (owner, 2026-11-13).
             VStack(spacing: 2) {
                 if isLive {
-                    Text("LIVE")
-                        .font(.caption.bold())
-                        .foregroundStyle(.red)
-                    if let kickoff = channel.kickoff {
-                        Text(KickoffFormat.time.string(from: kickoff))
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.5))
+                    HStack(spacing: 3) {
+                        Circle().fill(Color.red).frame(width: 7, height: 7)
+                        Text("LIVE")
+                            .font(.caption.bold())
+                            .foregroundStyle(.red)
                     }
-                } else if let kickoff = channel.kickoff {
+                    if let kickoff = channel.kickoff {
+                        let mins = max(1, Int(Date().timeIntervalSince(kickoff) / 60))
+                        Text("\(mins)'")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.red.opacity(0.8))
+                    }
+                } else if let kickoff = channel.kickoff, kickoff > Date() {
                     Text(KickoffFormat.time.string(from: kickoff))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                     Text(KickoffFormat.day.string(from: kickoff))
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.5))
+                } else if channel.kickoff != nil {
+                    Text("↺")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text("PHÁT LẠI")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
                 } else {
-                    Text("—")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.3))
+                    Text("📺")
+                        .font(.caption)
+                    Text("KÊNH")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.4))
                 }
             }
             .frame(width: 46)
 
-            LogoTile(channel: channel, size: 44, corner: 10)
+            CardArt(channel: channel)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(channel.title)
@@ -534,5 +582,67 @@ private struct LogoTile: View {
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: corner))
+    }
+}
+
+/// Card artwork synced with the TV versions (2026-11-13): the two
+/// team crests when the title is a fixture in the crest map, the
+/// channel logo when it is not. Reading `store.crestsRevision` makes
+/// the card re-render when the remote crest map lands.
+private struct CardArt: View {
+    @EnvironmentObject private var store: PlaylistStore
+    let channel: Channel
+    var crestSize: CGFloat = 32
+    var logoSize: CGFloat = 44
+
+    var body: some View {
+        let _ = store.crestsRevision
+        if let pair = Crests.crests(forTitle: channel.title),
+           pair.0 != nil || pair.1 != nil {
+            if pair.0 != nil && pair.1 != nil {
+                HStack(spacing: 4) {
+                    CrestImg(url: pair.0, size: crestSize)
+                    Text("vs")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                    CrestImg(url: pair.1, size: crestSize)
+                }
+            } else {
+                HStack(spacing: 4) {
+                    CrestImg(url: pair.0 ?? pair.1, size: crestSize)
+                    LogoTile(channel: channel, size: crestSize, corner: 8)
+                }
+            }
+        } else {
+            LogoTile(channel: channel, size: logoSize, corner: 10)
+        }
+    }
+}
+
+/// One team crest with a shield placeholder while loading / missing.
+private struct CrestImg: View {
+    let url: URL?
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let url {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFit()
+                    default:
+                        Image(systemName: "shield")
+                            .font(.system(size: size * 0.6))
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                }
+            } else {
+                Image(systemName: "shield")
+                    .font(.system(size: size * 0.6))
+                    .foregroundStyle(.white.opacity(0.2))
+            }
+        }
+        .frame(width: size, height: size)
     }
 }

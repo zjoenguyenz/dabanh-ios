@@ -222,16 +222,14 @@ final class PlaylistStore: ObservableObject {
     private func pickInitialTabIfNeeded() {
         guard !didPickInitialTab, loadedOnce else { return }
         didPickInitialTab = true
-        #if os(tvOS)
-        // tvOS opens on the Trực tiếp tab whenever anything is live
-        // (owner's request, 2026-11-13) — that is what he turns the
-        // TV on for. The iOS tab bar has no live tab, so iOS keeps
-        // the Hot-first rule below.
+        // Both platforms open on the Trực tiếp tab whenever anything
+        // is live (owner's request, 2026-11-13) — that is what he
+        // turns the TV on for, and iOS gained the same live chip in
+        // 1.7 to stay in sync with the TV versions.
         if !liveChannels.isEmpty {
             selectedLeague = Self.liveTabValue
             return
         }
-        #endif
         let now = Date()
         if hotChannels.contains(where: { LeagueClassifier.bucket(of: $0, now: now) == 0 }) {
             selectedLeague = Self.hotTabValue
