@@ -3,7 +3,8 @@
     {
       "filename": "back-1280.png",
       "idiom": "tv",
-      "scale": "1x"
+      "scale": "1x",
+      "size": "1280x768"
     }
   ],
   "info": {
