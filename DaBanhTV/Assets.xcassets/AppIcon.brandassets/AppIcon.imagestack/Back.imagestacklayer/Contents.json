@@ -3,12 +3,14 @@
     {
       "filename": "back-400.png",
       "idiom": "tv",
-      "scale": "1x"
+      "scale": "1x",
+      "size": "400x240"
     },
     {
       "filename": "back-800.png",
       "idiom": "tv",
-      "scale": "2x"
+      "scale": "2x",
+      "size": "400x240"
     }
   ],
   "info": {
