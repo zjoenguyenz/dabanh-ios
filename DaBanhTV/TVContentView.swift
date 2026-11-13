@@ -162,6 +162,8 @@ struct TVContentView: View {
         } label: {
             Text(title)
                 .font(.system(size: 26, weight: selected ? .bold : .medium))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 30)
                 .padding(.vertical, 14)
                 .background(Capsule().fill(selected ? Self.tealFill : Color.white.opacity(0.10)))
@@ -220,7 +222,7 @@ struct TVContentView: View {
                     }
                     HStack {
                         Spacer()
-                        Text("Đá Banh TV v1.2.3")
+                        Text("Đá Banh TV v1.2.4")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
@@ -261,7 +263,11 @@ struct TVContentView: View {
                     .overlay(Capsule().strokeBorder(Self.cyan, lineWidth: 2.5))
                     .padding(.top, 4)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // Fixed widths on purpose: with a maxWidth-.infinity
+                // text column the crest pair was pushed past the
+                // panel's trailing edge and the second crest was cut
+                // off on the owner's TV (v1.2.3 live test).
+                .frame(width: 1020, alignment: .leading)
                 heroArt(ch)
             }
             .padding(.horizontal, 40)
@@ -328,12 +334,13 @@ struct TVContentView: View {
     private func heroArt(_ ch: Channel) -> some View {
         if let pair = Crests.crests(forTitle: ch.title), pair.0 != nil || pair.1 != nil {
             HStack(spacing: 22) {
-                crestImage(pair.0, size: 168)
+                crestImage(pair.0, size: 160)
                 Text("VS")
                     .font(.system(size: 30, weight: .heavy))
                     .foregroundStyle(.white.opacity(0.85))
-                crestImage(pair.1, size: 168)
+                crestImage(pair.1, size: 160)
             }
+            .frame(width: 440, alignment: .center)
         } else if let url = ch.logoURL {
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -343,9 +350,10 @@ struct TVContentView: View {
                     soccerPlaceholder(size: 110)
                 }
             }
-            .frame(width: 300, height: 168)
+            .frame(width: 440, height: 168)
         } else {
             soccerPlaceholder(size: 110)
+                .frame(width: 440, height: 168)
         }
     }
 

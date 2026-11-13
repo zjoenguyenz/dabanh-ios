@@ -76,34 +76,127 @@ enum Crests {
     }
 
     /// Badge URL for one team name as written in a match title.
+    /// Lookup tries a chain of candidate keys, exact first, because the
+    /// listings decorate team names heavily (owner's live-test photos,
+    /// 2026-11-13: "Tây Ban Nha U21" and "U21 Đan Mạch" showed no
+    /// crests although Spain and Denmark are in the map):
+    /// 1. the name as written (after the ĐTQG-prefix strip below),
+    /// 2. with age markers removed — "u21" tokens anywhere, or a
+    ///    split "u" + "21" pair ("U-21"),
+    /// 3. with a trailing "nu" (Nữ, women's) token removed,
+    /// 4. with a trailing "w" (Women in English listings) removed,
+    /// 5. with a leading "nu", or a trailing reserve marker
+    ///    ("reserve" / "reserves" / "b"), removed.
     /// Vietnamese listings often prefix national teams with "ĐTQG"
-    /// (đội tuyển quốc gia) — strip that prefix before lookup, same
-    /// rule as the Android Crests.of.
+    /// (đội tuyển quốc gia) or its long forms — those prefixes are
+    /// stripped from every candidate, same rule as Android Crests.of.
     static func url(forTeam name: String) -> URL? {
-        var key = norm(name)
-        if key.hasPrefix("dtqg ") {
-            key = String(key.dropFirst(5))
+        for key in candidateKeys(forTeam: name) {
+            if let s = map[key] {
+                return URL(string: s)
+            }
         }
-        guard let s = map[key] else { return nil }
-        return URL(string: s)
+        return nil
+    }
+
+    private static func candidateKeys(forTeam name: String) -> [String] {
+        var base = norm(name)
+        // Pure-decoration prefixes listings put in front of national
+        // teams: "ĐTQG" and its long forms "Đội tuyển (bóng đá) quốc
+        // gia" — e.g. "Đội tuyển bóng đá quốc gia Kenya".
+        for prefix in ["dtqg ", "doi tuyen bong da quoc gia ", "doi tuyen quoc gia ",
+                       "doi tuyen qg ", "doi tuyen "] {
+            if base.hasPrefix(prefix) {
+                base = String(base.dropFirst(prefix.count))
+                break
+            }
+        }
+        var keys = [base]
+        let noAge = stripAgeTokens(base)
+        if noAge != base, !keys.contains(noAge) {
+            keys.append(noAge)
+        }
+        for variant in [dropTrailingToken(noAge, "nu"), dropTrailingToken(base, "nu"),
+                        dropTrailingToken(noAge, "w"), dropTrailingToken(base, "w"),
+                        dropLeadingToken(noAge, "nu"), dropLeadingToken(base, "nu"),
+                        dropTrailingToken(noAge, "reserve"),
+                        dropTrailingToken(noAge, "reserves"),
+                        dropTrailingToken(noAge, "b")] {
+            if !variant.isEmpty, !keys.contains(variant) {
+                keys.append(variant)
+            }
+        }
+        return keys
+    }
+
+    /// Remove youth-age markers from a normalised key: a glued "u21"
+    /// token anywhere in the name, or a split "u" + "21" pair. The
+    /// digit guard keeps real names safe (e.g. "u cluj" is untouched).
+    private static func stripAgeTokens(_ key: String) -> String {
+        let toks = key.split(separator: " ").map(String.init)
+        var out: [String] = []
+        var i = 0
+        while i < toks.count {
+            let t = toks[i]
+            if t.count == 3, t.hasPrefix("u"),
+               t.dropFirst().allSatisfy({ $0.isNumber }) {
+                i += 1
+                continue
+            }
+            if t == "u", i + 1 < toks.count, toks[i + 1].count == 2,
+               toks[i + 1].allSatisfy({ $0.isNumber }) {
+                i += 2
+                continue
+            }
+            out.append(t)
+            i += 1
+        }
+        return out.joined(separator: " ")
+    }
+
+    private static func dropTrailingToken(_ key: String, _ token: String) -> String {
+        var toks = key.split(separator: " ").map(String.init)
+        if toks.last == token {
+            toks.removeLast()
+        }
+        return toks.joined(separator: " ")
+    }
+
+    private static func dropLeadingToken(_ key: String, _ token: String) -> String {
+        var toks = key.split(separator: " ").map(String.init)
+        if toks.first == token {
+            toks.removeFirst()
+        }
+        return toks.joined(separator: " ")
     }
 
     /// Split a CLEANED match title "A vs B" into its two team names
-    /// (port of Crests.teamsOf in the Android app).
+    /// (port of Crests.teamsOf in the Android app). Decoration segments
+    /// in "(...)" and "[...]" — "(BLV SAMURAI)", "[hls 2]" — are cut
+    /// wherever they sit before splitting, and a "• BLV …" tail is cut
+    /// from both sides; earlier, side B kept its "[flv]" tag and the
+    /// crest lookup missed on the polluted name.
     static func teams(ofCleanTitle title: String) -> (String, String)? {
         var s = title
-        if let r = s.range(of: "(") {
-            s = String(s[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        for pattern in [#"\[[^\]]*\]"#, #"\([^)]*\)"#] {
+            if let re = try? NSRegularExpression(pattern: pattern) {
+                s = re.stringByReplacingMatches(
+                    in: s, range: NSRange(s.startIndex..., in: s), withTemplate: " ")
+            }
         }
         guard let re = try? NSRegularExpression(pattern: "\\s+vs\\.?\\s+", options: [.caseInsensitive]),
               let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
               let full = Range(m.range, in: s)
         else { return nil }
-        let a = String(s[..<full.lowerBound]).trimmingCharacters(in: .whitespaces)
-        var b = String(s[full.upperBound...]).trimmingCharacters(in: .whitespaces)
-        if let d = b.range(of: "•") {
-            b = String(b[..<d.lowerBound]).trimmingCharacters(in: .whitespaces)
+        func side(_ raw: Substring) -> String {
+            var t = String(raw)
+            if let d = t.range(of: "•") {
+                t = String(t[..<d.lowerBound])
+            }
+            return t.trimmingCharacters(in: .whitespaces)
         }
+        let a = side(s[..<full.lowerBound])
+        let b = side(s[full.upperBound...])
         if a.isEmpty || b.isEmpty { return nil }
         return (a, b)
     }

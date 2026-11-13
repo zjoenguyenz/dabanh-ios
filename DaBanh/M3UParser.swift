@@ -21,8 +21,8 @@ enum M3UParser {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#EXTINF") {
                 pendingLogo = capture(logoRegex, in: line) ?? ""
-                pendingGroup = (capture(groupRegex, in: line) ?? "")
-                    .trimmingCharacters(in: .whitespaces)
+                pendingGroup = TitleEscapes.decode((capture(groupRegex, in: line) ?? "")
+                    .trimmingCharacters(in: .whitespaces))
                 pendingTitle = title(of: line)
             } else if line.hasPrefix("http"), let title = pendingTitle {
                 out.append(Channel(
@@ -48,6 +48,8 @@ enum M3UParser {
 
     /// Title = text after the first comma that sits outside quotes
     /// (Android titleOf). Falls back to "Kênh" when there is no such comma.
+    /// Literal "\uXXXX" escapes some sources ship un-decoded are decoded
+    /// here, at the single choke point every title flows through.
     static func title(of extinf: String) -> String {
         var inQuotes = false
         for (offset, ch) in extinf.enumerated() {
@@ -55,10 +57,63 @@ enum M3UParser {
                 inQuotes.toggle()
             } else if ch == "," && !inQuotes {
                 let idx = extinf.index(extinf.startIndex, offsetBy: offset + 1)
-                return String(extinf[idx...]).trimmingCharacters(in: .whitespaces)
+                return TitleEscapes.decode(String(extinf[idx...]).trimmingCharacters(in: .whitespaces))
             }
         }
         return "Kênh"
+    }
+}
+
+/// Some sources ship titles with literal JSON-style escapes still in
+/// them — "BLV C\U00D4Ng Ch\U1Ea4T" instead of "BLV Công Chật" (41 of
+/// 699 entries in the live list on 2026-11-13; the owner saw the raw
+/// escapes on his TV). Decode `\uXXXX` / `\UXXXX` sequences, combining
+/// UTF-16 surrogate pairs, and leave everything else untouched.
+enum TitleEscapes {
+
+    private static let regex = try! NSRegularExpression(pattern: #"\\[uU]([0-9a-fA-F]{4})"#)
+
+    static func decode(_ s: String) -> String {
+        guard s.contains("\\u") || s.contains("\\U") else { return s }
+        let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s))
+        guard !matches.isEmpty else { return s }
+        var out = ""
+        var cursor = s.startIndex
+        var pendingHigh: UInt32? = nil
+        func flushPending() {
+            if pendingHigh != nil {
+                out.append("\u{FFFD}")
+                pendingHigh = nil
+            }
+        }
+        for m in matches {
+            guard let r = Range(m.range, in: s),
+                  let hr = Range(m.range(at: 1), in: s),
+                  let v = UInt32(s[hr], radix: 16) else { continue }
+            if r.lowerBound > cursor {
+                flushPending()
+                out += s[cursor..<r.lowerBound]
+            }
+            cursor = r.upperBound
+            if (0xD800...0xDBFF).contains(v) {
+                flushPending()
+                pendingHigh = v
+            } else if (0xDC00...0xDFFF).contains(v), let hi = pendingHigh {
+                let cp = 0x10000 + ((hi - 0xD800) << 10) + (v - 0xDC00)
+                if let scalar = Unicode.Scalar(cp) {
+                    out.unicodeScalars.append(scalar)
+                }
+                pendingHigh = nil
+            } else {
+                flushPending()
+                if let scalar = Unicode.Scalar(v) {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        flushPending()
+        out += s[cursor...]
+        return out
     }
 }
 
