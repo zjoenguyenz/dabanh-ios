@@ -13,21 +13,26 @@ import Foundation
 ///   else the highest-priority league with a live match right now;
 ///   fall back to Ngoại Hạng Anh (Android setData).
 ///
-/// Two sources are fetched on every refresh:
-/// - Primary (thtt.pages.dev): the league tabs' list, as always.
-/// - Backup mirror (owner's GitHub repo, auto-refreshed every 30
-///   minutes): supplies the 🔥 Hot tab (entries whose group-title is
-///   "🔥 Hot" — matches the source sites themselves flag hot) and
-///   doubles as the whole-list fallback when the primary fails.
+/// Two sources are fetched on every refresh, GitHub first (owner's
+/// rule, 2026-11-13 — all of his apps read from his own GitHub):
+/// - Primary: the mirror in the owner's GitHub repo, whose workflow
+///   auto-scans and republishes the whole list (origin leagues +
+///   scraped extras + the 🔥 Hot group) every 30 minutes and keeps
+///   the last good file if the origin dies.
+/// - Fallback: the origin site (thtt.pages.dev), used only when
+///   GitHub cannot be reached at all. It has no 🔥 Hot group, so the
+///   Hot tab then keeps whatever it already had.
 @MainActor
 final class PlaylistStore: ObservableObject {
 
+    /// Origin site — since 2026-11-13 only the fallback, used when
+    /// the GitHub mirror cannot be reached at all.
     static let playlistURL = URL(string: "https://thtt.pages.dev/tttt.m3u")!
-    /// Backup mirror (owner's own GitHub repo, auto-refreshed every 30
-    /// minutes by a scheduled workflow). Used automatically whenever the
-    /// primary source fails or returns something that is not a usable
-    /// playlist — insurance against the primary link dying — and as the
-    /// standing source of the 🔥 Hot tab on every refresh.
+    /// The PRIMARY source (owner's own GitHub repo): a scheduled
+    /// workflow auto-scans and republishes the full playlist there
+    /// every 30 minutes, and a failed scan never overwrites the last
+    /// good file — so this link is both fresher and harder to kill
+    /// than the origin.
     static let backupPlaylistURL = URL(string: "https://raw.githubusercontent.com/zjoenguyenz/dabanh-playlist/main/tttt.m3u")!
     /// group-title the mirror's scraper gives its hot rail.
     static let hotGroupName = "🔥 Hot"
@@ -93,12 +98,19 @@ final class PlaylistStore: ObservableObject {
     // MARK: - Loading
 
     private func loadCache() {
+        // GitHub-first, same order as the live fetch: the mirror cache
+        // is the main list (leagues + Hot + extras in one file).
+        if let text = readCache(mirrorCacheFileURL) {
+            let parsed = M3UParser.parse(text)
+            if !parsed.isEmpty {
+                setData(parsed)
+                setHot(parsed)
+                return
+            }
+        }
         if let text = readCache(cacheFileURL) {
             let parsed = M3UParser.parse(text)
             if !parsed.isEmpty { setData(parsed) }
-        }
-        if let text = readCache(mirrorCacheFileURL) {
-            setHot(M3UParser.parse(text))
         }
     }
 
@@ -116,25 +128,21 @@ final class PlaylistStore: ObservableObject {
             isLoading = false
         }
         do {
-            let (data, parsed) = try await fetchPlaylist(from: Self.playlistURL)
-            try? data.write(to: cacheFileURL, options: .atomic)
+            // GitHub mirror first (the primary since 2026-11-13): one
+            // file carries the leagues, the extras and the Hot group.
+            let (data, parsed) = try await fetchPlaylist(from: Self.backupPlaylistURL)
+            try? data.write(to: mirrorCacheFileURL, options: .atomic)
             setData(parsed)
-            // The mirror also feeds the Hot tab on every refresh; its
-            // failure here must not fail the refresh — the tab just
-            // keeps whatever it already had.
-            if let (mdata, mparsed) = try? await fetchPlaylist(from: Self.backupPlaylistURL) {
-                try? mdata.write(to: mirrorCacheFileURL, options: .atomic)
-                setHot(mparsed)
-            }
+            setHot(parsed)
         } catch {
-            // Primary source failed: fall back to the mirror before
-            // giving up, and say so on screen when the mirror saves us.
+            // GitHub unreachable: fall back to the origin site before
+            // giving up, and say so on screen when it saves us. The
+            // origin has no Hot group, so the Hot tab keeps its list.
             do {
-                let (data, parsed) = try await fetchPlaylist(from: Self.backupPlaylistURL)
+                let (data, parsed) = try await fetchPlaylist(from: Self.playlistURL)
                 try? data.write(to: cacheFileURL, options: .atomic)
                 setData(parsed)
-                setHot(parsed)
-                statusMessage = "Nguồn chính lỗi — đang dùng nguồn dự phòng."
+                statusMessage = "Đang dùng nguồn dự phòng."
             } catch {
                 if !loadedOnce {
                     statusMessage = "Không tải được danh sách kênh. Kiểm tra mạng rồi thử lại."
