@@ -7,6 +7,12 @@ name: Build DaBanh IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: "What to build"
+        type: choice
+        options: [both, ios, tvos]
+        default: both
   push:
     branches: [main, dabanh-ios]
 
@@ -15,6 +21,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'push' || inputs.target == 'ios' || inputs.target == 'both'
     runs-on: macos-latest
     steps:
       - name: Check out source
@@ -69,6 +76,73 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -R "$PWD/build/app/DaBanh.app" Payload/
+          zip -qry "${NAME}.ipa" Payload
+          ls -lh "${NAME}.ipa"
+          shasum -a 256 "${NAME}.ipa"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.names.outputs.name }}
+          path: ${{ steps.names.outputs.name }}.ipa
+          if-no-files-found: error
+
+  build-tvos:
+    if: github.event_name == 'workflow_dispatch' && (inputs.target == 'tvos' || inputs.target == 'both')
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compute unique artifact name
+        id: names
+        run: |
+          DATE="$(date +%Y%m%d)"
+          NAME="DaBanhTV-ipa-run${{ github.run_number }}-${DATE}"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Artifact / IPA name: ${NAME}"
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project DaBanh.xcodeproj \
+            -scheme DaBanhTV \
+            -configuration Release \
+            -destination 'generic/platform=tvOS' \
+            CONFIGURATION_BUILD_DIR="$PWD/build/app-tv" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            build
+          test -d "$PWD/build/app-tv/DaBanhTV.app"
+          ls -la "$PWD/build/app-tv/DaBanhTV.app"
+
+      - name: Assemble IPA
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.names.outputs.name }}"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$PWD/build/app-tv/DaBanhTV.app" Payload/
           zip -qry "${NAME}.ipa" Payload
           ls -lh "${NAME}.ipa"
           shasum -a 256 "${NAME}.ipa"
