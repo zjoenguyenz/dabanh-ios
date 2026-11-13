@@ -39,6 +39,12 @@ final class PlaylistStore: ObservableObject {
     /// selectedLeague value meaning "the Hot tab" (league rawValues
     /// are 1, 2, 3, 4 and 9, so 0 is free).
     static let hotTabValue = 0
+    /// selectedLeague value meaning "the Trực tiếp (live) tab" — every
+    /// match in its live window right now, across all leagues and the
+    /// Hot group. Added at the owner's request (2026-11-13): browsing
+    /// league by league gave him no way to see at a glance what is
+    /// live. The iOS UI does not render this tab yet; the tvOS UI does.
+    static let liveTabValue = -1
     private static let autoRefreshInterval: TimeInterval = 15 * 60
 
     @Published private(set) var channels: [Channel] = []
@@ -70,6 +76,22 @@ final class PlaylistStore: ObservableObject {
 
     func channels(in league: League) -> [Channel] {
         channels.filter { $0.leagueRank == league.rawValue }
+    }
+
+    /// Every channel whose match is in its live window right now
+    /// (classifier bucket 0), merged from the league lists and the Hot
+    /// group, deduplicated by URL, in the standard live-first order.
+    var liveChannels: [Channel] {
+        let now = Date()
+        var seen = Set<String>()
+        var live: [Channel] = []
+        for channel in channels + hotChannels {
+            guard LeagueClassifier.bucket(of: channel, now: now) == 0 else { continue }
+            if seen.insert(channel.url).inserted {
+                live.append(channel)
+            }
+        }
+        return LeagueClassifier.sorted(live)
     }
 
     // MARK: - Lifecycle
@@ -192,6 +214,16 @@ final class PlaylistStore: ObservableObject {
     private func pickInitialTabIfNeeded() {
         guard !didPickInitialTab, loadedOnce else { return }
         didPickInitialTab = true
+        #if os(tvOS)
+        // tvOS opens on the Trực tiếp tab whenever anything is live
+        // (owner's request, 2026-11-13) — that is what he turns the
+        // TV on for. The iOS tab bar has no live tab, so iOS keeps
+        // the Hot-first rule below.
+        if !liveChannels.isEmpty {
+            selectedLeague = Self.liveTabValue
+            return
+        }
+        #endif
         let now = Date()
         if hotChannels.contains(where: { LeagueClassifier.bucket(of: $0, now: now) == 0 }) {
             selectedLeague = Self.hotTabValue

@@ -9,6 +9,13 @@ import SwiftUI
 /// Data: the owner's merged self-updating playlist (TVStore), groups
 /// in file order. Selecting a channel plays it in the shared native
 /// player, with same-name channels as automatic fallback sources.
+///
+/// v1.2 (owner, 2026-11-13): entries that are football matches (their
+/// titles carry a kickoff) wear a status chip — ● LIVE · minute,
+/// ⏰ kickoff while waiting, ↺ PHÁT LẠI for replay sources — the
+/// same live-vs-replay language as the Đá Banh app, so a match is
+/// never mistaken for a live broadcast. Plain TV channels stay
+/// unmarked: they are live broadcasts by nature.
 struct TVHomeView: View {
     @EnvironmentObject private var store: TVStore
     @Environment(\.scenePhase) private var scenePhase
@@ -104,7 +111,7 @@ struct TVHomeView: View {
                 .padding(.trailing, 14)
             }
             HStack {
-                Text("TV v1.1")
+                Text("TV v1.2")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.4))
                 Spacer()
@@ -249,10 +256,56 @@ struct TVHomeView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 208)
             .background(tileBackground(focused: focused))
+            .overlay(alignment: .topLeading) {
+                statusChip(channel)
+                    .padding(12)
+            }
         }
         .buttonStyle(.card)
         .focused($focusedChannel, equals: channel.id)
     }
+
+    /// Status chip for match entries only (kickoff-bearing titles):
+    /// red ● LIVE · minute while the match is in its live window,
+    /// amber ⏰ kickoff while it is still to come, grey ↺ PHÁT LẠI
+    /// once its window has passed (a replay/highlight source).
+    /// Plain channels get no chip at all.
+    @ViewBuilder
+    private func statusChip(_ channel: Channel) -> some View {
+        if let kickoff = channel.kickoff {
+            let now = Date()
+            let bucket = LeagueClassifier.bucket(of: channel, now: now)
+            Group {
+                if bucket == 0 {
+                    let mins = max(1, Int(now.timeIntervalSince(kickoff) / 60))
+                    chip(text: "● LIVE · \(mins)'",
+                         color: Color(red: 1.0, green: 0.30, blue: 0.25))
+                } else if kickoff > now {
+                    chip(text: "⏰ " + Self.timeFormatter.string(from: kickoff),
+                         color: Color(red: 1.0, green: 0.78, blue: 0.35))
+                } else {
+                    chip(text: "↺ PHÁT LẠI",
+                         color: .white.opacity(0.65))
+                }
+            }
+        }
+    }
+
+    private func chip(text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 17, weight: .heavy))
+            .foregroundStyle(color)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.black.opacity(0.55)))
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm · dd/MM"
+        f.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
+        return f
+    }()
 
     private func tileBackground(focused: Bool) -> some View {
         RoundedRectangle(cornerRadius: 18)

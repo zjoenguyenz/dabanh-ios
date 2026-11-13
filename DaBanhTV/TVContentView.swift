@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Đá Banh TV home v1.1 — the finished design, ported from the Sony
+/// Đá Banh TV home v1.2 — the finished design, ported from the Sony
 /// Android v2.0 the owner approved (which follows the Phim4K language):
 /// deep-teal gradient, a hero panel whose content follows the focused
 /// card (status badge, big cleaned title, source count, team crests
@@ -9,6 +9,14 @@ import SwiftUI
 /// teams are known (Crests), else the channel logo. Football identity
 /// only — deliberately unlike the TV app (different layout, palette
 /// accents and typography) so the two are never confused.
+///
+/// v1.2 (owner's notes on v1.1, 2026-11-13): a 🔴 Trực tiếp tab leads
+/// the tab bar (every match live right now; the app also opens on it
+/// when anything is live), the Làm mới button moved INTO the tab row
+/// (in the header row above it was spatially unreachable by remote
+/// focus), and EVERY card carries a status chip — LIVE · minute,
+/// ⏰ kickoff while waiting, ↺ PHÁT LẠI for replay sources, 📺 KÊNH
+/// for timeless channels — so live vs replay is never a guess.
 struct TVContentView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.scenePhase) private var scenePhase
@@ -27,9 +35,13 @@ struct TVContentView: View {
     }
 
     private var currentList: [Channel] {
-        store.selectedLeague == PlaylistStore.hotTabValue
-            ? store.hotChannels
-            : store.channels(in: League(rawValue: store.selectedLeague) ?? .england)
+        if store.selectedLeague == PlaylistStore.liveTabValue {
+            return store.liveChannels
+        }
+        if store.selectedLeague == PlaylistStore.hotTabValue {
+            return store.hotChannels
+        }
+        return store.channels(in: League(rawValue: store.selectedLeague) ?? .england)
     }
 
     var body: some View {
@@ -100,41 +112,46 @@ struct TVContentView: View {
                     .frame(width: 120, height: 6)
             }
             Spacer()
-            HStack(spacing: 22) {
-                Button {
-                    Task { await store.refresh() }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "arrow.clockwise")
-                        Text("Làm mới")
-                    }
-                    .font(.system(size: 24, weight: .medium))
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 12)
-                }
-                .buttonStyle(.card)
-                .disabled(store.isLoading)
-                Text(countText)
-                    .font(.system(size: 24))
-                    .foregroundStyle(.white.opacity(0.75))
-            }
-            .padding(.top, 10)
         }
     }
 
     private var countText: String {
-        store.selectedLeague == PlaylistStore.hotTabValue
-            ? "\(store.hotChannels.count) trận hot"
-            : "\(currentList.count) kênh"
+        if store.selectedLeague == PlaylistStore.liveTabValue {
+            return "\(store.liveChannels.count) trận đang đá"
+        }
+        if store.selectedLeague == PlaylistStore.hotTabValue {
+            return "\(store.hotChannels.count) trận hot"
+        }
+        return "\(currentList.count) kênh"
     }
 
     private var tabBar: some View {
         HStack(spacing: 16) {
+            tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
             tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
             ForEach(League.allCases) { league in
                 tabPill(title: league.name, value: league.rawValue)
             }
             Spacer()
+            Text(countText)
+                .font(.system(size: 24))
+                .foregroundStyle(.white.opacity(0.75))
+            // Làm mới lives in the tab row on purpose: as a lone
+            // button in the header row above, tvOS spatial focus
+            // could not reach it from the pills (owner, v1.1).
+            Button {
+                Task { await store.refresh() }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.clockwise")
+                    Text("Làm mới")
+                }
+                .font(.system(size: 24, weight: .medium))
+                .padding(.horizontal, 26)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.card)
+            .disabled(store.isLoading)
         }
     }
 
@@ -153,6 +170,16 @@ struct TVContentView: View {
         .buttonStyle(.card)
     }
 
+    private var emptyText: String {
+        if store.selectedLeague == PlaylistStore.liveTabValue {
+            return "Hiện không có trận nào đang đá. Các trận sắp đá nằm ở tab 🔥 Hot và các tab giải."
+        }
+        if store.selectedLeague == PlaylistStore.hotTabValue {
+            return "Chưa có trận hot nào. Trang nguồn gắn cờ hot cho trận nào thì trận đó hiện ở đây."
+        }
+        return "Chưa có trận nào trong mục này."
+    }
+
     // MARK: - Content
 
     @ViewBuilder
@@ -166,9 +193,7 @@ struct TVContentView: View {
                     .foregroundStyle(.white)
                     .tint(.white)
             } else {
-                Text(store.selectedLeague == PlaylistStore.hotTabValue
-                     ? "Chưa có trận hot nào. Trang nguồn gắn cờ hot cho trận nào thì trận đó hiện ở đây."
-                     : "Chưa có trận nào trong mục này.")
+                Text(emptyText)
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.7))
             }
@@ -185,17 +210,17 @@ struct TVContentView: View {
                 VStack(alignment: .leading, spacing: 30) {
                     heroPanel(hero ?? list.first!)
                     if !live.isEmpty {
-                        railSection("🔴  ĐANG ĐÁ", live, live: true)
+                        railSection("🔴  ĐANG ĐÁ", live)
                     }
                     if !upcoming.isEmpty {
-                        railSection("⏰  SẮP ĐÁ", upcoming, live: false)
+                        railSection("⏰  SẮP ĐÁ", upcoming)
                     }
                     if !rest.isEmpty {
-                        railSection("📺  KHÁC", rest, live: false)
+                        railSection("📺  KHÁC", rest)
                     }
                     HStack {
                         Spacer()
-                        Text("Đá Banh TV v1.1")
+                        Text("Đá Banh TV v1.2")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
@@ -263,9 +288,12 @@ struct TVContentView: View {
             let mins = max(1, Int(now.timeIntervalSince(ch.kickoff ?? now) / 60))
             text = "🔴 ĐANG ĐÁ · \(mins)'"
             color = Self.liveRed
-        } else if let kickoff = ch.kickoff {
+        } else if let kickoff = ch.kickoff, kickoff > now {
             text = "⏰ " + Self.timeFormatter.string(from: kickoff)
             color = Self.tealFill
+        } else if ch.kickoff != nil {
+            text = "↺ PHÁT LẠI"
+            color = Color(red: 0.38, green: 0.38, blue: 0.42)
         } else {
             text = "📺 " + ch.group
             color = Self.tealFill
@@ -323,7 +351,7 @@ struct TVContentView: View {
 
     // MARK: - Rails and cards
 
-    private func railSection(_ title: String, _ items: [Channel], live: Bool) -> some View {
+    private func railSection(_ title: String, _ items: [Channel]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 30, weight: .bold))
@@ -331,7 +359,7 @@ struct TVContentView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 28) {
                     ForEach(items) { ch in
-                        matchCard(ch, live: live)
+                        matchCard(ch)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -340,7 +368,7 @@ struct TVContentView: View {
         }
     }
 
-    private func matchCard(_ ch: Channel, live: Bool) -> some View {
+    private func matchCard(_ ch: Channel) -> some View {
         let focused = focusedID == ch.id
         return Button {
             play(ch)
@@ -349,16 +377,7 @@ struct TVContentView: View {
                 HStack(alignment: .center, spacing: 10) {
                     crestRow(ch)
                     Spacer()
-                    if live {
-                        HStack(spacing: 7) {
-                            Circle()
-                                .fill(Self.liveRed)
-                                .frame(width: 13, height: 13)
-                            Text("LIVE")
-                                .font(.system(size: 19, weight: .heavy))
-                                .foregroundStyle(Self.liveRed)
-                        }
-                    }
+                    statusChip(ch)
                 }
                 Text(MatchTitle.clean(ch.title))
                     .font(.system(size: 26, weight: .semibold))
@@ -378,6 +397,40 @@ struct TVContentView: View {
         }
         .buttonStyle(.card)
         .focused($focusedID, equals: ch.id)
+    }
+
+    /// The status chip every card carries (owner, 2026-11-13: he must
+    /// be able to tell at a glance whether a card is a live match, a
+    /// match still waiting for kickoff, a replay source, or a plain
+    /// channel): red LIVE · minute / amber ⏰ kickoff / grey ↺ PHÁT
+    /// LẠI / slate 📺 KÊNH.
+    @ViewBuilder
+    private func statusChip(_ ch: Channel) -> some View {
+        let now = Date()
+        let bucket = LeagueClassifier.bucket(of: ch, now: now)
+        if bucket == 0 {
+            let mins = max(1, Int(now.timeIntervalSince(ch.kickoff ?? now) / 60))
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(Self.liveRed)
+                    .frame(width: 13, height: 13)
+                Text("LIVE · \(mins)'")
+                    .font(.system(size: 19, weight: .heavy))
+                    .foregroundStyle(Self.liveRed)
+            }
+        } else if let kickoff = ch.kickoff, kickoff > now {
+            Text("⏰ " + Self.timeFormatter.string(from: kickoff))
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.35))
+        } else if ch.kickoff != nil {
+            Text("↺ PHÁT LẠI")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+        } else {
+            Text("📺 KÊNH")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+        }
     }
 
     private func cardBackground(focused: Bool) -> some View {
