@@ -2,19 +2,57 @@ import Foundation
 
 /// Club + national-team crests (TheSportsDB badges, every URL verified
 /// live on 2026-11-13), shared by the iOS and tvOS apps. The
-/// name→badge-URL map ships inside the app (`crests.json` in the bundle,
-/// 301 normalized keys) — no runtime API calls, no key. Port of the
-/// Android app's Crests.java; the master copy is `crests/crests.json`
-/// in the repo and generates both.
+/// name→badge-URL map ships inside the app (`crests.json` in the
+/// bundle) as the offline baseline, and the store refreshes it from
+/// the owner's GitHub mirror at launch — a team missing from the map
+/// (Moldova and Kazakhstan on 2026-11-13) is then fixed by pushing
+/// one JSON file, never by rebuilding the app. Port of the Android
+/// app's Crests.java; the master copy is `crests/crests.json` in the
+/// repo and generates both.
 enum Crests {
 
-    private static let map: [String: String] = {
+    /// The live-updating copy, republished with the playlist mirror.
+    static let remoteURL = URL(string: "https://raw.githubusercontent.com/zjoenguyenz/dabanh-playlist/main/crests.json")!
+
+    private static var cachedRemoteURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("crests-remote.json")
+    }
+
+    private static func decode(_ data: Data) -> [String: String]? {
+        guard let dict = try? JSONDecoder().decode([String: String].self, from: data),
+              dict.count >= 100
+        else { return nil }
+        return dict
+    }
+
+    private static func loadMap() -> [String: String] {
+        if let data = try? Data(contentsOf: cachedRemoteURL),
+           let dict = decode(data) {
+            return dict
+        }
         guard let url = Bundle.main.url(forResource: "crests", withExtension: "json"),
               let data = try? Data(contentsOf: url),
-              let dict = try? JSONDecoder().decode([String: String].self, from: data)
+              let dict = decode(data)
         else { return [:] }
         return dict
-    }()
+    }
+
+    private(set) static var map: [String: String] = loadMap()
+
+    /// Fetch the mirror's crests.json; when it differs from what the
+    /// app is using, cache it for the next launch and swap it in for
+    /// this one. Returns true when the map changed.
+    @MainActor
+    static func refreshRemote() async -> Bool {
+        guard let (data, _) = try? await URLSession.shared.data(from: remoteURL),
+              let dict = decode(data),
+              dict != map
+        else { return false }
+        try? data.write(to: cachedRemoteURL, options: .atomic)
+        map = dict
+        return true
+    }
 
     /// Lowercase, diacritics stripped (đ→d), only [a-z0-9 ] kept, spaces
     /// collapsed — must produce exactly the keys the generator wrote
@@ -38,8 +76,15 @@ enum Crests {
     }
 
     /// Badge URL for one team name as written in a match title.
+    /// Vietnamese listings often prefix national teams with "ĐTQG"
+    /// (đội tuyển quốc gia) — strip that prefix before lookup, same
+    /// rule as the Android Crests.of.
     static func url(forTeam name: String) -> URL? {
-        guard let s = map[norm(name)] else { return nil }
+        var key = norm(name)
+        if key.hasPrefix("dtqg ") {
+            key = String(key.dropFirst(5))
+        }
+        guard let s = map[key] else { return nil }
         return URL(string: s)
     }
 

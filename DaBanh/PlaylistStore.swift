@@ -49,6 +49,9 @@ final class PlaylistStore: ObservableObject {
 
     @Published private(set) var channels: [Channel] = []
     @Published private(set) var hotChannels: [Channel] = []
+    /// Bumped when the crest map is swapped for a fresher remote copy,
+    /// so crest-reading views re-render with the new badges.
+    @Published private(set) var crestsRevision = 0
     @Published private(set) var isLoading = false
     @Published var statusMessage: String?
     @Published var selectedLeague: Int = League.england.rawValue
@@ -101,6 +104,11 @@ final class PlaylistStore: ObservableObject {
     func start() async {
         loadCache()
         await refresh()
+        // Crest coverage updates ride the same GitHub mirror as the
+        // playlist: fetch once per launch, swap in if fresher.
+        Task {
+            if await Crests.refreshRemote() { crestsRevision += 1 }
+        }
         guard autoRefreshTask == nil else { return }
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
