@@ -1,13 +1,14 @@
 {
-  "images" : [
+  "images": [
     {
-      "filename" : "front-1280.png",
-      "idiom" : "tv",
-      "scale" : "1x"
+      "filename": "front-1280.png",
+      "idiom": "tv",
+      "scale": "1x",
+      "size": "1280x768"
     }
   ],
-  "info" : {
-    "author" : "xcode",
-    "version" : 1
+  "info": {
+    "author": "xcode",
+    "version": 1
   }
 }
