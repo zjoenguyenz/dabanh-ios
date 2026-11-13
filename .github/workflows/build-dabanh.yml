@@ -13,8 +13,6 @@ on:
         type: choice
         options: [both, ios, tvos]
         default: both
-  push:
-    branches: [main, dabanh-ios]
 
 permissions:
   contents: read
