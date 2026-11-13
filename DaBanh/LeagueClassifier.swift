@@ -10,7 +10,7 @@ import Foundation
 ///   (The Android source also defines LG_GER and LG_VIE keyword lists but
 ///   leagueOf never consults them — German and Vietnamese matches fall into
 ///   Khác there, and they do here too. See README.)
-/// - Sort buckets: 0 = live window (kickoff −10 min … +140 min),
+/// - Sort buckets: 0 = live window (kickoff −10 min … +125 min),
 ///   1 = upcoming match in a priority league, 2 = upcoming match in Khác,
 ///   3 = everything else (no kickoff, or long finished).
 /// - Inside a bucket: football (⚽ / no sport emoji) before other sports,
@@ -40,7 +40,7 @@ enum LeagueClassifier {
     static func bucket(of channel: Channel, now: Date) -> Int {
         guard let kickoff = channel.kickoff else { return 3 }
         let sinceKick = now.timeIntervalSince(kickoff) // seconds since kickoff
-        if sinceKick >= -10 * 60 && sinceKick <= 140 * 60 { return 0 }
+        if sinceKick >= -10 * 60 && sinceKick <= 125 * 60 { return 0 }
         if sinceKick < -10 * 60 { return channel.leagueRank < 9 ? 1 : 2 }
         return 3
     }
