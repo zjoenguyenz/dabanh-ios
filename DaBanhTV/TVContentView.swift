@@ -220,7 +220,7 @@ struct TVContentView: View {
                     }
                     HStack {
                         Spacer()
-                        Text("Đá Banh TV v1.2.2")
+                        Text("Đá Banh TV v1.2.3")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
