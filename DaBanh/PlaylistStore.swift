@@ -46,6 +46,10 @@ final class PlaylistStore: ObservableObject {
     /// live. The iOS UI does not render this tab yet; the tvOS UI does.
     static let liveTabValue = -1
     private static let autoRefreshInterval: TimeInterval = 15 * 60
+    /// A mirror whose Updated stamp is older than this is treated as
+    /// stale even when reachable (its workflow republishes every
+    /// 30 minutes when healthy).
+    private static let mirrorStaleThreshold: TimeInterval = 45 * 60
 
     @Published private(set) var channels: [Channel] = []
     @Published private(set) var hotChannels: [Channel] = []
@@ -195,16 +199,32 @@ final class PlaylistStore: ObservableObject {
         do {
             // GitHub mirror first (the primary since 2026-11-13): one
             // file carries the leagues, the extras and the Hot group.
-            let (data, parsed) = try await fetchPlaylist(from: Self.backupPlaylistURL)
-            try? data.write(to: mirrorCacheFileURL, options: .atomic)
-            setData(parsed)
-            setHot(parsed)
+            let (data, parsed, text) = try await fetchPlaylist(from: Self.backupPlaylistURL)
+            // Freshness gate (root cause measured 2026-11-13): a
+            // REACHABLE mirror can still be hours stale — its stamp
+            // read 03:08 VN while the origin already carried 06:37 —
+            // and stale means screens full of long-expired signed
+            // links. When the stamp is older than the threshold,
+            // prefer a fresher origin for the main list; Hot still
+            // comes from the mirror (the origin has no Hot group).
+            if let stamp = UpdatedStamp.parse(text),
+               Date().timeIntervalSince(stamp) > Self.mirrorStaleThreshold,
+               let (odata, oparsed, _) = try? await fetchPlaylist(from: Self.playlistURL) {
+                try? odata.write(to: cacheFileURL, options: .atomic)
+                setData(oparsed)
+                setHot(parsed)
+                statusMessage = "Gương đang chậm — đã dùng nguồn gốc mới hơn."
+            } else {
+                try? data.write(to: mirrorCacheFileURL, options: .atomic)
+                setData(parsed)
+                setHot(parsed)
+            }
         } catch {
             // GitHub unreachable: fall back to the origin site before
             // giving up, and say so on screen when it saves us. The
             // origin has no Hot group, so the Hot tab keeps its list.
             do {
-                let (data, parsed) = try await fetchPlaylist(from: Self.playlistURL)
+                let (data, parsed, _) = try await fetchPlaylist(from: Self.playlistURL)
                 try? data.write(to: cacheFileURL, options: .atomic)
                 setData(parsed)
                 statusMessage = "Đang dùng nguồn dự phòng."
@@ -223,7 +243,7 @@ final class PlaylistStore: ObservableObject {
     /// One playlist fetch + validation: the text must decode and parse
     /// to at least one channel, otherwise the source counts as failed
     /// (an error page or an empty file must never replace a good list).
-    private func fetchPlaylist(from url: URL) async throws -> (Data, [Channel]) {
+    private func fetchPlaylist(from url: URL) async throws -> (Data, [Channel], String) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         // Same user agent the Android app sends; some CDNs expect it.
@@ -234,7 +254,7 @@ final class PlaylistStore: ObservableObject {
         }
         let parsed = M3UParser.parse(text)
         if parsed.isEmpty { throw URLError(.zeroByteResource) }
-        return (data, parsed)
+        return (data, parsed, text)
     }
 
     private func setData(_ parsed: [Channel]) {
@@ -457,5 +477,42 @@ private enum LinkProbe {
         } catch {
             return !mustBeServing
         }
+    }
+}
+
+/// The playlist files carry their generation time as a first
+/// pseudo-entry ("Updated DD/MM HH:MM", Vietnam time). Parsed with
+/// the same calendar rules as kickoffs; a stamp slightly in the
+/// future (clock skew) reads as fresh, no stamp reads as unknown.
+private enum UpdatedStamp {
+
+    private static let regex = try! NSRegularExpression(
+        pattern: #"Updated\s+(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})"#)
+
+    static func parse(_ text: String) -> Date? {
+        let head = String(text.prefix(512))
+        let range = NSRange(head.startIndex..., in: head)
+        guard let m = regex.firstMatch(in: head, range: range) else { return nil }
+        func intAt(_ i: Int) -> Int? {
+            guard let r = Range(m.range(at: i), in: head) else { return nil }
+            return Int(head[r])
+        }
+        guard let day = intAt(1), let month = intAt(2),
+              let hour = intAt(3), let minute = intAt(4) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+        let now = Date()
+        var comps = DateComponents()
+        comps.year = calendar.component(.year, from: now)
+        comps.month = month
+        comps.day = day
+        comps.hour = hour
+        comps.minute = minute
+        comps.second = 0
+        guard var date = calendar.date(from: comps) else { return nil }
+        if date.timeIntervalSince(now) < -30 * 24 * 3600 {
+            date = date.addingTimeInterval(365 * 24 * 3600)
+        }
+        return date
     }
 }
