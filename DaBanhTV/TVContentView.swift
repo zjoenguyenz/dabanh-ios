@@ -208,9 +208,13 @@ struct TVContentView: View {
                 return b == 1 || b == 2
             }
             let rest = list.filter { LeagueClassifier.bucket(of: $0, now: now) == 3 }
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 30) {
-                    heroPanel(hero ?? list.first!)
+            // Hero stays FIXED above the rails (owner ruling 2026-11-13 —
+            // same defect as the Sony build): inside the ScrollView it got
+            // half-clipped whenever focus dived down into the rails.
+            VStack(alignment: .leading, spacing: 22) {
+                heroPanel(hero ?? list.first!)
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 30) {
                     if !live.isEmpty {
                         railSection("🔴  ĐANG ĐÁ", live)
                     }
@@ -226,9 +230,10 @@ struct TVContentView: View {
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
+                    }
+                    .padding(.top, 2)
+                    .padding(.bottom, 10)
                 }
-                .padding(.top, 6)
-                .padding(.bottom, 10)
             }
         }
     }
