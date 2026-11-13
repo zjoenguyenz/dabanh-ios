@@ -17,6 +17,8 @@ enum M3UParser {
         var pendingTitle: String? = nil
         var pendingLogo = ""
         var pendingGroup = ""
+        var pendingReferrer = ""
+        var pendingUserAgent = ""
         for rawLine in text.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#EXTINF") {
@@ -24,6 +26,14 @@ enum M3UParser {
                 pendingGroup = TitleEscapes.decode((capture(groupRegex, in: line) ?? "")
                     .trimmingCharacters(in: .whitespaces))
                 pendingTitle = title(of: line)
+                pendingReferrer = ""
+                pendingUserAgent = ""
+            } else if line.hasPrefix("#EXTVLCOPT:http-referrer=") {
+                pendingReferrer = String(line.dropFirst("#EXTVLCOPT:http-referrer=".count))
+                    .trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("#EXTVLCOPT:http-user-agent=") {
+                pendingUserAgent = String(line.dropFirst("#EXTVLCOPT:http-user-agent=".count))
+                    .trimmingCharacters(in: .whitespaces)
             } else if line.hasPrefix("http"), let title = pendingTitle {
                 out.append(Channel(
                     title: title,
@@ -31,7 +41,9 @@ enum M3UParser {
                     group: pendingGroup.isEmpty ? "Kênh" : pendingGroup,
                     url: line,
                     kickoff: KickoffParser.parse(from: title),
-                    leagueRank: LeagueClassifier.leagueRank(of: title)
+                    leagueRank: LeagueClassifier.leagueRank(of: title),
+                    referrer: pendingReferrer,
+                    userAgent: pendingUserAgent
                 ))
                 pendingTitle = nil
             }

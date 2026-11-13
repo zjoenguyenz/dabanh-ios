@@ -13,14 +13,24 @@ struct Channel: Identifiable, Equatable {
     let kickoff: Date?
     /// 1 = Ngoại Hạng Anh, 2 = Tây Ban Nha, 3 = Ý, 4 = Pháp, 9 = Khác.
     let leagueRank: Int
+    /// Playback headers the entry itself declares via #EXTVLCOPT
+    /// (http-referrer / http-user-agent). Some CDNs refuse the stream
+    /// without them; empty means "send nothing extra" — a blanket
+    /// Referer is never invented, because probing on Android showed an
+    /// uninvited Referer turns other hosts' segment fetches into 403.
+    let referrer: String
+    let userAgent: String
 
-    init(title: String, logo: String, group: String, url: String, kickoff: Date?, leagueRank: Int) {
+    init(title: String, logo: String, group: String, url: String, kickoff: Date?, leagueRank: Int,
+         referrer: String = "", userAgent: String = "") {
         self.title = title
         self.logo = logo
         self.group = group
         self.url = url
         self.kickoff = kickoff
         self.leagueRank = leagueRank
+        self.referrer = referrer
+        self.userAgent = userAgent
     }
 
     var streamURL: URL? { URL(string: url) }

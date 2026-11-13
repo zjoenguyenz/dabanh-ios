@@ -49,10 +49,25 @@ final class PlaylistStore: ObservableObject {
 
     @Published private(set) var channels: [Channel] = []
     @Published private(set) var hotChannels: [Channel] = []
+
+    /// Unfiltered lists as parsed. The published lists above are these
+    /// minus proven-dead links and minus .flv entries (AVPlayer cannot
+    /// play FLV at all, so on Apple platforms they are dead weight;
+    /// the Android app keeps them — ExoPlayer plays FLV fine).
+    private var rawChannels: [Channel] = []
+    private var rawHotChannels: [Channel] = []
+    /// URLs proven unplayable FROM THIS DEVICE (see validateLinks).
+    /// Persisted so a cold start opens already clean, and re-probed
+    /// after every refresh so a revived link returns on its own.
+    private var invalidURLs: Set<String> = []
+    private var validating = false
     /// Bumped when the crest map is swapped for a fresher remote copy,
     /// so crest-reading views re-render with the new badges.
     @Published private(set) var crestsRevision = 0
     @Published private(set) var isLoading = false
+    /// True while a link-validation pass runs (automatic or manual);
+    /// the "Kiểm tra link" button spins on it.
+    @Published private(set) var isValidating = false
     @Published var statusMessage: String?
     @Published var selectedLeague: Int = League.england.rawValue
 
@@ -70,6 +85,24 @@ final class PlaylistStore: ObservableObject {
     private var mirrorCacheFileURL: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("mirror.m3u")
+    }
+
+    private var invalidFileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("invalid-urls.json")
+    }
+
+    private func loadInvalidSet() {
+        guard let data = try? Data(contentsOf: invalidFileURL),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return }
+        invalidURLs = Set(list)
+    }
+
+    private func saveInvalidSet() {
+        let list = Array(invalidURLs)
+        if let data = try? JSONEncoder().encode(list) {
+            try? data.write(to: invalidFileURL, options: .atomic)
+        }
     }
 
     var isStale: Bool {
@@ -103,6 +136,7 @@ final class PlaylistStore: ObservableObject {
     /// then the 15-minute auto-refresh loop for as long as the app lives.
     func start() async {
         loadCache()
+        scheduleValidation()
         await refresh()
         // Crest coverage updates ride the same GitHub mirror as the
         // playlist: fetch once per launch, swap in if fresher.
@@ -128,6 +162,7 @@ final class PlaylistStore: ObservableObject {
     // MARK: - Loading
 
     private func loadCache() {
+        loadInvalidSet()
         // GitHub-first, same order as the live fetch: the mirror cache
         // is the main list (leagues + Hot + extras in one file).
         if let text = readCache(mirrorCacheFileURL) {
@@ -182,6 +217,7 @@ final class PlaylistStore: ObservableObject {
             }
         }
         pickInitialTabIfNeeded()
+        scheduleValidation()
     }
 
     /// One playlist fetch + validation: the text must decode and parse
@@ -202,7 +238,8 @@ final class PlaylistStore: ObservableObject {
     }
 
     private func setData(_ parsed: [Channel]) {
-        channels = LeagueClassifier.sorted(parsed)
+        rawChannels = parsed
+        publishFiltered()
         lastFetch = Date()
         loadedOnce = true
         statusMessage = nil
@@ -211,8 +248,44 @@ final class PlaylistStore: ObservableObject {
     /// The Hot tab's list: the mirror's "🔥 Hot" group only, put
     /// through the same live-first sorting as every other list.
     private func setHot(_ parsed: [Channel]) {
-        hotChannels = LeagueClassifier.sorted(
-            parsed.filter { $0.group == Self.hotGroupName })
+        rawHotChannels = parsed.filter { $0.group == Self.hotGroupName }
+        publishFiltered()
+    }
+
+    /// The single gate every display list flows through: raw entries
+    /// minus proven-dead links minus .flv (unplayable on AVPlayer).
+    private func publishFiltered() {
+        channels = LeagueClassifier.sorted(rawChannels.filter(isDisplayable))
+        hotChannels = LeagueClassifier.sorted(rawHotChannels.filter(isDisplayable))
+    }
+
+    private func isDisplayable(_ ch: Channel) -> Bool {
+        if invalidURLs.contains(ch.url) { return false }
+        return !Self.isFLV(ch.url)
+    }
+
+    static func isFLV(_ url: String) -> Bool {
+        let path = url.split(separator: "?").first.map(String.init) ?? url
+        return path.lowercased().hasSuffix(".flv")
+    }
+
+    /// The player's fallback ladder for a tapped channel: every
+    /// displayable channel carrying the same match, tapped one first
+    /// (the tvOS UI builds the same ladder; the store owns it so the
+    /// iOS player gets it too).
+    func sources(for ch: Channel) -> [Channel] {
+        let key = MatchTitle.fixtureKey(ch.title)
+        if key.isEmpty { return [ch] }
+        var seen = Set<String>()
+        var out: [Channel] = []
+        for candidate in [ch] + channels + hotChannels {
+            if MatchTitle.fixtureKey(candidate.title) == key,
+               seen.insert(candidate.url).inserted {
+                out.append(candidate)
+                if out.count >= 8 { break }
+            }
+        }
+        return out.isEmpty ? [ch] : out
     }
 
     /// First load only: land on the Hot tab when it has a live match,
@@ -243,5 +316,146 @@ final class PlaylistStore: ObservableObject {
             if hasLive { pick = league.rawValue; break }
         }
         selectedLeague = pick
+    }
+
+    // MARK: - Link validation (owner's request, 2026-11-13)
+
+    /// The device's own vantage point is the only one that shares the
+    /// owner's network and tunnel, so the app itself re-checks the
+    /// list: after every load it probes each link in the background
+    /// and hides the ones that are definitively unplayable HERE, so
+    /// dead links never reach the match screens. The mirror repo runs
+    /// the vantage-independent half of the same job (404s + filler).
+
+    private func scheduleValidation() {
+        Task { await validateLinks(reset: false) }
+    }
+
+    /// The "Kiểm tra link" button: force-fetch the newest playlist,
+    /// then re-probe EVERYTHING from scratch (the hidden set is
+    /// cleared first, so a link that died under a dead tunnel gets a
+    /// fair second chance) and republish the match screens.
+    func refreshAndValidate() async {
+        await refresh()
+        // refresh() schedules its own background pass; wait it out so
+        // the from-scratch pass below is the one that runs.
+        while validating {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        await validateLinks(reset: true)
+        let hidden = invalidURLs.count
+        statusMessage = hidden > 0
+            ? "Đã kiểm tra xong: ẩn \(hidden) link chết."
+            : "Đã kiểm tra xong: không có link chết."
+    }
+
+    private func validateLinks(reset: Bool) async {
+        if validating { return }
+        validating = true
+        isValidating = true
+        defer {
+            validating = false
+            isValidating = false
+        }
+        if reset {
+            invalidURLs = []
+            saveInvalidSet()
+            publishFiltered()
+        }
+        let now = Date()
+        var seen = Set<String>()
+        var pool: [Channel] = []
+        for ch in rawChannels + rawHotChannels where seen.insert(ch.url).inserted {
+            if !Self.isFLV(ch.url) { pool.append(ch) }
+        }
+        // Live-window and always-on channels first — they are what
+        // the home screen leads with; the rest follow in a second wave.
+        let liveWave = pool.filter { isLiveScope($0, now: now) }
+        let restWave = pool.filter { !isLiveScope($0, now: now) }
+        await probeWave(liveWave, now: now)
+        await probeWave(restWave, now: now)
+    }
+
+    /// "Should be serving right now": inside the live window, or a
+    /// channel with no kickoff at all (24/7 streams).
+    private func isLiveScope(_ ch: Channel, now: Date) -> Bool {
+        ch.kickoff == nil || LeagueClassifier.bucket(of: ch, now: now) == 0
+    }
+
+    private func probeWave(_ wave: [Channel], now: Date) async {
+        if wave.isEmpty { return }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        let session = URLSession(configuration: config)
+        var validNow: Set<String> = []
+        var invalidNow: Set<String> = []
+        let chunkSize = 20
+        var idx = 0
+        while idx < wave.count {
+            let chunk = Array(wave[idx..<min(idx + chunkSize, wave.count)])
+            let results = await withTaskGroup(of: (String, Bool).self) { group in
+                for ch in chunk {
+                    let scope = isLiveScope(ch, now: now)
+                    group.addTask {
+                        (ch.url, await LinkProbe.isValid(ch, mustBeServing: scope, session: session))
+                    }
+                }
+                var acc: [(String, Bool)] = []
+                for await r in group { acc.append(r) }
+                return acc
+            }
+            for (url, ok) in results {
+                if ok { validNow.insert(url) } else { invalidNow.insert(url) }
+            }
+            idx += chunkSize
+        }
+        let before = invalidURLs
+        invalidURLs.subtract(validNow)
+        invalidURLs.formUnion(invalidNow)
+        if invalidURLs != before {
+            saveInvalidSet()
+            publishFiltered()
+        }
+    }
+}
+
+/// One-link probe. Definitive failure = HTTP 404/410, or HTTP 200 with
+/// a body that is not a stream (empty, or an .m3u8 without #EXTM3U).
+/// Other HTTP statuses keep the link (403 may be the tunnel being off
+/// right now; 5xx is transient). A network-level failure (connect,
+/// timeout) counts only when the channel should be serving right now —
+/// a room for a future match may simply not exist yet.
+private enum LinkProbe {
+
+    static func isValid(_ ch: Channel, mustBeServing: Bool, session: URLSession) async -> Bool {
+        guard let url = URL(string: ch.url) else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        request.setValue(
+            ch.userAgent.isEmpty ? "Mozilla/5.0 (Linux; Android 14; TV)" : ch.userAgent,
+            forHTTPHeaderField: "User-Agent")
+        if !ch.referrer.isEmpty {
+            request.setValue(ch.referrer, forHTTPHeaderField: "Referer")
+        }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+            if status == 404 || status == 410 { return false }
+            guard status == 200 else { return true }
+            var buffer = Data()
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count > 4096 { break }
+            }
+            if buffer.isEmpty { return false }
+            if PlaylistStore.isFLV(ch.url) { return true }
+            let path = ch.url.split(separator: "?").first.map(String.init) ?? ch.url
+            if path.lowercased().hasSuffix(".m3u8") {
+                return String(decoding: buffer.prefix(1024), as: UTF8.self).contains("#EXTM3U")
+            }
+            return true
+        } catch {
+            return !mustBeServing
+        }
     }
 }

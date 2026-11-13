@@ -20,8 +20,8 @@ struct TVPlayerView: View {
             Color.black.ignoresSafeArea()
             if exhausted {
                 noSignal
-            } else if sources.indices.contains(index), let url = sources[index].streamURL {
-                PlayerController(url: url, onFail: advance, onReady: { switching = false })
+            } else if sources.indices.contains(index), sources[index].streamURL != nil {
+                PlayerController(channel: sources[index], onFail: advance, onReady: { switching = false })
                     .id(index)
                     .ignoresSafeArea()
                 if switching {
@@ -75,7 +75,7 @@ struct TVPlayerView: View {
 }
 
 private struct PlayerController: UIViewControllerRepresentable {
-    let url: URL
+    let channel: Channel
     let onFail: () -> Void
     let onReady: () -> Void
 
@@ -85,12 +85,23 @@ private struct PlayerController: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
-        let item = AVPlayerItem(url: url)
+        let item = AVPlayerItem(asset: Self.asset(for: channel))
         let player = AVPlayer(playerItem: item)
         controller.player = player
         context.coordinator.observe(item)
         player.play()
         return controller
+    }
+
+    /// The asset carries exactly the headers the entry itself
+    /// declared (#EXTVLCOPT) — nothing invented, nothing blanket.
+    static func asset(for channel: Channel) -> AVURLAsset {
+        let url = channel.streamURL ?? URL(fileURLWithPath: "/dev/null")
+        var headers: [String: String] = [:]
+        if !channel.userAgent.isEmpty { headers["User-Agent"] = channel.userAgent }
+        if !channel.referrer.isEmpty { headers["Referer"] = channel.referrer }
+        if headers.isEmpty { return AVURLAsset(url: url) }
+        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}

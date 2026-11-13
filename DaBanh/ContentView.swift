@@ -76,7 +76,7 @@ struct ContentView: View {
             }
         }
         .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(channel: channel)
+            PlayerView(sources: store.sources(for: channel))
         }
     }
 
@@ -132,6 +132,27 @@ struct ContentView: View {
             }
             .disabled(store.isLoading)
             .accessibilityLabel("Làm mới")
+
+            // Manual link check (owner's request, 2026-11-13): fetch
+            // the newest list, re-probe every link from this phone,
+            // and republish the match screens without the dead ones.
+            Button {
+                Task { await store.refreshAndValidate() }
+            } label: {
+                ZStack {
+                    Circle().fill(Color.white.opacity(0.10))
+                    if store.isValidating {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "checkmark.shield")
+                            .font(.subheadline)
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 40, height: 40)
+            }
+            .disabled(store.isLoading || store.isValidating)
+            .accessibilityLabel("Kiểm tra link")
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -356,7 +377,7 @@ struct ContentView: View {
     }
 
     private var footerRow: some View {
-        Text("Đá Banh v1.9 • \(store.channels.count) trận")
+        Text("Đá Banh v1.10 • \(store.channels.count) trận")
             .font(.caption)
             .foregroundStyle(.white.opacity(0.35))
             .frame(maxWidth: .infinity, alignment: .center)

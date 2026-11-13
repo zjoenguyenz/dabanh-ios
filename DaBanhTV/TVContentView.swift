@@ -152,6 +152,22 @@ struct TVContentView: View {
             }
             .buttonStyle(.card)
             .disabled(store.isLoading)
+            // Manual link check (owner's request, 2026-11-13): fetch
+            // the newest list, re-probe every link from this TV, and
+            // republish the match rails without the dead ones.
+            Button {
+                Task { await store.refreshAndValidate() }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.shield")
+                    Text("Kiểm tra link")
+                }
+                .font(.system(size: 24, weight: .medium))
+                .padding(.horizontal, 26)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.card)
+            .disabled(store.isLoading || store.isValidating)
         }
     }
 
@@ -226,7 +242,7 @@ struct TVContentView: View {
                     }
                     HStack {
                         Spacer()
-                        Text("Đá Banh TV v1.2.5")
+                        Text("Đá Banh TV v1.2.6")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
