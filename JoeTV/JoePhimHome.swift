@@ -56,6 +56,15 @@ struct JoePhimHome: View {
                     if !phim.chieuRap.isEmpty {
                         movieRail("🔥 Phim chiếu rạp", phim.chieuRap, badges: true)
                     }
+                    if !phim.vietnamAll.isEmpty {
+                        movieRail("🇻🇳 Phim Việt Nam", phim.vietnamAll, badges: true)
+                    }
+                    if !phim.vietnamSeries.isEmpty {
+                        movieRail("🇻🇳 Phim bộ Việt Nam", phim.vietnamSeries, badges: true)
+                    }
+                    if !phim.vietnamSingle.isEmpty {
+                        movieRail("🇻🇳 Phim lẻ Việt Nam", phim.vietnamSingle, badges: true)
+                    }
                     ForEach(Array(PhimStore.genreSpec.enumerated()), id: \.offset) { _, spec in
                         if let list = phim.genreLists[spec.slug], !list.isEmpty {
                             movieRail(spec.title, list, badges: true)
@@ -181,7 +190,9 @@ struct JoePhimHome: View {
         if !movieFavorites.isEmpty {
             rails.append(movieFavorites.map { .entry($0.key) })
         }
-        var movieRails: [[Movie]] = [phim.merged, phim.chieuRap]
+        var movieRails: [[Movie]] = [phim.merged, phim.chieuRap,
+                                     phim.vietnamAll, phim.vietnamSeries,
+                                     phim.vietnamSingle]
         for (slug, _) in PhimStore.genreSpec {
             movieRails.append(phim.genreLists[slug] ?? [])
         }

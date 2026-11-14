@@ -11,7 +11,7 @@ import SwiftUI
 @MainActor
 final class PhimStore: ObservableObject {
     static let genreSpec: [(slug: String, title: String)] = [("hanh-dong","💥 Hành Động"),("kinh-di","👻 Kinh Dị"),("hai-huoc","😂 Hài Hước"),("vien-tuong","🚀 Viễn Tưởng"),("tinh-cam","❤️ Tình Cảm"),("hinh-su","🕵️ Hình Sự"),("phieu-luu","🧭 Phiêu Lưu"),("co-trang","🏯 Cổ Trang")]
-    static let countrySpec: [(slug: String, title: String)] = [("han-quoc","🇰🇷 Hàn Quốc"),("trung-quoc","🇨🇳 Trung Quốc"),("au-my","🌎 Âu Mỹ"),("viet-nam","🇻🇳 Việt Nam")]
+    static let countrySpec: [(slug: String, title: String)] = [("han-quoc","🇰🇷 Hàn Quốc"),("trung-quoc","🇨🇳 Trung Quốc"),("au-my","🌎 Âu Mỹ")]
 
     @Published var merged: [Movie] = []
     @Published var kkNew: [Movie] = []
@@ -28,6 +28,12 @@ final class PhimStore: ObservableObject {
     @Published var chieuRap: [Movie] = []
     @Published var genreLists: [String: [Movie]] = [:]
     @Published var countryLists: [String: [Movie]] = [:]
+    /// Dedicated Vietnam block (owner order 2026-11-14): one
+    /// 48-item country fetch, split by the KK items' `type`
+    /// field — the owner never has to search for Vietnamese films.
+    @Published var vietnamAll: [Movie] = []
+    var vietnamSeries: [Movie] { vietnamAll.filter { $0.type == "series" } }
+    var vietnamSingle: [Movie] { vietnamAll.filter { $0.type == "single" } }
     @Published var loading = false
 
     private var loadedAt: Date?
@@ -85,6 +91,11 @@ final class PhimStore: ObservableObject {
             if let movies = try? await Providers.kkCountry(spec.slug, page: 1) {
                 countryLists[spec.slug] = movies
             }
+        }
+        // Dedicated Vietnam block: one large country fetch,
+        // fail-soft like every other rail (keeps previous data).
+        if let movies = try? await Providers.kkCountry("viet-nam", page: 1, limit: 48) {
+            vietnamAll = movies
         }
         merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
         if hasData { loadedAt = Date() }

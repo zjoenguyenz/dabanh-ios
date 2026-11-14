@@ -103,6 +103,19 @@ enum KkClient {
         return parseItems(root)
     }
 
+    /// Country listing with an explicit page size — the dedicated
+    /// Vietnam block pulls 48 in one call so it can split series /
+    /// single rails client-side from the items' `type` field.
+    static func listByCountry(_ slug: String, page: Int, limit: Int) async throws -> [Movie] {
+        let root = try await fetchJSON(
+            path: { bare in
+                bare ? "/quoc-gia/\(slug)?page=\(page)&limit=\(limit)"
+                     : "/v1/api/quoc-gia/\(slug)?page=\(page)&limit=\(limit)"
+            },
+            shape: { itemsArray($0) != nil })
+        return parseItems(root)
+    }
+
     static func search(_ keyword: String) async throws -> [Movie] {
         let q = JoeHTTP.qenc(keyword)
         let root = try await fetchJSON(
