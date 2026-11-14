@@ -284,7 +284,10 @@ final class PlaylistStore: ObservableObject {
         return !Self.isFLV(ch.url)
     }
 
-    static func isFLV(_ url: String) -> Bool {
+    /// Pure helper — also called from the non-isolated LinkProbe, so
+    /// it must not inherit the store's MainActor isolation (build
+    /// error in runs #45/#46, 2026-11-13).
+    nonisolated static func isFLV(_ url: String) -> Bool {
         let path = url.split(separator: "?").first.map(String.init) ?? url
         return path.lowercased().hasSuffix(".flv")
     }
