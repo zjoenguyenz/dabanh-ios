@@ -152,4 +152,8 @@ targets:
         CFBundleName: "Joe TV"
         CFBundleShortVersionString: "1.6"
         CFBundleVersion: "7"
+        CFBundleIconName: "AppIcon"
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconName: "AppIcon"
         UILaunchScreen: {}
