@@ -18,7 +18,7 @@ struct Movie: Identifiable, Hashable {
     var episodeCurrent = ""
     var quality = ""
     var lang = ""
-    /// "kk" | "vsmov" (see Providers).
+    /// "kk" | "f4k" | "vsmov" (see Providers).
     var provider = ""
 
     var id: String { provider + "|" + slug }

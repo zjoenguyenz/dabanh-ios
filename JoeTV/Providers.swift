@@ -1,11 +1,12 @@
 import Foundation
 
 /// Provider registry for the aggregated Phim library — port of
-/// the Android Providers (Joe TV v1.5.1, verified on device),
-/// reduced to the two providers the owner kept on 2026-11-14:
-///   kk      KKPhim  — phimapi.com + mirror hosts inside KkClient
-///   vsmov   VSMOV   — vsmov.com, own API + own CDN
-/// Priority for dedupe + cross-provider failover: KK > VS.
+/// the Android Providers (Joe TV v1.5.1, verified on device).
+/// The providers the owner kept on 2026-11-14:
+///   kk      KKPhim     — phimapi.com + mirror hosts in KkClient
+///   f4k     Film4K.net — film4k.net, own API + TikTok CDN
+///   vsmov   VSMOV      — vsmov.com, own API + own CDN
+/// Priority for dedupe + cross-provider failover: KK > F4K > VS.
 ///
 /// RapPhim was REMOVED entirely by owner order 2026-11-14 00:09
 /// CST (its CDN fails from his house; short-lived /f/ tokens) —
@@ -19,11 +20,13 @@ import Foundation
 /// episodes are embed-only with no playable m3u8.
 enum Providers {
     static let KK = "kk"
+    static let F4K = "f4k"
     static let VS = "vsmov"
-    static let priority = [KK, VS]
+    static let priority = [KK, F4K, VS]
 
     static func displayName(_ code: String) -> String {
         switch code {
+        case F4K: return "Film4K"
         case VS: return "VSMOV"
         default: return "KKPhim"
         }
@@ -31,6 +34,7 @@ enum Providers {
 
     static func badge(_ code: String) -> String {
         switch code {
+        case F4K: return "F4K"
         case VS: return "VS"
         default: return "KK"
         }
@@ -39,6 +43,7 @@ enum Providers {
     /// WatchStore kind string for a provider.
     static func kindOf(_ code: String) -> String {
         switch code {
+        case F4K: return WatchStore.kindF4K
         case VS: return WatchStore.kindVS
         default: return WatchStore.kindKK
         }
@@ -46,6 +51,7 @@ enum Providers {
 
     static func progressKey(_ code: String, slug: String, epName: String) -> String {
         switch code {
+        case F4K: return WatchStore.f4kProgressKey(slug: slug, epName: epName)
         case VS: return WatchStore.vsProgressKey(slug: slug, epName: epName)
         default: return WatchStore.kkProgressKey(slug: slug, epName: epName)
         }
@@ -55,6 +61,7 @@ enum Providers {
 
     static func newest(_ code: String, page: Int) async throws -> [Movie] {
         switch code {
+        case F4K: return try await F4kClient.newest(page: page)
         case VS: return try await VsClient.newest(page: page)
         default: return try await KkClient.newest(page: page)
         }
@@ -62,6 +69,7 @@ enum Providers {
 
     static func listByType(_ code: String, type: String, page: Int) async throws -> [Movie] {
         switch code {
+        case F4K: return try await F4kClient.listByType(type, page: page)
         case VS: return try await VsClient.listByType(type, page: page)
         default: return try await KkClient.listByType(type, page: page)
         }
@@ -69,6 +77,7 @@ enum Providers {
 
     static func search(_ code: String, keyword: String) async throws -> [Movie] {
         switch code {
+        case F4K: return try await F4kClient.search(keyword)
         case VS: return try await VsClient.search(keyword)
         default: return try await KkClient.search(keyword)
         }
@@ -76,6 +85,7 @@ enum Providers {
 
     static func detail(_ code: String, slug: String) async throws -> Detail {
         switch code {
+        case F4K: return try await F4kClient.detail(slug)
         case VS: return try await VsClient.detail(slug)
         default: return try await KkClient.detail(slug)
         }

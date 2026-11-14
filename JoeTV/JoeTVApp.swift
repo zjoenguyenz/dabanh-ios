@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Joe TV for Apple TV — one app for live TV, the aggregated Phim
-/// library (KKPhim + VSMOV) and the debrid Torrent
+/// library (KKPhim + Film4K + VSMOV) and the debrid Torrent
 /// section, mirroring the Android app the owner verified on his
 /// Sony (v1.5.1). Bundle com.luun.nguyen.joetv.
 @main

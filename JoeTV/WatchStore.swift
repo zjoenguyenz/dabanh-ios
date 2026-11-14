@@ -7,11 +7,12 @@ import Foundation
 /// rename, so a kill mid-write can never corrupt the store.
 ///
 /// Keys (stable per playable item / per title):
-///   progress  KKPhim  "kk|<slug>|<episode name>"
-///             VSMOV   "vs|<slug>|<episode name>"
+///   progress  KKPhim     "kk|<slug>|<episode name>"
+///             Film4K.net "f4k|<slug>|<episode name>"
+///             VSMOV      "vs|<slug>|<episode name>"
 ///             Torrent "tor|<stream id>" (meta id for a movie,
 ///                     metaId:S:E per series episode)
-///   favorite  "kk|<slug>" · "vs|<slug>"
+///   favorite  "kk|<slug>" · "f4k|<slug>" · "vs|<slug>"
 ///             Torrent "tor|<meta id>|<type>"
 ///
 /// ADDENDUM RULE: an entry stores provider + slug + episode name +
@@ -20,6 +21,7 @@ import Foundation
 /// (stream URLs expire; a stored URL would be a dead URL).
 final class WatchStore: ObservableObject {
     static let kindKK = "kk"
+    static let kindF4K = "f4k"
     static let kindVS = "vsmov"
     static let kindTor = "torrent"
 
@@ -69,11 +71,13 @@ final class WatchStore: ObservableObject {
     // MARK: - Keys
 
     static func kkProgressKey(slug: String, epName: String) -> String { "kk|\(slug)|\(epName)" }
+    static func f4kProgressKey(slug: String, epName: String) -> String { "f4k|\(slug)|\(epName)" }
     static func vsProgressKey(slug: String, epName: String) -> String { "vs|\(slug)|\(epName)" }
     static func torProgressKey(streamId: String) -> String { "tor|\(streamId)" }
 
     static func movieFavKey(provider: String, slug: String) -> String {
         switch provider {
+        case Providers.F4K: return "f4k|\(slug)"
         case Providers.VS: return "vs|\(slug)"
         default: return "kk|\(slug)"
         }

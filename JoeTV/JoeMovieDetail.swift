@@ -253,8 +253,9 @@ struct JoeMovieDetail: View {
     }
 
     /// The session factory: identity + fresh-resolution ladder +
-    /// one cross-provider hop (KK ↔ VS), resume position carried
-    /// from the stored entry. Mirrors the Android player wiring.
+    /// one cross-provider hop (KK ↔ Film4K ↔ VSMOV), with the
+    /// resume position carried from the stored entry. Mirrors
+    /// the Android player wiring.
     static func makeDirector(provider: String, detail: Detail,
                              epName: String, watch: WatchStore) -> PlayDirector {
         let m = detail.movie

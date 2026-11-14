@@ -115,6 +115,7 @@ targets:
       - JoeTV/JoeHTTP.swift
       - JoeTV/KkClient.swift
       - JoeTV/VsClient.swift
+      - JoeTV/F4kClient.swift
       - JoeTV/Providers.swift
       - JoeTV/WatchStore.swift
       - JoeTV/TorrentClient.swift

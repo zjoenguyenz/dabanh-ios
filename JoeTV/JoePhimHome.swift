@@ -12,11 +12,12 @@ struct MovieRoute: Hashable {
 }
 
 /// The Phim home: the owner's aggregated library — KKPhim +
-/// VSMOV behind one screen, exactly like the Android app he
-/// verified (v1.5.1 shape, RapPhim removed by his 2026-11-14
-/// order). Continue Watching + Favorites lead (from WatchStore),
+/// Film4K.net + VSMOV behind one screen, exactly like the
+/// Android app he verified (v1.5.1 shape, RapPhim removed by his
+/// 2026-11-14 order; Film4K.net added from the same night's link
+/// hunt). Continue Watching + Favorites lead (from WatchStore),
 /// then the merged rail, then per-provider rails. Every tile
-/// carries its provider badge so the two sources never blur.
+/// carries its provider badge so the sources never blur.
 struct JoePhimHome: View {
     @EnvironmentObject private var watch: WatchStore
     @FocusState private var focusedMovie: Movie.ID?
@@ -26,6 +27,8 @@ struct JoePhimHome: View {
     @State private var kkSeries: [Movie] = []
     @State private var kkMovies: [Movie] = []
     @State private var kkAnime: [Movie] = []
+    @State private var f4kNew: [Movie] = []
+    @State private var f4kMovies: [Movie] = []
     @State private var vsNew: [Movie] = []
     @State private var vsSeries: [Movie] = []
     @State private var loading = true
@@ -51,6 +54,12 @@ struct JoePhimHome: View {
                     }
                     if !kkAnime.isEmpty {
                         movieRail("🐣 Hoạt hình", kkAnime, badges: false)
+                    }
+                    if !f4kNew.isEmpty {
+                        movieRail("✨ Film4K · Mới cập nhật", f4kNew, badges: false)
+                    }
+                    if !f4kMovies.isEmpty {
+                        movieRail("🎞️ Film4K · Phim lẻ mới", f4kMovies, badges: false)
                     }
                     if !vsNew.isEmpty {
                         movieRail("🎬 VSMOV · Mới cập nhật", vsNew, badges: false)
@@ -86,7 +95,7 @@ struct JoePhimHome: View {
                 Text("Thư viện phim")
                     .font(.system(size: 44, weight: .heavy))
                     .foregroundStyle(.white)
-                Text("KKPhim · VSMOV — link được lấy mới mỗi lần bấm xem")
+                Text("KKPhim · Film4K · VSMOV — link được lấy mới mỗi lần bấm xem")
                     .font(.system(size: 21))
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -112,13 +121,13 @@ struct JoePhimHome: View {
 
     private var movieProgress: [WatchStore.Entry] {
         Array(WatchStore.filterKinds(watch.progress(),
-                                     [WatchStore.kindKK, WatchStore.kindVS])
+                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS])
             .prefix(WatchStore.railCap))
     }
 
     private var movieFavorites: [WatchStore.Entry] {
         Array(WatchStore.filterKinds(watch.favorites(),
-                                     [WatchStore.kindKK, WatchStore.kindVS])
+                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS])
             .prefix(WatchStore.railCap))
     }
 
@@ -211,18 +220,22 @@ struct JoePhimHome: View {
         loading = true
         defer { loading = false }
         async let kkN = try? Providers.newest(Providers.KK, page: 1)
+        async let f4kN = try? Providers.newest(Providers.F4K, page: 1)
         async let vsN = try? Providers.newest(Providers.VS, page: 1)
         async let kkS = try? Providers.listByType(Providers.KK, type: "phim-bo", page: 1)
         async let kkM = try? Providers.listByType(Providers.KK, type: "phim-le", page: 1)
         async let kkA = try? Providers.listByType(Providers.KK, type: "hoat-hinh", page: 1)
+        async let f4kM = try? Providers.listByType(Providers.F4K, type: "phim-le", page: 1)
         async let vsS = try? Providers.listByType(Providers.VS, type: "phim-bo", page: 1)
-        let (a, b, c, d, e, f) = await (kkN, vsN, kkS, kkM, kkA, vsS)
+        let (a, b, c, d, e, f, g, h) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS)
         kkNew = a ?? []
-        vsNew = b ?? []
-        kkSeries = c ?? []
-        kkMovies = d ?? []
-        kkAnime = e ?? []
-        vsSeries = f ?? []
-        merged = Providers.mergeDedupe([kkNew, vsNew])
+        f4kNew = b ?? []
+        vsNew = c ?? []
+        kkSeries = d ?? []
+        kkMovies = e ?? []
+        kkAnime = f ?? []
+        f4kMovies = g ?? []
+        vsSeries = h ?? []
+        merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew])
     }
 }

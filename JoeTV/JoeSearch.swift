@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Merged search across KKPhim + VSMOV: both providers answer,
-/// results are listed together with provider badges (the Android
-/// behaviour — a film carried by both shows twice, once per
+/// Merged search across KKPhim + Film4K + VSMOV: all providers
+/// answer, results are listed together with provider badges (the
+/// Android behaviour — a film carried by several shows once per
 /// source, so the owner picks the source himself).
 struct JoeSearchView: View {
     @State private var query = ""
@@ -77,9 +77,10 @@ struct JoeSearchView: View {
         searching = true
         Task {
             async let kk = try? Providers.search(Providers.KK, keyword: kw)
+            async let f4k = try? Providers.search(Providers.F4K, keyword: kw)
             async let vs = try? Providers.search(Providers.VS, keyword: kw)
-            let (a, b) = await (kk, vs)
-            results = (a ?? []) + (b ?? [])
+            let (a, b, c) = await (kk, f4k, vs)
+            results = (a ?? []) + (b ?? []) + (c ?? [])
             searched = true
             searching = false
         }
