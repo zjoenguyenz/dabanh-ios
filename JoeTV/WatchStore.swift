@@ -107,7 +107,9 @@ final class WatchStore: ObservableObject {
 
     func removeProgress(key: String) {
         var doc = load()
-        if doc.progress.removeAll(where: { $0.key == key }) > 0 { store(doc) }
+        let before = doc.progress.count
+        doc.progress.removeAll(where: { $0.key == key })
+        if doc.progress.count != before { store(doc) }
     }
 
     // MARK: - Favorites
@@ -122,7 +124,9 @@ final class WatchStore: ObservableObject {
     @discardableResult
     func toggleFavorite(_ e: Entry) -> Bool {
         var doc = load()
-        let was = doc.favorites.removeAll { $0.key == e.key } > 0
+        let favBefore = doc.favorites.count
+        doc.favorites.removeAll { $0.key == e.key }
+        let was = doc.favorites.count != favBefore
         if !was {
             doc.favorites.insert(e, at: 0)
             while doc.favorites.count > Self.maxFavorites { doc.favorites.removeLast() }
@@ -133,7 +137,9 @@ final class WatchStore: ObservableObject {
 
     func removeFavorite(key: String) {
         var doc = load()
-        if doc.favorites.removeAll(where: { $0.key == key }) > 0 { store(doc) }
+        let favBefore2 = doc.favorites.count
+        doc.favorites.removeAll(where: { $0.key == key })
+        if doc.favorites.count != favBefore2 { store(doc) }
     }
 
     // MARK: - Persistence
