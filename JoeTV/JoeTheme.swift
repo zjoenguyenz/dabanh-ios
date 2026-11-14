@@ -7,6 +7,25 @@ import SwiftUI
 /// left rail and a "Joe TV" wordmark — and it is deliberately
 /// UNLIKE Đá Banh tvOS (emerald, top pill tabs, crest hero) so the
 /// owner can never open the wrong app by silhouette.
+
+/// The app's own focus ring, drawn over a button's label. The
+/// system focus effect is disabled app-wide (on this tvOS it
+/// washed a huge white halo over every focused element and made
+/// white labels unreadable — the owner's v1.1 verdict), so every
+/// focusable element must show focus itself. A Button propagates
+/// its focus state to its label through the environment, which is
+/// what this view reads.
+struct JoeFocusRing<S: InsettableShape>: View {
+    @Environment(\.isFocused) private var isFocused
+    let shape: S
+    var lineWidth: CGFloat = 3
+
+    var body: some View {
+        shape.strokeBorder(isFocused ? Color.white : Color.clear,
+                           lineWidth: isFocused ? lineWidth : 0)
+    }
+}
+
 enum JoeTheme {
     static let accentRed = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let accentViolet = Color(red: 0.62, green: 0.45, blue: 1.0)
@@ -57,6 +76,8 @@ enum JoeTheme {
                     RoundedRectangle(cornerRadius: 16)
                         .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
                                       lineWidth: focused ? 4.5 : 1.2))
+                .shadow(color: .black.opacity(focused ? 0.55 : 0),
+                        radius: focused ? 20 : 0, x: 0, y: focused ? 10 : 0)
                 .overlay(alignment: .topLeading) {
                     if let badge {
                         Text(badge)

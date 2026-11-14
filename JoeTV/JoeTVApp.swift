@@ -10,8 +10,16 @@ import SwiftUI
 struct JoeTVApp: App {
     @StateObject private var tvStore = TVStore()
     @StateObject private var watchStore = WatchStore()
+    @StateObject private var phimStore = PhimStore()
+    @StateObject private var torStore = TorHomeStore()
 
     init() {
+        // Posters come from slow overseas CDNs; give the shared
+        // URL cache real room so rails stop repainting blank art
+        // on every scroll and section switch.
+        URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024,
+                                   diskCapacity: 512 * 1024 * 1024,
+                                   diskPath: "joetv-images")
         // Warm the segment-cleaning proxy so its loopback port is
         // ready long before the first play tap.
         JoeProxy.shared.start()
@@ -22,7 +30,31 @@ struct JoeTVApp: App {
             JoeRootView()
                 .environmentObject(tvStore)
                 .environmentObject(watchStore)
+                .environmentObject(phimStore)
+                .environmentObject(torStore)
         }
+    }
+}
+
+/// App-wide navigation state for the two detail pages. v1.1 pushed
+/// details through NavigationStacks nested inside the shell's
+/// sections; with focus resting on the rail, the Menu button fell
+/// through to the system and EXITED THE APP from a detail page
+/// (the owner's video, 2026-11-14). v1.2 presents details as
+/// full-screen layers of the root view instead, and the root's
+/// exit command closes exactly one layer per Menu press.
+final class JoeNavigator: ObservableObject {
+    @Published var movie: MovieRoute?
+    @Published var tor: TorRoute?
+    @Published var searchOpen = false
+
+    /// Close the topmost layer; returns false when nothing is
+    /// open (the caller then lets the system have the press).
+    func closeTop() -> Bool {
+        if movie != nil { movie = nil; return true }
+        if tor != nil { tor = nil; return true }
+        if searchOpen { searchOpen = false; return true }
+        return false
     }
 }
 
@@ -54,6 +86,7 @@ struct JoeRootView: View {
 
     @State private var section: Section = .phim
     @FocusState private var focusedSection: Section?
+    @StateObject private var nav = JoeNavigator()
 
     var body: some View {
         ZStack {
@@ -63,7 +96,29 @@ struct JoeRootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .disabled(nav.movie != nil || nav.tor != nil)
+            if let route = nav.movie {
+                ZStack {
+                    JoeTheme.background
+                    JoeMovieDetail(route: route)
+                }
+                .transition(.opacity)
+                .zIndex(2)
+            }
+            if let route = nav.tor {
+                ZStack {
+                    JoeTheme.background
+                    JoeTorrentDetail(route: route)
+                }
+                .transition(.opacity)
+                .zIndex(3)
+            }
         }
+        .environmentObject(nav)
+        .modifier(JoeExitTrap(enabled: nav.movie != nil || nav.tor != nil
+                                       || nav.searchOpen) {
+            _ = nav.closeTop()
+        })
     }
 
     private var rail: some View {
@@ -75,7 +130,7 @@ struct JoeRootView: View {
                 }
             }
             Spacer()
-            Text("Joe TV v1.1")
+            Text("Joe TV v1.2")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .padding(.leading, 12)
@@ -114,7 +169,7 @@ struct JoeRootView: View {
                     .font(.system(size: 24, weight: .medium))
                     .frame(width: 40)
                 Text(s.title)
-                    .font(.system(size: 25, weight: selected ? .bold : .medium))
+                    .font(.system(size: 25, weight: (selected || focused) ? .bold : .medium))
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -125,13 +180,14 @@ struct JoeRootView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 13)
-                    .fill(focused ? Color.white.opacity(0.12)
+                    .fill(focused ? JoeTheme.accentViolet
                           : (selected ? Color.white.opacity(0.06) : Color.clear)))
             .overlay(
                 RoundedRectangle(cornerRadius: 13)
                     .strokeBorder(focused ? Color.white : Color.clear, lineWidth: 2.5))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .focused($focusedSection, equals: s)
     }
 
@@ -146,6 +202,23 @@ struct JoeRootView: View {
             JoeTorrentHome()
         case .settings:
             JoeSettingsView()
+        }
+    }
+}
+
+/// Installs the root Menu handler ONLY while a layer is open.
+/// With no handler installed, Menu at the section roots keeps
+/// its system behaviour (exit the app) — the trap must never
+/// swallow that press.
+private struct JoeExitTrap: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onExitCommand(perform: action)
+        } else {
+            content
         }
     }
 }

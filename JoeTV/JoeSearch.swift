@@ -5,6 +5,7 @@ import SwiftUI
 /// Android behaviour — a film carried by several shows once per
 /// source, so the owner picks the source himself).
 struct JoeSearchView: View {
+    @EnvironmentObject private var nav: JoeNavigator
     @State private var query = ""
     @State private var results: [Movie] = []
     @State private var searching = false
@@ -33,9 +34,24 @@ struct JoeSearchView: View {
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
                         .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
+                        .overlay(JoeFocusRing(shape: Capsule()))
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
                 .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button {
+                    nav.searchOpen = false
+                } label: {
+                    Text("⟵ Quay lại")
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 30)
+                        .padding(.vertical, 16)
+                        .background(Capsule().fill(Color.white.opacity(0.10)))
+                        .overlay(JoeFocusRing(shape: Capsule()))
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
             }
             if searched && results.isEmpty && !searching {
                 Text("Không thấy phim nào với từ khoá này.")
@@ -46,10 +62,10 @@ struct JoeSearchView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 26)],
                           alignment: .leading, spacing: 30) {
                     ForEach(results) { movie in
-                        NavigationLink(value: MovieRoute(
+                        Button { nav.movie = MovieRoute(
                             provider: movie.provider, slug: movie.slug,
                             name: movie.name, poster: movie.poster,
-                            year: movie.year)) {
+                            year: movie.year) } label: {
                             JoeTheme.PosterCard(
                                 title: movie.name,
                                 posterURL: movie.posterURL,
@@ -58,6 +74,7 @@ struct JoeSearchView: View {
                                 focused: focusedMovie == movie.id)
                         }
                         .buttonStyle(.plain)
+                        .focusEffectDisabled()
                         .focused($focusedMovie, equals: movie.id)
                     }
                 }

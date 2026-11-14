@@ -59,8 +59,10 @@ struct JoeSettingsView: View {
                             .padding(.horizontal, 32)
                             .padding(.vertical, 15)
                             .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.5)))
+                            .overlay(JoeFocusRing(shape: Capsule()))
                     }
                     .buttonStyle(.plain)
+                    .focusEffectDisabled()
                     if savedTick {
                         Text("Đã lưu ✓")
                             .font(.system(size: 22))

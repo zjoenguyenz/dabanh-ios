@@ -15,7 +15,9 @@ struct JoeMovieDetail: View {
     @State private var alternatives: [(code: String, slug: String)] = []
     @State private var loadFailed = false
     @State private var playerHolder: DirectorHolder?
+    @State private var switching = false
     @FocusState private var focusedEp: String?
+    @FocusState private var focusedPlay: Bool
 
     struct DirectorHolder: Identifiable {
         let id = UUID()
@@ -36,7 +38,7 @@ struct JoeMovieDetail: View {
             VStack(alignment: .leading, spacing: 30) {
                 if let detail {
                     header(detail)
-                    if !alternatives.isEmpty { altChips }
+                    if !alternatives.isEmpty || switching { altChips }
                     servers(detail)
                 } else if loadFailed {
                     Text("Không tải được thông tin phim. Kiểm tra mạng rồi quay lại.")
@@ -44,11 +46,11 @@ struct JoeMovieDetail: View {
                         .foregroundStyle(.orange)
                         .padding(.top, 60)
                 } else {
-                    ProgressView("Đang tải…")
+                    placeholderHeader
+                    ProgressView("Đang tải danh sách tập…")
                         .font(.title3)
                         .foregroundStyle(.white)
                         .tint(.white)
-                        .padding(.top, 60)
                 }
             }
             .padding(.leading, 44)
@@ -59,6 +61,41 @@ struct JoeMovieDetail: View {
         .task(id: slug + "|" + provider) { await load() }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director)
+        }
+        .defaultFocus($focusedPlay, true)
+    }
+
+    /// Instant header built from the tapped card's own data,
+    /// shown while the provider detail is still loading — the
+    /// page never opens on a bare full-screen spinner again
+    /// (in v1.1 a detail could spin for 15–20 s).
+    private var placeholderHeader: some View {
+        var m = Movie()
+        m.provider = provider
+        m.slug = slug
+        m.name = route.name
+        m.poster = route.poster
+        m.year = route.year
+        return HStack(alignment: .top, spacing: 40) {
+            posterArt(m)
+            VStack(alignment: .leading, spacing: 16) {
+                Text(route.name)
+                    .font(.system(size: 50, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                if !route.year.isEmpty {
+                    Text(route.year)
+                        .font(.system(size: 23))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                Text(Providers.displayName(provider))
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.white.opacity(0.10)))
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -89,6 +126,7 @@ struct JoeMovieDetail: View {
                         .foregroundStyle(JoeTheme.accentViolet)
                 }
                 HStack(spacing: 16) {
+                    playButton(d)
                     favButton(d)
                     Text(Providers.displayName(provider))
                         .font(.system(size: 21, weight: .semibold))
@@ -134,6 +172,50 @@ struct JoeMovieDetail: View {
             .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
     }
 
+    // MARK: - Play now
+
+    /// The episode the big play button starts: the route's
+    /// preselected episode, else the stored Continue Watching
+    /// episode for this title, else the first playable episode.
+    private func startEpisode(_ d: Detail) -> String? {
+        let all = d.servers.flatMap { $0.episodes }
+        func exists(_ name: String) -> Bool {
+            all.contains { $0.name == name
+                && Providers.isPlayable(code: provider, episode: $0) }
+        }
+        if !route.preselectEp.isEmpty, exists(route.preselectEp) {
+            return route.preselectEp
+        }
+        if let e = watch.progress().first(where: {
+            $0.slug == slug && $0.source == provider }), exists(e.ep) {
+            return e.ep
+        }
+        return all.first { Providers.isPlayable(code: provider, episode: $0) }?.name
+    }
+
+    private func playButton(_ d: Detail) -> some View {
+        let isResume = !route.preselectEp.isEmpty
+            || watch.progress().contains { $0.slug == slug && $0.source == provider }
+        return Button {
+            if let ep = startEpisode(d) { play(d, epName: ep) }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "play.fill")
+                Text(isResume ? "Xem tiếp" : "Xem ngay")
+            }
+            .font(.system(size: 25, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(JoeTheme.accentViolet))
+            .overlay(JoeFocusRing(shape: Capsule(), lineWidth: 3.5))
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .focused($focusedPlay)
+        .disabled(startEpisode(d) == nil || switching)
+    }
+
     private func favButton(_ d: Detail) -> some View {
         Button {
             var e = WatchStore.Entry()
@@ -154,14 +236,19 @@ struct JoeMovieDetail: View {
                 .padding(.vertical, 11)
                 .background(Capsule().fill(Color.white.opacity(0.10)))
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                .overlay(JoeFocusRing(shape: Capsule()))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
     }
 
     // MARK: - "Nguồn khác:" chips
 
     private var altChips: some View {
         HStack(spacing: 14) {
+            if switching {
+                ProgressView().tint(.white)
+            }
             Text("Nguồn khác:")
                 .font(.system(size: 23, weight: .medium))
                 .foregroundStyle(.white.opacity(0.65))
@@ -176,8 +263,10 @@ struct JoeMovieDetail: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
                         .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.35)))
+                        .overlay(JoeFocusRing(shape: Capsule()))
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
             }
         }
     }
@@ -226,24 +315,31 @@ struct JoeMovieDetail: View {
                                   lineWidth: focused ? 3 : 2))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .focused($focusedEp, equals: ep.name)
-        .disabled(!playable)
+        .disabled(!playable || switching)
     }
 
     // MARK: - Loading + playing
 
     private func load() async {
-        detail = nil
-        loadFailed = false
-        alternatives = []
+        // First open: the placeholder header carries the page.
+        // Provider switch: the CURRENT detail stays on screen
+        // until the new one lands — v1.1 blanked the page back
+        // to a spinner, which read as "another sources page".
+        let hadDetail = detail != nil
+        if !hadDetail { loadFailed = false }
+        switching = hadDetail
         do {
             let d = try await Providers.detail(provider, slug: slug)
             detail = d
+            switching = false
             alternatives = await Providers.findAlternatives(
                 fromCode: provider, name: d.movie.name,
                 origin: d.movie.originName, year: d.movie.year)
         } catch {
-            loadFailed = true
+            switching = false
+            if !hadDetail { loadFailed = true }
         }
     }
 

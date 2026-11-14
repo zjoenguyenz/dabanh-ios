@@ -16,8 +16,8 @@ struct TorRoute: Hashable {
 /// source is configured in Cài đặt.
 struct JoeTorrentHome: View {
     @EnvironmentObject private var watch: WatchStore
-    @State private var catalogs: [TorCatalog] = []
-    @State private var rails: [String: [TorMeta]] = [:]
+    @EnvironmentObject private var nav: JoeNavigator
+    @EnvironmentObject private var store: TorHomeStore
     @State private var query = ""
     @State private var searchResults: [TorMeta] = []
     @State private var searching = false
@@ -25,7 +25,6 @@ struct JoeTorrentHome: View {
     @FocusState private var focusedEntry: String?
 
     var body: some View {
-        NavigationStack {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     header
@@ -34,8 +33,8 @@ struct JoeTorrentHome: View {
                         searchGrid
                     } else {
                         cwRail
-                        ForEach(Array(catalogs.enumerated()), id: \.offset) { _, cat in
-                            if let metas = rails[cat.id + "|" + cat.type], !metas.isEmpty {
+                        ForEach(Array(store.catalogs.enumerated()), id: \.offset) { _, cat in
+                            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
                                 metaRail(cat.name, metas, base: cat.base)
                             }
                         }
@@ -51,11 +50,7 @@ struct JoeTorrentHome: View {
                 .padding(.top, 36)
                 .padding(.bottom, 30)
             }
-            .navigationDestination(for: TorRoute.self) { route in
-                JoeTorrentDetail(route: route)
-            }
-        }
-        .task { await load() }
+        .task { store.loadIfNeeded() }
     }
 
     private var header: some View {
@@ -90,8 +85,10 @@ struct JoeTorrentHome: View {
                     .padding(.horizontal, 28)
                     .padding(.vertical, 14)
                     .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
+                    .overlay(JoeFocusRing(shape: Capsule()))
             }
             .buttonStyle(.plain)
+            .focusEffectDisabled()
             if !searchResults.isEmpty {
                 Button {
                     searchResults = []
@@ -103,8 +100,10 @@ struct JoeTorrentHome: View {
                         .padding(.horizontal, 22)
                         .padding(.vertical, 14)
                         .background(Capsule().fill(Color.white.opacity(0.10)))
+                        .overlay(JoeFocusRing(shape: Capsule()))
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
             }
         }
     }
@@ -119,13 +118,13 @@ struct JoeTorrentHome: View {
         if !torProgress.isEmpty {
             JoeTheme.Rail(title: "▶ Đang xem dở") {
                 ForEach(torProgress) { entry in
-                    NavigationLink(value: TorRoute(
+                    Button { nav.tor = TorRoute(
                         meta: TorMeta(id: entry.metaId, type: entry.metaType,
                                       name: entry.title, poster: entry.poster,
                                       background: entry.background,
                                       year: entry.year, desc: entry.desc),
                         base: entry.metaBase,
-                        preselectStreamId: entry.streamId)) {
+                        preselectStreamId: entry.streamId) } label: {
                         JoeTheme.PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
@@ -135,6 +134,7 @@ struct JoeTorrentHome: View {
                             focused: focusedEntry == entry.key)
                     }
                     .buttonStyle(.plain)
+                    .focusEffectDisabled()
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -151,7 +151,7 @@ struct JoeTorrentHome: View {
     private func metaRail(_ title: String, _ metas: [TorMeta], base: String) -> some View {
         JoeTheme.Rail(title: title) {
             ForEach(metas) { meta in
-                NavigationLink(value: TorRoute(meta: meta, base: base)) {
+                Button { nav.tor = TorRoute(meta: meta, base: base) } label: {
                     JoeTheme.PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
@@ -159,6 +159,7 @@ struct JoeTorrentHome: View {
                         focused: focusedMeta == meta.id)
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
                 .focused($focusedMeta, equals: meta.id)
             }
         }
@@ -168,7 +169,7 @@ struct JoeTorrentHome: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 26)],
                   alignment: .leading, spacing: 30) {
             ForEach(searchResults) { meta in
-                NavigationLink(value: TorRoute(meta: meta, base: TorrentSettings.cinemeta)) {
+                Button { nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta) } label: {
                     JoeTheme.PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
@@ -176,17 +177,8 @@ struct JoeTorrentHome: View {
                         focused: focusedMeta == meta.id)
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
                 .focused($focusedMeta, equals: meta.id)
-            }
-        }
-    }
-
-    private func load() async {
-        let base = TorrentSettings.effectiveBase ?? TorrentSettings.cinemeta
-        catalogs = await TorrentClient.discoverCatalogs(addonBase: base)
-        for cat in catalogs {
-            if let metas = try? await TorrentClient.fetchCatalog(cat) {
-                rails[cat.id + "|" + cat.type] = metas
             }
         }
     }
@@ -197,7 +189,7 @@ struct JoeTorrentHome: View {
         searching = true
         Task {
             var out: [TorMeta] = []
-            for cat in catalogs where cat.searchable {
+            for cat in store.catalogs where cat.searchable {
                 if let metas = try? await TorrentClient.search(cat, keyword: kw) {
                     out.append(contentsOf: metas)
                 }
@@ -332,8 +324,10 @@ struct JoeTorrentDetail: View {
                 .padding(.horizontal, 22)
                 .padding(.vertical, 11)
                 .background(Capsule().fill(Color.white.opacity(0.10)))
+                .overlay(JoeFocusRing(shape: Capsule()))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
     }
 
     // MARK: - Episodes (series)
@@ -363,8 +357,10 @@ struct JoeTorrentDetail: View {
                                 .background(RoundedRectangle(cornerRadius: 12)
                                     .fill(selected ? JoeTheme.accentViolet.opacity(0.30)
                                           : Color.white.opacity(0.08)))
+                                .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
                         }
                         .buttonStyle(.plain)
+                        .focusEffectDisabled()
                         .focused($focusedRow, equals: "ep|" + video.id)
                     }
                 }
@@ -438,6 +434,7 @@ struct JoeTorrentDetail: View {
                 .strokeBorder(focused ? Color.white : Color.clear, lineWidth: 2.5))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
     }
 
