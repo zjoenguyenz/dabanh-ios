@@ -23,6 +23,7 @@ final class WatchStore: ObservableObject {
     static let kindKK = "kk"
     static let kindF4K = "f4k"
     static let kindVS = "vsmov"
+    static let kindTP = "tp"
     static let kindTor = "torrent"
 
     private static let fileName = "watch-state.json"
@@ -73,6 +74,7 @@ final class WatchStore: ObservableObject {
     static func kkProgressKey(slug: String, epName: String) -> String { "kk|\(slug)|\(epName)" }
     static func f4kProgressKey(slug: String, epName: String) -> String { "f4k|\(slug)|\(epName)" }
     static func vsProgressKey(slug: String, epName: String) -> String { "vs|\(slug)|\(epName)" }
+    static func tpProgressKey(slug: String, epName: String) -> String { "tp|\(slug)|\(epName)" }
     static func torProgressKey(streamId: String) -> String { "tor|\(streamId)" }
 
     static func movieFavKey(provider: String, slug: String) -> String {

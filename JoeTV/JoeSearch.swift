@@ -79,8 +79,9 @@ struct JoeSearchView: View {
             async let kk = try? Providers.search(Providers.KK, keyword: kw)
             async let f4k = try? Providers.search(Providers.F4K, keyword: kw)
             async let vs = try? Providers.search(Providers.VS, keyword: kw)
-            let (a, b, c) = await (kk, f4k, vs)
-            results = (a ?? []) + (b ?? []) + (c ?? [])
+            async let tp = try? Providers.search(Providers.TP, keyword: kw)
+            let (a, b, c, d) = await (kk, f4k, vs, tp)
+            results = (a ?? []) + (b ?? []) + (c ?? []) + (d ?? [])
             searched = true
             searching = false
         }

@@ -31,6 +31,8 @@ struct JoePhimHome: View {
     @State private var f4kMovies: [Movie] = []
     @State private var vsNew: [Movie] = []
     @State private var vsSeries: [Movie] = []
+    @State private var tpNew: [Movie] = []
+    @State private var tpSeries: [Movie] = []
     @State private var loading = true
 
     var body: some View {
@@ -67,6 +69,12 @@ struct JoePhimHome: View {
                     if !vsSeries.isEmpty {
                         movieRail("🎬 VSMOV · Phim bộ mới", vsSeries, badges: false)
                     }
+                    if !tpNew.isEmpty {
+                        movieRail("🗄️ Tủ Phim · Mới cập nhật", tpNew, badges: false)
+                    }
+                    if !tpSeries.isEmpty {
+                        movieRail("🗄️ Tủ Phim · Phim bộ mới", tpSeries, badges: false)
+                    }
                     if loading && merged.isEmpty {
                         ProgressView("Đang tải thư viện phim…")
                             .font(.title3)
@@ -95,7 +103,7 @@ struct JoePhimHome: View {
                 Text("Thư viện phim")
                     .font(.system(size: 44, weight: .heavy))
                     .foregroundStyle(.white)
-                Text("KKPhim · Film4K · VSMOV — link được lấy mới mỗi lần bấm xem")
+                Text("KKPhim · Film4K · VSMOV · Tủ Phim — link được lấy mới mỗi lần bấm xem")
                     .font(.system(size: 21))
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -121,13 +129,13 @@ struct JoePhimHome: View {
 
     private var movieProgress: [WatchStore.Entry] {
         Array(WatchStore.filterKinds(watch.progress(),
-                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS])
+                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP])
             .prefix(WatchStore.railCap))
     }
 
     private var movieFavorites: [WatchStore.Entry] {
         Array(WatchStore.filterKinds(watch.favorites(),
-                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS])
+                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP])
             .prefix(WatchStore.railCap))
     }
 
@@ -227,7 +235,9 @@ struct JoePhimHome: View {
         async let kkA = try? Providers.listByType(Providers.KK, type: "hoat-hinh", page: 1)
         async let f4kM = try? Providers.listByType(Providers.F4K, type: "phim-le", page: 1)
         async let vsS = try? Providers.listByType(Providers.VS, type: "phim-bo", page: 1)
-        let (a, b, c, d, e, f, g, h) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS)
+        async let tpN = try? Providers.newest(Providers.TP, page: 1)
+        async let tpS = try? Providers.listByType(Providers.TP, type: "phim-bo", page: 1)
+        let (a, b, c, d, e, f, g, h, i, j) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpS)
         kkNew = a ?? []
         f4kNew = b ?? []
         vsNew = c ?? []
@@ -236,6 +246,8 @@ struct JoePhimHome: View {
         kkAnime = f ?? []
         f4kMovies = g ?? []
         vsSeries = h ?? []
-        merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew])
+        tpNew = i ?? []
+        tpSeries = j ?? []
+        merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
     }
 }

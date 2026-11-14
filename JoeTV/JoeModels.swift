@@ -18,7 +18,11 @@ struct Movie: Identifiable, Hashable {
     var episodeCurrent = ""
     var quality = ""
     var lang = ""
-    /// "kk" | "f4k" | "vsmov" (see Providers).
+    /// Tủ Phim extras (parity with the Android KkApi.Movie):
+    /// the IMDb id keys the CacheVideo probe on TP details.
+    var imdbId = ""
+    var tmdbSeason = 0
+    /// "kk" | "f4k" | "vsmov" | "tp" (see Providers).
     var provider = ""
 
     var id: String { provider + "|" + slug }
@@ -105,6 +109,13 @@ enum JSON {
         guard let obj, let v = obj[key], !(v is NSNull) else { return fallback }
         if let n = v as? NSNumber { return n.doubleValue }
         if let s = v as? String { return Double(s) ?? fallback }
+        return fallback
+    }
+
+    static func bool(_ obj: [String: Any]?, _ key: String, _ fallback: Bool = false) -> Bool {
+        guard let obj, let v = obj[key], !(v is NSNull) else { return fallback }
+        if let b = v as? Bool { return b }
+        if let n = v as? NSNumber { return n.boolValue }
         return fallback
     }
 

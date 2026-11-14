@@ -1,13 +1,21 @@
 import SwiftUI
 
 /// Joe TV for Apple TV — one app for live TV, the aggregated Phim
-/// library (KKPhim + Film4K + VSMOV) and the debrid Torrent
-/// section, mirroring the Android app the owner verified on his
-/// Sony (v1.5.1). Bundle com.luun.nguyen.joetv.
+/// library (KKPhim + Film4K + VSMOV + Tủ Phim) and the debrid
+/// Torrent section. v1.1 reaches parity with the Android app the
+/// owner verified on his Sony (v1.9.2): Tủ Phim Gold + CacheVideo
+/// joined the library, and PNG-disguised streams play through the
+/// in-app cleaning proxy (JoeProxy). Bundle com.luun.nguyen.joetv.
 @main
 struct JoeTVApp: App {
     @StateObject private var tvStore = TVStore()
     @StateObject private var watchStore = WatchStore()
+
+    init() {
+        // Warm the segment-cleaning proxy so its loopback port is
+        // ready long before the first play tap.
+        JoeProxy.shared.start()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -67,7 +75,7 @@ struct JoeRootView: View {
                 }
             }
             Spacer()
-            Text("Joe TV v1.0")
+            Text("Joe TV v1.1")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .padding(.leading, 12)

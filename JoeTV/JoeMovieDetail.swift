@@ -283,8 +283,20 @@ struct JoeMovieDetail: View {
                     filmTitle: identity.entry.title,
                     epName: identity.entry.ep,
                     epNum: Providers.episodeNumber(identity.entry.ep))
-                return zip(ladder.urls, ladder.titles).compactMap { u, t in
-                    URL(string: u).map { PlayCandidate(url: $0, label: t) }
+                return ladder.entries.compactMap { entry in
+                    // PNG-disguised / header-gated streams reach
+                    // AVPlayer through the in-app cleaning proxy;
+                    // if the proxy is somehow down, fall back to
+                    // the direct URL rather than no candidate.
+                    if entry.proxy,
+                       let local = JoeProxy.shared.playlistURL(
+                           for: entry.url, headers: entry.headers) {
+                        return PlayCandidate(url: local, label: entry.title)
+                    }
+                    return URL(string: entry.url).map {
+                        PlayCandidate(url: $0, headers: entry.headers,
+                                      label: entry.title)
+                    }
                 }
             },
             hopIdentity: { identity in

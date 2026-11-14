@@ -1,12 +1,16 @@
 import Foundation
 
 /// Provider registry for the aggregated Phim library — port of
-/// the Android Providers (Joe TV v1.5.1, verified on device).
+/// the Android Providers (Joe TV v1.5.1, verified on device;
+/// v1.1 brings the tvOS app to parity with Android v1.9.2).
 /// The providers the owner kept on 2026-11-14:
 ///   kk      KKPhim     — phimapi.com + mirror hosts in KkClient
 ///   f4k     Film4K.net — film4k.net, own API + TikTok CDN
 ///   vsmov   VSMOV      — vsmov.com, own API + own CDN
-/// Priority for dedupe + cross-provider failover: KK > F4K > VS.
+///   tp      Tủ Phim    — api.phimsrv.com, Gold layer only, plus
+///                        the CacheVideo backup server on its
+///                        details (TpClient / CacheVideo)
+/// Priority for dedupe + cross-provider failover: KK > F4K > VS > TP.
 ///
 /// RapPhim was REMOVED entirely by owner order 2026-11-14 00:09
 /// CST (its CDN fails from his house; short-lived /f/ tokens) —
@@ -22,12 +26,14 @@ enum Providers {
     static let KK = "kk"
     static let F4K = "f4k"
     static let VS = "vsmov"
-    static let priority = [KK, F4K, VS]
+    static let TP = "tp"
+    static let priority = [KK, F4K, VS, TP]
 
     static func displayName(_ code: String) -> String {
         switch code {
         case F4K: return "Film4K"
         case VS: return "VSMOV"
+        case TP: return "Tủ Phim"
         default: return "KKPhim"
         }
     }
@@ -36,6 +42,7 @@ enum Providers {
         switch code {
         case F4K: return "F4K"
         case VS: return "VS"
+        case TP: return "TP"
         default: return "KK"
         }
     }
@@ -45,6 +52,7 @@ enum Providers {
         switch code {
         case F4K: return WatchStore.kindF4K
         case VS: return WatchStore.kindVS
+        case TP: return WatchStore.kindTP
         default: return WatchStore.kindKK
         }
     }
@@ -53,6 +61,7 @@ enum Providers {
         switch code {
         case F4K: return WatchStore.f4kProgressKey(slug: slug, epName: epName)
         case VS: return WatchStore.vsProgressKey(slug: slug, epName: epName)
+        case TP: return WatchStore.tpProgressKey(slug: slug, epName: epName)
         default: return WatchStore.kkProgressKey(slug: slug, epName: epName)
         }
     }
@@ -63,6 +72,7 @@ enum Providers {
         switch code {
         case F4K: return try await F4kClient.newest(page: page)
         case VS: return try await VsClient.newest(page: page)
+        case TP: return try await TpClient.newest(page: page)
         default: return try await KkClient.newest(page: page)
         }
     }
@@ -71,6 +81,7 @@ enum Providers {
         switch code {
         case F4K: return try await F4kClient.listByType(type, page: page)
         case VS: return try await VsClient.listByType(type, page: page)
+        case TP: return try await TpClient.listByType(type, page: page)
         default: return try await KkClient.listByType(type, page: page)
         }
     }
@@ -79,6 +90,7 @@ enum Providers {
         switch code {
         case F4K: return try await F4kClient.search(keyword)
         case VS: return try await VsClient.search(keyword)
+        case TP: return try await TpClient.search(keyword)
         default: return try await KkClient.search(keyword)
         }
     }
@@ -87,6 +99,7 @@ enum Providers {
         switch code {
         case F4K: return try await F4kClient.detail(slug)
         case VS: return try await VsClient.detail(slug)
+        case TP: return try await TpClient.detail(slug)
         default: return try await KkClient.detail(slug)
         }
     }
@@ -193,11 +206,23 @@ enum Providers {
 
     // MARK: - Play ladder (fresh resolution)
 
+    /// One playable candidate: a freshly resolved URL plus how
+    /// AVPlayer must reach it. proxy = true routes the stream
+    /// through JoeProxy (PNG-prefixed segments and/or a
+    /// header-gated CDN — see JoeProxy); headers are the extra
+    /// headers the CDN demands, applied by the proxy upstream or
+    /// by the player for direct candidates.
+    struct LadderEntry {
+        var url: String
+        var title: String
+        var proxy: Bool = false
+        var headers: [String: String] = [:]
+    }
+
     struct Ladder {
-        var urls: [String] = []
-        var titles: [String] = []
+        var entries: [LadderEntry] = []
         var matchedEpName = ""
-        var isEmpty: Bool { urls.isEmpty }
+        var isEmpty: Bool { entries.isEmpty }
     }
 
     /// Build the play ladder for one episode of one provider's
@@ -235,33 +260,55 @@ enum Providers {
             if pick == nil && epNum > 0 {
                 pick = s.episodes.first { episodeNumber($0.name) == epNum }
             }
-            guard let pick, let url = await playableURL(code: code, episode: pick),
-                  !url.isEmpty else { continue }
-            lad.urls.append(url)
-            lad.titles.append(filmTitle + " · " + pick.name
-                + (d.servers.count > 1 ? " · " + s.name : ""))
+            guard let pick, let resolved = await playableURL(code: code, episode: pick),
+                  !resolved.url.isEmpty else { continue }
+            lad.entries.append(LadderEntry(
+                url: resolved.url,
+                title: filmTitle + " · " + pick.name
+                    + (d.servers.count > 1 ? " · " + s.name : ""),
+                proxy: resolved.proxy, headers: resolved.headers))
         }
         return lad
     }
 
-    /// The playable URL of one episode RIGHT NOW, or nil. VSMOV
-    /// resolves its embed page live; everyone else uses the m3u8
-    /// the (freshly fetched) detail returned.
-    static func playableURL(code: String, episode e: Episode) async -> String? {
-        if code == VS {
-            if !e.m3u8.isEmpty { return e.m3u8 }
+    /// The playable URL of one episode RIGHT NOW, or nil — plus
+    /// its delivery route. VSMOV resolves its embed page live;
+    /// Tủ Phim resolves its marker (Gold XOR hop / VSMOV page /
+    /// CacheVideo) live; everyone else uses the m3u8 the
+    /// (freshly fetched) detail returned. Proxy flags mirror the
+    /// Android player's data-source routing: VSMOV, Tủ Phim and
+    /// Film4K segments are PNG-disguised (the proxy strips the
+    /// prefix — AVPlayer cannot resync like Media3 does), and
+    /// CacheVideo segments are header-gated.
+    static func playableURL(code: String, episode e: Episode)
+        async -> (url: String, proxy: Bool, headers: [String: String])? {
+        switch code {
+        case VS:
+            if !e.m3u8.isEmpty { return (e.m3u8, true, [:]) }
             if e.embed.isEmpty { return nil }
-            return try? await VsClient.resolveStream(embedURL: e.embed)
+            guard let u = try? await VsClient.resolveStream(embedURL: e.embed)
+            else { return nil }
+            return (u, true, [:])
+        case TP:
+            if !e.m3u8.isEmpty { return (e.m3u8, true, [:]) }
+            if e.embed.isEmpty { return nil }
+            guard let u = try? await TpClient.resolveStream(marker: e.embed)
+            else { return nil }
+            let headers = e.embed.hasPrefix("cv:") ? CacheVideo.headers : [:]
+            return (u, true, headers)
+        case F4K:
+            return e.m3u8.isEmpty ? nil : (e.m3u8, true, [:])
+        default:
+            return e.m3u8.isEmpty ? nil : (e.m3u8, false, [:])
         }
-        return e.m3u8.isEmpty ? nil : e.m3u8
     }
 
     /// True when the episode can be played at all (drives chip
-    /// greying): m3u8 present, or VSMOV embed present. Embed-only
-    /// on any other provider → false.
+    /// greying): m3u8 present, or a resolvable embed/marker on
+    /// VSMOV / Tủ Phim. Embed-only on any other provider → false.
     static func isPlayable(code: String, episode e: Episode) -> Bool {
         if !e.m3u8.isEmpty { return true }
-        return code == VS && !e.embed.isEmpty
+        return (code == VS || code == TP) && !e.embed.isEmpty
     }
 
     // MARK: - Cross-provider lookup (session-cached)
