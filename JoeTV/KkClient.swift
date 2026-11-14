@@ -83,6 +83,26 @@ enum KkClient {
         return parseItems(root)
     }
 
+    static func listByGenre(_ slug: String, page: Int) async throws -> [Movie] {
+        let root = try await fetchJSON(
+            path: { bare in
+                bare ? "/the-loai/\(slug)?page=\(page)"
+                     : "/v1/api/the-loai/\(slug)?page=\(page)"
+            },
+            shape: { itemsArray($0) != nil })
+        return parseItems(root)
+    }
+
+    static func listByCountry(_ slug: String, page: Int) async throws -> [Movie] {
+        let root = try await fetchJSON(
+            path: { bare in
+                bare ? "/quoc-gia/\(slug)?page=\(page)"
+                     : "/v1/api/quoc-gia/\(slug)?page=\(page)"
+            },
+            shape: { itemsArray($0) != nil })
+        return parseItems(root)
+    }
+
     static func search(_ keyword: String) async throws -> [Movie] {
         let q = JoeHTTP.qenc(keyword)
         let root = try await fetchJSON(
@@ -159,6 +179,12 @@ enum KkClient {
         }
         m.quality = cleanField(JSON.str(o, "quality"))
         m.lang = cleanField(JSON.str(o, "lang"))
+        if let tm = JSON.obj(o, "tmdb") {
+            m.tmdbId = JSON.str(tm, "id")
+            m.tmdbType = JSON.str(tm, "type")
+            let season = JSON.int(tm, "season")
+            if season > 0 { m.tmdbSeason = season }
+        }
         m.provider = Providers.KK
         return m
     }

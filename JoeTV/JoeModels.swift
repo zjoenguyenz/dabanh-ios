@@ -21,6 +21,8 @@ struct Movie: Identifiable, Hashable {
     /// Tủ Phim extras (parity with the Android KkApi.Movie):
     /// the IMDb id keys the CacheVideo probe on TP details.
     var imdbId = ""
+    var tmdbId = ""
+    var tmdbType = ""
     var tmdbSeason = 0
     /// "kk" | "f4k" | "vsmov" | "tp" (see Providers).
     var provider = ""

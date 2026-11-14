@@ -12,6 +12,7 @@ struct JoeMovieDetail: View {
     @State private var provider: String
     @State private var slug: String
     @State private var detail: Detail?
+    @State private var tmdb: TMDBInfo?
     @State private var alternatives: [(code: String, slug: String)] = []
     @State private var loadFailed = false
     @State private var playerHolder: DirectorHolder?
@@ -39,6 +40,7 @@ struct JoeMovieDetail: View {
             VStack(alignment: .leading, spacing: 30) {
                 if let detail {
                     header(detail)
+                    if let tmdb, !tmdb.cast.isEmpty { castRow(tmdb.cast) }
                     if !alternatives.isEmpty || switching { altChips }
                     servers(detail)
                 } else if loadFailed {
@@ -60,6 +62,19 @@ struct JoeMovieDetail: View {
             .padding(.bottom, 40)
         }
         .task(id: slug + "|" + provider) { await load() }
+        .task(id: detail?.movie.id ?? "") {
+            // TMDB enrichment (v1.6), fail-soft: only when the
+            // loaded detail carries a TMDB id AND the owner has
+            // saved a TMDB API key in Settings. Any failure leaves
+            // tmdb nil and the screen is the provider-only one.
+            guard let detail, !detail.movie.tmdbId.isEmpty,
+                  !TMDBClient.apiKey.isEmpty else {
+                tmdb = nil
+                return
+            }
+            tmdb = await TMDBClient.fetch(tmdbId: detail.movie.tmdbId,
+                                          type: detail.movie.tmdbType)
+        }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director)
         }
@@ -104,7 +119,7 @@ struct JoeMovieDetail: View {
 
     private func header(_ d: Detail) -> some View {
         HStack(alignment: .top, spacing: 40) {
-            posterArt(d.movie)
+            headerArt(d)
             VStack(alignment: .leading, spacing: 16) {
                 Text(d.movie.name)
                     .font(.system(size: 50, weight: .heavy))
@@ -136,8 +151,9 @@ struct JoeMovieDetail: View {
                         .padding(.vertical, 7)
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                 }
-                if !d.content.isEmpty {
-                    Text(d.content)
+                if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
+                    Text((tmdb?.overview.isEmpty ?? true)
+                         ? d.content : (tmdb?.overview ?? ""))
                         .font(.system(size: 22))
                         .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(6)
@@ -171,6 +187,101 @@ struct JoeMovieDetail: View {
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18)
             .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+    }
+
+    /// Header art with TMDB priority (v1.6): a non-empty TMDB
+    /// backdrop replaces the poster as the header image, in the
+    /// same frame / crop / chrome as posterArt; the backdrop
+    /// loads async over the existing poster art, so the header
+    /// is never blank while it arrives. Without a backdrop the
+    /// poster header is used exactly as before.
+    @ViewBuilder
+    private func headerArt(_ d: Detail) -> some View {
+        if let backdrop = tmdb?.backdropURL, !backdrop.isEmpty,
+           let url = URL(string: backdrop) {
+            ZStack {
+                posterArt(d.movie)
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFill()
+                    default:
+                        Color.clear
+                    }
+                }
+            }
+            .frame(width: 300, height: 450)
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18)
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+        } else {
+            posterArt(d.movie)
+        }
+    }
+
+    // MARK: - Cast (TMDB)
+
+    /// "Diễn viên" row (v1.6): placed right after the header's
+    /// overview/meta block, before the alternative-source chips
+    /// and the episode servers. The cells are deliberately NOT
+    /// buttons and carry no focus handling, so the v1.5 focus
+    /// traversal (play → chips → episodes) is untouched.
+    private func castRow(_ cast: [TMDBCastMember]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Diễn viên")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 24) {
+                    ForEach(cast) { member in
+                        castCell(member)
+                    }
+                }
+            }
+        }
+    }
+
+    private func castCell(_ member: TMDBCastMember) -> some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+                if !member.photoURL.isEmpty, let url = URL(string: member.photoURL) {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                        default:
+                            castInitial(member)
+                        }
+                    }
+                } else {
+                    castInitial(member)
+                }
+            }
+            .frame(width: 110, height: 110)
+            .clipShape(Circle())
+            .overlay(Circle()
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+            Text(member.name)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            if !member.character.isEmpty {
+                Text(member.character)
+                    .font(.system(size: 17))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(width: 130)
+    }
+
+    private func castInitial(_ member: TMDBCastMember) -> some View {
+        Text(String(member.name.prefix(1)))
+            .font(.system(size: 38, weight: .bold))
+            .foregroundStyle(.white.opacity(0.8))
     }
 
     // MARK: - Play now

@@ -19,6 +19,7 @@ struct JoeSettingsView: View {
     @State private var torboxToken: String = TorrentSettings.torboxToken
     @State private var subAddonURL: String = TorrentSettings.subAddonURL.isEmpty
         ? TorrentSettings.opensubtitlesDefault : TorrentSettings.subAddonURL
+    @State private var tmdbKey: String = UserDefaults.standard.string(forKey: "tmdb_api_key") ?? ""
     @State private var savedTick = false
     @FocusState private var focusedField: String?
 
@@ -49,6 +50,9 @@ struct JoeSettingsView: View {
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
+                field(title: "TMDB API Key",
+                      hint: "Tuỳ chọn — bật ảnh nền + diễn viên TMDB",
+                      text: $tmdbKey, id: "tmdb", secure: true)
 
                 HStack(spacing: 14) {
                     if savedTick {
@@ -83,6 +87,7 @@ struct JoeSettingsView: View {
         .onChange(of: rdToken) { save() }
         .onChange(of: torboxToken) { save() }
         .onChange(of: subAddonURL) { save() }
+        .onChange(of: tmdbKey) { save() }
     }
 
     private func field(title: String, hint: String,
@@ -143,6 +148,8 @@ struct JoeSettingsView: View {
         TorrentSettings.rdToken = rdToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.torboxToken = torboxToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.subAddonURL = subAddonURL.trimmingCharacters(in: .whitespaces)
+        UserDefaults.standard.set(tmdbKey.trimmingCharacters(in: .whitespaces),
+                                  forKey: "tmdb_api_key")
         if !silent {
             savedTick = true
             Task {

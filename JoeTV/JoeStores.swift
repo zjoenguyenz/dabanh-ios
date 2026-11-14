@@ -10,6 +10,9 @@ import SwiftUI
 
 @MainActor
 final class PhimStore: ObservableObject {
+    static let genreSpec: [(slug: String, title: String)] = [("hanh-dong","💥 Hành Động"),("kinh-di","👻 Kinh Dị"),("hai-huoc","😂 Hài Hước"),("vien-tuong","🚀 Viễn Tưởng"),("tinh-cam","❤️ Tình Cảm"),("hinh-su","🕵️ Hình Sự"),("phieu-luu","🧭 Phiêu Lưu"),("co-trang","🏯 Cổ Trang")]
+    static let countrySpec: [(slug: String, title: String)] = [("han-quoc","🇰🇷 Hàn Quốc"),("trung-quoc","🇨🇳 Trung Quốc"),("au-my","🌎 Âu Mỹ"),("viet-nam","🇻🇳 Việt Nam")]
+
     @Published var merged: [Movie] = []
     @Published var kkNew: [Movie] = []
     @Published var kkSeries: [Movie] = []
@@ -22,6 +25,9 @@ final class PhimStore: ObservableObject {
     @Published var tpNew: [Movie] = []
     @Published var tpMovies: [Movie] = []
     @Published var tpSeries: [Movie] = []
+    @Published var chieuRap: [Movie] = []
+    @Published var genreLists: [String: [Movie]] = [:]
+    @Published var countryLists: [String: [Movie]] = [:]
     @Published var loading = false
 
     private var loadedAt: Date?
@@ -52,7 +58,8 @@ final class PhimStore: ObservableObject {
         async let tpN = try? Providers.newest(Providers.TP, page: 1)
         async let tpL = try? Providers.listByType(Providers.TP, type: "phim-le", page: 1)
         async let tpS = try? Providers.listByType(Providers.TP, type: "phim-bo", page: 1)
-        let (a, b, c, d, e, f, g, h, i, j, k) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpL, tpS)
+        async let cr = try? Providers.listByType(Providers.KK, type: "phim-chieu-rap", page: 1)
+        let (a, b, c, d, e, f, g, h, i, j, k, l) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpL, tpS, cr)
         // A rail that failed this round keeps its previous data.
         if let a { kkNew = a }
         if let b { f4kNew = b }
@@ -65,15 +72,39 @@ final class PhimStore: ObservableObject {
         if let i { tpNew = i }
         if let j { tpMovies = j }
         if let k { tpSeries = k }
+        if let l { chieuRap = l }
+        // Genre / country rails (KK): fail-soft per rail, exactly
+        // like the rails above — a failed fetch keeps its
+        // previous data.
+        for spec in Self.genreSpec {
+            if let movies = try? await Providers.kkGenre(spec.slug, page: 1) {
+                genreLists[spec.slug] = movies
+            }
+        }
+        for spec in Self.countrySpec {
+            if let movies = try? await Providers.kkCountry(spec.slug, page: 1) {
+                countryLists[spec.slug] = movies
+            }
+        }
         merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
         if hasData { loadedAt = Date() }
     }
 }
 
+struct TorGenreRail {
+    var type: String
+    var genre: String
+    var title: String
+    var metas: [TorMeta] = []
+}
+
 @MainActor
 final class TorHomeStore: ObservableObject {
+    static let genreSpec: [(type: String, genre: String, title: String)] = [("movie","Action","💥 Hành Động"),("movie","Horror","👻 Kinh Dị"),("movie","Comedy","😂 Hài Hước"),("movie","Science Fiction","🚀 Viễn Tưởng"),("movie","Thriller","😱 Giật Gân"),("movie","Drama","🎭 Chính Kịch"),("series","Drama","🎭 Chính Kịch"),("series","Comedy","😂 Hài Hước"),("series","Crime","🕵️ Tội Phạm"),("series","Science Fiction","🚀 Viễn Tưởng")]
+
     @Published var catalogs: [TorCatalog] = []
     @Published var rails: [String: [TorMeta]] = [:]
+    @Published var genreRails: [TorGenreRail] = []
     @Published var loading = false
 
     private var loadedAt: Date?
@@ -98,6 +129,16 @@ final class TorHomeStore: ObservableObject {
                 rails[cat.id + "|" + cat.type] = metas
             }
         }
+        // Genre rails: fail-soft per rail — a throw/empty just
+        // omits that rail; kept rails stay in spec order.
+        var fetchedRails: [TorGenreRail] = []
+        for spec in Self.genreSpec {
+            if let metas = try? await TorrentClient.fetchGenreCatalog(type: spec.type, genre: spec.genre),
+               !metas.isEmpty {
+                fetchedRails.append(TorGenreRail(type: spec.type, genre: spec.genre, title: spec.title, metas: metas))
+            }
+        }
+        genreRails = fetchedRails
         if hasData { loadedAt = Date() }
     }
 }

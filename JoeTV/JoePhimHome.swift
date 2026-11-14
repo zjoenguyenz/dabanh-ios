@@ -53,6 +53,19 @@ struct JoePhimHome: View {
                     if !phim.merged.isEmpty {
                         movieRail("✨ Mới cập nhật · Tổng hợp", phim.merged, badges: true)
                     }
+                    if !phim.chieuRap.isEmpty {
+                        movieRail("🔥 Phim chiếu rạp", phim.chieuRap, badges: true)
+                    }
+                    ForEach(Array(PhimStore.genreSpec.enumerated()), id: \.offset) { _, spec in
+                        if let list = phim.genreLists[spec.slug], !list.isEmpty {
+                            movieRail(spec.title, list, badges: true)
+                        }
+                    }
+                    ForEach(Array(PhimStore.countrySpec.enumerated()), id: \.offset) { _, spec in
+                        if let list = phim.countryLists[spec.slug], !list.isEmpty {
+                            movieRail(spec.title, list, badges: true)
+                        }
+                    }
                     if !phim.kkNew.isEmpty {
                         movieRail("✨ Mới cập nhật", phim.kkNew, badges: false)
                     }
@@ -168,10 +181,17 @@ struct JoePhimHome: View {
         if !movieFavorites.isEmpty {
             rails.append(movieFavorites.map { .entry($0.key) })
         }
-        let movieRails: [[Movie]] = [phim.merged, phim.kkNew, phim.kkSeries,
-                                     phim.kkMovies, phim.kkAnime, phim.f4kNew,
-                                     phim.f4kMovies, phim.vsNew, phim.vsSeries,
-                                     phim.tpMovies, phim.tpSeries]
+        var movieRails: [[Movie]] = [phim.merged, phim.chieuRap]
+        for (slug, _) in PhimStore.genreSpec {
+            movieRails.append(phim.genreLists[slug] ?? [])
+        }
+        for (slug, _) in PhimStore.countrySpec {
+            movieRails.append(phim.countryLists[slug] ?? [])
+        }
+        movieRails.append(contentsOf: [phim.kkNew, phim.kkSeries,
+                                       phim.kkMovies, phim.kkAnime, phim.f4kNew,
+                                       phim.f4kMovies, phim.vsNew, phim.vsSeries,
+                                       phim.tpMovies, phim.tpSeries])
         for movies in movieRails where !movies.isEmpty {
             rails.append(movies.map { .movie($0.id) })
         }

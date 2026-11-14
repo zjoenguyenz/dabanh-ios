@@ -86,6 +86,10 @@ enum Providers {
         }
     }
 
+    static func kkGenre(_ slug: String, page: Int) async throws -> [Movie] { try await KkClient.listByGenre(slug, page: page) }
+
+    static func kkCountry(_ slug: String, page: Int) async throws -> [Movie] { try await KkClient.listByCountry(slug, page: page) }
+
     static func search(_ code: String, keyword: String) async throws -> [Movie] {
         switch code {
         case F4K: return try await F4kClient.search(keyword)

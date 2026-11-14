@@ -35,8 +35,8 @@ targets:
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.10"
-        CFBundleVersion: "11"
+        CFBundleShortVersionString: "1.11"
+        CFBundleVersion: "12"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -63,15 +63,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.2.7"
-        CURRENT_PROJECT_VERSION: "7"
+        MARKETING_VERSION: "1.2.8"
+        CURRENT_PROJECT_VERSION: "11"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.2.7"
-        CFBundleVersion: "10"
+        CFBundleShortVersionString: "1.2.8"
+        CFBundleVersion: "11"
+        CFBundleIconName: "AppIcon"
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconName: "AppIcon"
         UILaunchScreen: {}
   TV:
     type: application
@@ -132,19 +136,20 @@ targets:
       - JoeTV/JoeTorrent.swift
       - JoeTV/JoeSettings.swift
       - JoeTV/JoeStores.swift
+      - JoeTV/TMDBClient.swift
       - JoeTV/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.5"
-        CURRENT_PROJECT_VERSION: "6"
+        MARKETING_VERSION: "1.6"
+        CURRENT_PROJECT_VERSION: "7"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "1.5"
-        CFBundleVersion: "6"
+        CFBundleShortVersionString: "1.6"
+        CFBundleVersion: "7"
         UILaunchScreen: {}

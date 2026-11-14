@@ -171,6 +171,18 @@ enum TorrentClient {
         return parseMetas(JSON.arr(root, "metas"))
     }
 
+    /// Genre rail from Cinemeta's top catalog. Endpoint pattern
+    /// built from the existing catalog URL construction above
+    /// (`/catalog/{type}/{id}.json`, here id "top" plus the
+    /// Stremio `genre=` extra); not verified live from this VM.
+    /// Genre strings are passed through verbatim (e.g.
+    /// "Science Fiction").
+    static func fetchGenreCatalog(type: String, genre: String) async throws -> [TorMeta] {
+        let root = try await JoeHTTP.getJSON(
+            TorrentSettings.cinemeta + "/catalog/\(type)/top/genre=\(genre).json")
+        return parseMetas(JSON.arr(root, "metas"))
+    }
+
     static func search(_ cat: TorCatalog, keyword: String) async throws -> [TorMeta] {
         let q = JoeHTTP.qenc(keyword)
         let root = try await JoeHTTP.getJSON(

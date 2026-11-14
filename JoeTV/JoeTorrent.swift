@@ -45,6 +45,11 @@ struct JoeTorrentHome: View {
                                 metaRail(cat.name, metas, base: cat.base)
                             }
                         }
+                        ForEach(Array(store.genreRails.enumerated()), id: \.offset) { _, rail in
+                            if !rail.metas.isEmpty {
+                                metaRail(rail.title, rail.metas, base: TorrentSettings.cinemeta)
+                            }
+                        }
                         if !TorrentSettings.isConfigured {
                             Text("Chưa cấu hình nguồn phát: vào Cài đặt nhập link Torrentio hoặc token Real-Debrid/TorBox của anh để lấy nguồn.")
                                 .font(.system(size: 22))
@@ -235,6 +240,11 @@ struct JoeTorrentHome: View {
         for cat in store.catalogs {
             if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
                 rails.append(metas.map { .meta($0.id) })
+            }
+        }
+        for rail in store.genreRails {
+            if !rail.metas.isEmpty {
+                rails.append(rail.metas.map { .meta($0.id) })
             }
         }
         return rails
