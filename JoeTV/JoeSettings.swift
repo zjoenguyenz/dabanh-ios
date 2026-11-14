@@ -49,24 +49,15 @@ struct JoeSettingsView: View {
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
 
-                HStack(spacing: 18) {
-                    Button {
-                        save()
-                    } label: {
-                        Text("Lưu cài đặt")
-                            .font(.system(size: 25, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 32)
-                            .padding(.vertical, 15)
-                            .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.5)))
-                            .overlay(JoeFocusRing(shape: Capsule()))
-                    }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
+                HStack(spacing: 14) {
                     if savedTick {
                         Text("Đã lưu ✓")
                             .font(.system(size: 22))
                             .foregroundStyle(.green)
+                    } else {
+                        Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white.opacity(0.45))
                     }
                 }
 
@@ -81,6 +72,10 @@ struct JoeSettingsView: View {
             .padding(.bottom, 40)
         }
         .onDisappear { save(silent: true) }
+        .onChange(of: addonURL) { save() }
+        .onChange(of: rdToken) { save() }
+        .onChange(of: torboxToken) { save() }
+        .onChange(of: subAddonURL) { save() }
     }
 
     private func field(title: String, hint: String,

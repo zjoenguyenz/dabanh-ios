@@ -33,6 +33,7 @@ struct JoeTorrentHome: View {
                         searchGrid
                     } else {
                         cwRail
+                        favRail
                         ForEach(Array(store.catalogs.enumerated()), id: \.offset) { _, cat in
                             if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
                                 metaRail(cat.name, metas, base: cat.base)
@@ -141,6 +142,43 @@ struct JoeTorrentHome: View {
                             watch.removeProgress(key: entry.key)
                         } label: {
                             Text("Xoá khỏi Đang xem dở")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var torFavorites: [WatchStore.Entry] {
+        Array(WatchStore.filterKinds(watch.favorites(), [WatchStore.kindTor])
+            .prefix(WatchStore.railCap))
+    }
+
+    @ViewBuilder
+    private var favRail: some View {
+        if !torFavorites.isEmpty {
+            JoeTheme.Rail(title: "♥ Yêu thích") {
+                ForEach(torFavorites) { entry in
+                    Button { nav.tor = TorRoute(
+                        meta: TorMeta(id: entry.metaId, type: entry.metaType,
+                                      name: entry.title, poster: entry.poster,
+                                      background: entry.background,
+                                      year: entry.year, desc: entry.desc),
+                        base: entry.metaBase) } label: {
+                        JoeTheme.PosterCard(
+                            title: entry.title,
+                            posterURL: entry.posterURL,
+                            meta: entry.year,
+                            focused: focusedEntry == entry.key)
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .focused($focusedEntry, equals: entry.key)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            watch.removeFavorite(key: entry.key)
+                        } label: {
+                            Text("Bỏ yêu thích")
                         }
                     }
                 }

@@ -295,7 +295,10 @@ struct JoeMovieDetail: View {
 
     private func epChip(_ d: Detail, ep: Episode) -> some View {
         let playable = Providers.isPlayable(code: provider, episode: ep)
-        let preselected = !route.preselectEp.isEmpty && ep.name == route.preselectEp
+        let storedEp = watch.progress().first(where: {
+            $0.slug == slug && $0.source == provider })?.ep
+        let preselected = ep.name == (!route.preselectEp.isEmpty
+                                      ? route.preselectEp : storedEp)
         let focused = focusedEp == ep.name
         return Button {
             play(d, epName: ep.name)

@@ -20,6 +20,7 @@ final class PhimStore: ObservableObject {
     @Published var vsNew: [Movie] = []
     @Published var vsSeries: [Movie] = []
     @Published var tpNew: [Movie] = []
+    @Published var tpMovies: [Movie] = []
     @Published var tpSeries: [Movie] = []
     @Published var loading = false
 
@@ -49,8 +50,9 @@ final class PhimStore: ObservableObject {
         async let f4kM = try? Providers.listByType(Providers.F4K, type: "phim-le", page: 1)
         async let vsS = try? Providers.listByType(Providers.VS, type: "phim-bo", page: 1)
         async let tpN = try? Providers.newest(Providers.TP, page: 1)
+        async let tpL = try? Providers.listByType(Providers.TP, type: "phim-le", page: 1)
         async let tpS = try? Providers.listByType(Providers.TP, type: "phim-bo", page: 1)
-        let (a, b, c, d, e, f, g, h, i, j) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpS)
+        let (a, b, c, d, e, f, g, h, i, j, k) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpL, tpS)
         // A rail that failed this round keeps its previous data.
         if let a { kkNew = a }
         if let b { f4kNew = b }
@@ -61,7 +63,8 @@ final class PhimStore: ObservableObject {
         if let g { f4kMovies = g }
         if let h { vsSeries = h }
         if let i { tpNew = i }
-        if let j { tpSeries = j }
+        if let j { tpMovies = j }
+        if let k { tpSeries = k }
         merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
         if hasData { loadedAt = Date() }
     }

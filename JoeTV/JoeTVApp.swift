@@ -130,7 +130,7 @@ struct JoeRootView: View {
                 }
             }
             Spacer()
-            Text("Joe TV v1.2")
+            Text("Joe TV v1.3")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .padding(.leading, 12)

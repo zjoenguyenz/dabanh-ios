@@ -69,11 +69,11 @@ struct JoePhimHome: View {
                     if !phim.vsSeries.isEmpty {
                         movieRail("🎬 VSMOV · Phim bộ mới", phim.vsSeries, badges: false)
                     }
-                    if !phim.tpNew.isEmpty {
-                        movieRail("🗄️ Tủ Phim · Mới cập nhật", phim.tpNew, badges: false)
+                    if !phim.tpMovies.isEmpty {
+                        movieRail("📚 Tủ Phim · Phim lẻ mới", phim.tpMovies, badges: false)
                     }
                     if !phim.tpSeries.isEmpty {
-                        movieRail("🗄️ Tủ Phim · Phim bộ mới", phim.tpSeries, badges: false)
+                        movieRail("📚 Tủ Phim · Phim bộ mới", phim.tpSeries, badges: false)
                     }
                     if phim.loading && !phim.hasData {
                         ProgressView("Đang tải thư viện phim…")
