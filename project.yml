@@ -138,13 +138,13 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.4"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "1.5"
+        CURRENT_PROJECT_VERSION: "6"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "1.4"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "1.5"
+        CFBundleVersion: "6"
         UILaunchScreen: {}

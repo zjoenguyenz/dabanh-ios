@@ -18,6 +18,7 @@ struct JoeMovieDetail: View {
     @State private var switching = false
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
+    @FocusState private var focusedAlt: String?
 
     struct DirectorHolder: Identifiable {
         let id = UUID()
@@ -210,8 +211,9 @@ struct JoeMovieDetail: View {
             .background(Capsule().fill(JoeTheme.accentViolet))
             .overlay(JoeFocusRing(shape: Capsule(), lineWidth: 3.5))
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedPlay)
+        .scaleEffect(focusedPlay ? 1.05 : 1.0)
         .disabled(startEpisode(d) == nil || switching)
     }
 
@@ -237,7 +239,7 @@ struct JoeMovieDetail: View {
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
     }
 
     // MARK: - "Nguồn khác:" chips
@@ -260,10 +262,14 @@ struct JoeMovieDetail: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
-                        .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.35)))
+                        .background(Capsule().fill(focusedAlt == alt.code
+                                                   ? JoeTheme.accentViolet
+                                                   : JoeTheme.accentViolet.opacity(0.35)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
+                .focused($focusedAlt, equals: alt.code)
+                .scaleEffect(focusedAlt == alt.code ? 1.05 : 1.0)
             }
         }
     }
@@ -310,12 +316,13 @@ struct JoeMovieDetail: View {
                     .fill(preselected ? JoeTheme.accentViolet.opacity(0.30)
                           : Color.white.opacity(0.08)))
                 .overlay(RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(focused ? Color.white
+                    .strokeBorder(focused ? JoeTheme.focusViolet
                                   : (preselected ? JoeTheme.accentViolet : Color.clear),
                                   lineWidth: focused ? 3 : 2))
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedEp, equals: ep.name)
+        .scaleEffect(focused ? 1.05 : 1.0)
         .disabled(!playable || switching)
     }
 

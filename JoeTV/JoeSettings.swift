@@ -13,6 +13,7 @@ import SwiftUI
 ///   VLC/MX the way Android can; shipping a dead control would
 ///   be worse than omitting it. Playback is AVPlayer everywhere.
 struct JoeSettingsView: View {
+    @EnvironmentObject private var nav: JoeNavigator
     @State private var addonURL: String = TorrentSettings.addonURL
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken
@@ -67,6 +68,16 @@ struct JoeSettingsView: View {
                     .frame(maxWidth: 1200, alignment: .leading)
             }
         }
+        .modifier(JoeSettingsMoveTrap(enabled: focusedField == "addon") { direction in
+            firstFieldMove(direction)
+        })
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub entry (v1.5): pill DOWN lands focus on the first
+            // field (the Torrentio link, id "addon").
+            if nav.focusTarget == .sectionTop {
+                focusedField = "addon"
+            }
+        }
         .onDisappear { save(silent: true) }
         .onChange(of: addonURL) { save() }
         .onChange(of: rdToken) { save() }
@@ -95,7 +106,7 @@ struct JoeSettingsView: View {
             .background(RoundedRectangle(cornerRadius: 13)
                 .fill(Color.white.opacity(0.10)))
             .overlay(RoundedRectangle(cornerRadius: 13)
-                .strokeBorder(focusedField == id ? Color.white : Color.clear,
+                .strokeBorder(focusedField == id ? joeFocusViolet : Color.clear,
                               lineWidth: 2.5))
             .frame(maxWidth: 1250)
             .focused($focusedField, equals: id)
@@ -104,6 +115,26 @@ struct JoeSettingsView: View {
                 .font(.system(size: 19))
                 .foregroundStyle(.white.opacity(0.45))
                 .frame(maxWidth: 1250, alignment: .leading)
+        }
+    }
+
+    /// First-field routing: the trap is enabled ONLY while the
+    /// first field (id "addon") holds focus, and all four
+    /// directions are defined — UP escapes to the shell pills
+    /// through the focus hub, DOWN steps to the second field
+    /// (id "rd"), LEFT/RIGHT are explicit no-ops (the fields are
+    /// full-width rows; there is nothing beside them). Other
+    /// fields keep the focus engine's default vertical movement.
+    private func firstFieldMove(_ direction: MoveCommandDirection) {
+        switch direction {
+        case .up:
+            nav.requestFocus(.pills)
+        case .down:
+            focusedField = "rd"
+        case .left, .right:
+            break
+        @unknown default:
+            break
         }
     }
 
@@ -118,6 +149,27 @@ struct JoeSettingsView: View {
                 try? await Task.sleep(for: .seconds(2))
                 savedTick = false
             }
+        }
+    }
+}
+
+/// v1.5 focus outline colour (lighter violet) — the style law's
+/// focus stroke; replaces the fields' old white focused stroke.
+private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
+
+/// Local copy of the shell's conditional move-trap pattern (the
+/// shell's JoeMoveTrap is file-private to JoeTVApp.swift): the
+/// move handler exists ONLY while `enabled`, and while enabled
+/// its handler gives all four directions a defined outcome.
+private struct JoeSettingsMoveTrap: ViewModifier {
+    let enabled: Bool
+    let action: (MoveCommandDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onMoveCommand(perform: action)
+        } else {
+            content
         }
     }
 }

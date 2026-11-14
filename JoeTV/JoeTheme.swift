@@ -1,8 +1,11 @@
 import SwiftUI
 
 /// Joe TV's visual language — the same family as the Android app:
-/// deep indigo → violet gradient, red accent, thick white focus
-/// outline, no scale-up. It shares the TV app's gradient DNA (the
+/// deep indigo → violet gradient, red accent, thick VIOLET focus
+/// outline (the TV360 language with the owner's override: white
+/// focus styling is banned as unprofessional) plus a slight
+/// scale-up on the element's own dark surface. It shares the TV
+/// app's gradient DNA (the
 /// two are sister apps) but the chrome is its own — a four-section
 /// left rail and a "Joe TV" wordmark — and it is deliberately
 /// UNLIKE Đá Banh tvOS (emerald, top pill tabs, crest hero) so the
@@ -21,7 +24,7 @@ struct JoeFocusRing<S: InsettableShape>: View {
     var lineWidth: CGFloat = 3
 
     var body: some View {
-        shape.strokeBorder(isFocused ? Color.white : Color.clear,
+        shape.strokeBorder(isFocused ? JoeTheme.focusViolet : Color.clear,
                            lineWidth: isFocused ? lineWidth : 0)
     }
 }
@@ -29,6 +32,8 @@ struct JoeFocusRing<S: InsettableShape>: View {
 enum JoeTheme {
     static let accentRed = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let accentViolet = Color(red: 0.62, green: 0.45, blue: 1.0)
+    /// The one focus-outline colour app-wide (lighter violet).
+    static let focusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
     static var background: some View {
         LinearGradient(
@@ -97,7 +102,7 @@ enum JoeTheme {
                 }
                 Text(title)
                     .font(.system(size: 21, weight: focused ? .semibold : .medium))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(focused ? JoeTheme.accentViolet : .white)
                     .lineLimit(1)
                     .frame(width: width, alignment: .leading)
                 if let subline {
@@ -120,10 +125,11 @@ enum JoeTheme {
                     .fill(Color.white.opacity(0.07))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
-                            .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
-                                          lineWidth: focused ? 4.5 : 1.2))
+                            .strokeBorder(focused ? JoeTheme.focusViolet : Color.white.opacity(0.10),
+                                          lineWidth: focused ? 3.5 : 1.2))
                     .shadow(color: .black.opacity(focused ? 0.55 : 0),
                             radius: focused ? 20 : 0, x: 0, y: focused ? 10 : 0))
+            .scaleEffect(focused ? 1.05 : 1.0)
         }
 
         private var placeholder: some View {

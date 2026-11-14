@@ -24,6 +24,7 @@ struct JoePhimHome: View {
     @EnvironmentObject private var phim: PhimStore
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var focusedEntry: String?
+    @FocusState private var headerFocused: Bool
 
     var body: some View {
         Group {
@@ -34,6 +35,13 @@ struct JoePhimHome: View {
             }
         }
         .task { phim.loadIfNeeded() }
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub contract: the shell asks this section to take
+            // focus at its top — the "Tìm phim" header button.
+            if nav.focusTarget == .sectionTop {
+                headerFocused = true
+            }
+        }
     }
 
     private var grid: some View {
@@ -84,6 +92,12 @@ struct JoePhimHome: View {
                     }
                 }
             }
+            .modifier(JoeMoveTrap(enabled: headerFocused) { dir in
+                handleHeaderMove(dir)
+            })
+            .modifier(JoeMoveTrap(enabled: firstRailFocusIndex != nil) { dir in
+                handleFirstRailMove(dir)
+            })
     }
 
     // MARK: - Header
@@ -110,10 +124,13 @@ struct JoePhimHome: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 26)
                 .padding(.vertical, 14)
-                .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
+                .background(Capsule().fill(headerFocused ? JoeTheme.accentViolet
+                                           : JoeTheme.accentViolet.opacity(0.45)))
                 .overlay(JoeFocusRing(shape: Capsule()))
+                .scaleEffect(headerFocused ? 1.05 : 1.0)
             }
-            .buttonStyle(.card)
+            .buttonStyle(.plain)
+            .focused($headerFocused)
         }
     }
 
@@ -129,6 +146,99 @@ struct JoePhimHome: View {
         Array(WatchStore.filterKinds(watch.favorites(),
                                      [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP])
             .prefix(WatchStore.railCap))
+    }
+
+    // MARK: - Focus traversal (boundary traps)
+
+    /// One focusable card in a rail, whichever FocusState owns it.
+    private enum RailItem: Equatable {
+        case entry(String)
+        case movie(Movie.ID)
+    }
+
+    /// Every rail in on-screen order, empty rails skipped — the
+    /// first element is the section's first rail (the
+    /// Continue-Watching entry rail when non-empty, else the
+    /// first movie rail).
+    private var phimRails: [[RailItem]] {
+        var rails: [[RailItem]] = []
+        if !movieProgress.isEmpty {
+            rails.append(movieProgress.map { .entry($0.key) })
+        }
+        if !movieFavorites.isEmpty {
+            rails.append(movieFavorites.map { .entry($0.key) })
+        }
+        let movieRails: [[Movie]] = [phim.merged, phim.kkNew, phim.kkSeries,
+                                     phim.kkMovies, phim.kkAnime, phim.f4kNew,
+                                     phim.f4kMovies, phim.vsNew, phim.vsSeries,
+                                     phim.tpMovies, phim.tpSeries]
+        for movies in movieRails where !movies.isEmpty {
+            rails.append(movies.map { .movie($0.id) })
+        }
+        return rails
+    }
+
+    private var currentRailItem: RailItem? {
+        if let focusedEntry { return .entry(focusedEntry) }
+        if let focusedMovie { return .movie(focusedMovie) }
+        return nil
+    }
+
+    /// Non-nil only while focus sits in the FIRST rail — that is
+    /// the one state where the first-rail trap is enabled.
+    private var firstRailFocusIndex: Int? {
+        guard let item = currentRailItem,
+              let first = phimRails.first,
+              let idx = first.firstIndex(of: item) else { return nil }
+        return idx
+    }
+
+    private func setRailFocus(_ item: RailItem) {
+        switch item {
+        case .entry(let key):
+            focusedMovie = nil
+            focusedEntry = key
+        case .movie(let id):
+            focusedEntry = nil
+            focusedMovie = id
+        }
+    }
+
+    /// Header boundary: UP escapes the section to the shell
+    /// pills, DOWN lands on the first rail's first card,
+    /// LEFT/RIGHT are explicit no-ops (the header button is the
+    /// only focusable element in its row, at the screen's top).
+    private func handleHeaderMove(_ dir: MoveCommandDirection) {
+        if dir == .up {
+            nav.requestFocus(.pills)
+        } else if dir == .down {
+            if let first = phimRails.first?.first {
+                setRailFocus(first)
+            }
+        }
+        // .left / .right: explicit no-op (see above).
+    }
+
+    /// First-rail boundary: UP to the header button, LEFT/RIGHT
+    /// arithmetic neighbours inside the rail (no-op at its ends),
+    /// DOWN to the same-index card (clamped) in the next rail
+    /// (no-op when there is no next rail). Deeper rails are not
+    /// trapped — the focus engine's geometry handles them.
+    private func handleFirstRailMove(_ dir: MoveCommandDirection) {
+        guard let idx = firstRailFocusIndex,
+              let first = phimRails.first else { return }
+        if dir == .up {
+            headerFocused = true
+        } else if dir == .left {
+            if idx > 0 { setRailFocus(first[idx - 1]) }
+        } else if dir == .right {
+            if idx < first.count - 1 { setRailFocus(first[idx + 1]) }
+        } else if dir == .down {
+            if phimRails.count > 1 {
+                let next = phimRails[1]
+                setRailFocus(next[min(idx, next.count - 1)])
+            }
+        }
     }
 
     @ViewBuilder
@@ -149,7 +259,7 @@ struct JoePhimHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.card)
+                    .buttonStyle(.plain)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -179,7 +289,7 @@ struct JoePhimHome: View {
                             badge: Providers.badge(entry.source),
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.card)
+                    .buttonStyle(.plain)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -208,10 +318,26 @@ struct JoePhimHome: View {
                         badge: badges ? Providers.badge(movie.provider) : nil,
                         focused: focusedMovie == movie.id)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
                 .focused($focusedMovie, equals: movie.id)
             }
         }
     }
 
+}
+
+/// Conditional move trap (hub contract): installed only while
+/// focus sits on a boundary element, so every direction it
+/// intercepts must have a defined outcome in the handler.
+private struct JoeMoveTrap: ViewModifier {
+    let enabled: Bool
+    let action: (MoveCommandDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onMoveCommand(perform: action)
+        } else {
+            content
+        }
+    }
 }

@@ -4,11 +4,19 @@ import SwiftUI
 /// served by the shared TVStore — cache-first, device-side link
 /// validation with the proven-dead set persisted, .flv hidden,
 /// manual "✓ Kiểm tra link" re-probe. Layout inside Joe TV's
-/// shell: a hero that follows focus, a group chip row, then one
-/// logo-tile rail per visible group. Playback goes through the
+/// shell: a hero that follows focus, a group chip row, then ONE
+/// channel grid (LazyVGrid, 6 columns) for the selected group —
+/// v1.5 deleted the per-group horizontal rails whose nested
+/// ScrollViews broke the focus engine's UP geometry. Playback goes through the
 /// shared TVPlayerView with same-name fallback sources.
+
+/// v1.5 focus outline colour (lighter violet) — the style law's
+/// focus stroke on every focusable element in this file.
+private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
+
 struct JoeTVSection: View {
     @EnvironmentObject private var store: TVStore
+    @EnvironmentObject private var nav: JoeNavigator
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
     @State private var selectedGroup: String?
@@ -40,13 +48,17 @@ struct JoeTVSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             hero
+                // Hero stabilisation (v1.5): focus changes swap the
+                // hero channel instantly — no implicit animation
+                // can ghost/overlap the old and new titles.
+                .animation(nil, value: heroChannel?.id)
             chipRow
             if let message = store.statusMessage {
                 Text(message)
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
-            sections
+            gridSection
             footer
         }
         // No outer padding here: the shell (JoeRootView) owns the
@@ -63,6 +75,14 @@ struct JoeTVSection: View {
         .onChange(of: store.channels) { _, _ in
             if selectedGroup == nil { selectedGroup = store.groups.first }
             store.noteSelectedGroup(effectiveGroup)
+        }
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub entry (v1.5): pill DOWN lands focus on the chips
+            // (the effective group's chip); DOWN from a chip then
+            // enters the grid — see moveChip.
+            if nav.focusTarget == .sectionTop {
+                focusedChip = effectiveGroup
+            }
         }
     }
 
@@ -180,11 +200,12 @@ struct JoeTVSection: View {
             selectedGroup = group
             store.noteSelectedGroup(group)
         } label: {
-            // Chip text is ALWAYS .white (v1.4 rule): the old
-            // accentRed selected text was unreadable under the
-            // pale focus backdrop. Selection is carried by the
-            // decisive red fill instead; focus by the white ring
-            // plus a violet fill when the chip is not selected.
+            // Chip text is ALWAYS .white: selection is carried by
+            // the decisive red fill. Focus (v1.5 style law, drawn
+            // by hand under .plain — the system draws nothing) is
+            // a violet fill when the chip is not selected; on the
+            // selected chip it is the lighter-violet outline +
+            // scale over the red fill.
             Text(group)
                 .font(.system(size: 22, weight: selected ? .bold : .medium))
                 .foregroundStyle(.white)
@@ -193,13 +214,15 @@ struct JoeTVSection: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
                 .background(Capsule().fill(selected ? JoeTheme.accentRed.opacity(0.85)
-                                           : (focused ? JoeTheme.accentViolet.opacity(0.45)
+                                           : (focused ? JoeTheme.accentViolet
                                                       : Color.white.opacity(0.07))))
-                .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
+                .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
                                                 lineWidth: 2.5))
+                .scaleEffect(focused ? 1.06 : 1.0)
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedChip, equals: group)
+        .onMoveCommand { direction in moveChip(direction, from: group) }
     }
 
     private func actionChip(id: String, title: String, action: @escaping () -> Void) -> some View {
@@ -212,76 +235,119 @@ struct JoeTVSection: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(Color.white.opacity(0.08)))
-                .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
+                .background(Capsule().fill(focused ? JoeTheme.accentViolet
+                                           : Color.white.opacity(0.08)))
+                .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
                                                 lineWidth: 2.5))
+                .scaleEffect(focused ? 1.06 : 1.0)
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedChip, equals: id)
+        .onMoveCommand { direction in moveChip(direction, from: id) }
         .disabled(store.isLoading || store.isValidating)
     }
 
-    // MARK: - Sections
+    /// Ordered focus ids of the chip row: every visible group,
+    /// then the two action chips. The action ids drop out of the
+    /// list while the store is busy because their buttons are
+    /// disabled then and could not take focus anyway.
+    private var chipIDs: [String] {
+        var ids = store.visibleGroups
+        if !store.isLoading && !store.isValidating {
+            ids += ["refresh", "validate"]
+        }
+        return ids
+    }
+
+    /// Chip routing: the move handler sits on each chip, so it is
+    /// active exactly while that chip holds focus, and all four
+    /// directions have defined outcomes — LEFT/RIGHT walk chipIDs
+    /// arithmetically (no-op at the ends), UP escapes to the shell
+    /// pills through the focus hub, DOWN enters the grid at the
+    /// effective group's first channel.
+    private func moveChip(_ direction: MoveCommandDirection, from id: String) {
+        switch direction {
+        case .left:
+            let ids = chipIDs
+            if let idx = ids.firstIndex(of: id), idx > 0 {
+                focusedChip = ids[idx - 1]
+            }
+        case .right:
+            let ids = chipIDs
+            if let idx = ids.firstIndex(of: id), idx + 1 < ids.count {
+                focusedChip = ids[idx + 1]
+            }
+        case .up:
+            nav.requestFocus(.pills)
+        case .down:
+            focusedChannel = gridChannels.first?.id
+        @unknown default:
+            break
+        }
+    }
+
+    // MARK: - Channel grid (v1.5: ONE grid, no nested rails)
+
+    /// The v1.4 layout nested a horizontal ScrollView per group
+    /// inside the vertical one; the focus engine's geometry then
+    /// never carried UP from deep tiles back to the chips. v1.5
+    /// shows exactly ONE grid — the effective group's channels —
+    /// inside the section's single vertical ScrollView, and every
+    /// tile routes focus arithmetically (see moveInGrid).
+
+    private let gridColumns = Array(repeating: GridItem(.fixed(264), spacing: 22),
+                                    count: 6)
+
+    /// The grid's data: the effective group's visible channels
+    /// (invalid-link filtering lives in store.visibleChannels).
+    private var gridChannels: [Channel] {
+        guard let group = effectiveGroup else { return [] }
+        return store.visibleChannels(in: group)
+    }
 
     @ViewBuilder
-    private var sections: some View {
+    private var gridSection: some View {
         if store.channels.isEmpty {
             Spacer()
+        } else if let group = effectiveGroup {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                    Text(group)
+                        .font(.system(size: 29, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text("\(gridChannels.count) kênh")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
+                        ForEach(gridChannels) { channel in
+                            tile(channel)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
+                }
+            }
         } else {
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 38) {
-                    ForEach(orderedGroups, id: \.self) { group in
-                        section(group)
-                    }
-                }
-                .padding(.vertical, 6)
-            }
+            Spacer()
         }
     }
 
-    /// Selected group first, then the rest in file order.
-    private var orderedGroups: [String] {
-        var out: [String] = []
-        if let lead = effectiveGroup, store.visibleGroups.contains(lead) { out.append(lead) }
-        for g in store.visibleGroups where g != effectiveGroup { out.append(g) }
-        return out
-    }
-
-    private func section(_ group: String) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 14) {
-                Text(group)
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text("\(store.visibleChannels(in: group).count) kênh")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 22) {
-                    ForEach(store.visibleChannels(in: group)) { channel in
-                        tile(channel)
-                    }
-                }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 4)
-            }
-        }
-    }
-
+    /// One grid cell: the focusable surface is the ART ONLY; the
+    /// channel name is a sibling Text below the button, never
+    /// inside it, so focus styling can never wash the name out.
+    /// The name turns accentViolet + semibold while its tile is
+    /// focused. Focus itself is hand-drawn under .plain: scale
+    /// 1.06 + 3.5pt lighter-violet outline + soft shadow, and the
+    /// tile background stays dark.
     private func tile(_ channel: Channel) -> some View {
         let focused = focusedChannel == channel.id
-        return Button {
-            play(channel)
-        } label: {
-            // The background + ring cover the WHOLE tile, art and
-            // title together (v1.4, like Đá Banh's matchCard whose
-            // label background covers all its text): previously
-            // the ring wrapped only the art, so the title sat
-            // outside the label's backing and washed out under
-            // the system focus treatment.
-            VStack(spacing: 9) {
+        return VStack(spacing: 8) {
+            Button {
+                play(channel)
+            } label: {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18)
                         .fill(Color.black.opacity(0.45))
@@ -299,22 +365,57 @@ struct JoeTVSection: View {
                         fallbackText(channel)
                     }
                 }
-                .frame(width: 280, height: 158)
-                Text(channel.title)
-                    .font(.system(size: 20, weight: focused ? .semibold : .medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .frame(width: 280)
+                .frame(width: 264, height: 150)
+                .overlay(RoundedRectangle(cornerRadius: 18)
+                    .strokeBorder(focused ? joeFocusViolet : Color.white.opacity(0.10),
+                                  lineWidth: focused ? 3.5 : 1.2))
+                .shadow(color: .black.opacity(focused ? 0.55 : 0),
+                        radius: focused ? 18 : 0, x: 0, y: focused ? 8 : 0)
+                .scaleEffect(focused ? 1.06 : 1.0)
             }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 18)
-                .fill(Color.white.opacity(0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
-                              lineWidth: focused ? 4.5 : 1.2))
+            .buttonStyle(.plain)
+            .focused($focusedChannel, equals: channel.id)
+            .onMoveCommand { direction in
+                moveInGrid(direction, from: channel)
+            }
+            Text(channel.title)
+                .font(.system(size: 20, weight: focused ? .semibold : .medium))
+                .foregroundStyle(focused ? JoeTheme.accentViolet : .white)
+                .lineLimit(1)
+                .frame(width: 264)
         }
-        .buttonStyle(.card)
-        .focused($focusedChannel, equals: channel.id)
+    }
+
+    /// Manual grid routing: the handler sits on each tile, so it
+    /// is active exactly while that tile holds focus, and every
+    /// direction is arithmetic over gridChannels with 6 columns —
+    /// LEFT/RIGHT stop at row edges, DOWN past the last row is a
+    /// defined no-op, and UP from the first row escapes to the
+    /// chips (focusedChip = effectiveGroup).
+    private func moveInGrid(_ direction: MoveCommandDirection, from channel: Channel) {
+        let channels = gridChannels
+        guard let idx = channels.firstIndex(where: { $0.id == channel.id }) else { return }
+        let columns = 6
+        switch direction {
+        case .left:
+            if idx % columns > 0 { focusedChannel = channels[idx - 1].id }
+        case .right:
+            if idx + 1 < channels.count, idx % columns < columns - 1 {
+                focusedChannel = channels[idx + 1].id
+            }
+        case .up:
+            if idx >= columns {
+                focusedChannel = channels[idx - columns].id
+            } else {
+                focusedChip = effectiveGroup
+            }
+        case .down:
+            if idx + columns < channels.count {
+                focusedChannel = channels[idx + columns].id
+            }
+        @unknown default:
+            break
+        }
     }
 
     private var footer: some View {

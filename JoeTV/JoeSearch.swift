@@ -12,6 +12,11 @@ struct JoeSearchView: View {
     @State private var searched = false
     @FocusState private var focusedMovie: Movie.ID?
 
+    /// The top row's three focusable elements, in visual order —
+    /// the conditional move trap routes among them explicitly.
+    private enum TopFocus: Hashable { case field, search, back }
+    @FocusState private var topFocus: TopFocus?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             HStack(spacing: 18) {
@@ -23,7 +28,11 @@ struct JoeSearchView: View {
                     .padding(.vertical, 16)
                     .background(RoundedRectangle(cornerRadius: 14)
                         .fill(Color.white.opacity(0.10)))
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(topFocus == .field ? joeFocusViolet : Color.clear,
+                                      lineWidth: 2.5))
                     .frame(width: 900)
+                    .focused($topFocus, equals: .field)
                     .onSubmit { runSearch() }
                 Button {
                     runSearch()
@@ -33,10 +42,15 @@ struct JoeSearchView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
-                        .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
-                        .overlay(JoeFocusRing(shape: Capsule()))
+                        .background(Capsule().fill(topFocus == .search
+                                                   ? JoeTheme.accentViolet
+                                                   : JoeTheme.accentViolet.opacity(0.45)))
+                        .overlay(Capsule().strokeBorder(topFocus == .search ? joeFocusViolet : Color.clear,
+                                                        lineWidth: 2.5))
+                        .scaleEffect(topFocus == .search ? 1.06 : 1.0)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
+                .focused($topFocus, equals: .search)
                 .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button {
                     nav.searchOpen = false
@@ -46,18 +60,32 @@ struct JoeSearchView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
-                        .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
-                        .overlay(JoeFocusRing(shape: Capsule()))
+                        .background(Capsule().fill(topFocus == .back
+                                                   ? JoeTheme.accentViolet
+                                                   : JoeTheme.accentViolet.opacity(0.45)))
+                        .overlay(Capsule().strokeBorder(topFocus == .back ? joeFocusViolet : Color.clear,
+                                                        lineWidth: 2.5))
+                        .scaleEffect(topFocus == .back ? 1.06 : 1.0)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
+                .focused($topFocus, equals: .back)
             }
+            .modifier(JoeSearchMoveTrap(enabled: topFocus != nil) { direction in
+                topMove(direction)
+            })
             if searched && results.isEmpty && !searching {
                 Text("Không thấy phim nào với từ khoá này.")
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.6))
             }
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 26)],
+                // Fixed 6 columns (was .adaptive(minimum: 240),
+                // whose column count the code cannot enumerate) so
+                // result focus routing is exact arithmetic — see
+                // resultMove. PosterCard is a fixed 218 wide, so
+                // the flexible columns render as before.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 26),
+                                         count: 6),
                           alignment: .leading, spacing: 30) {
                     ForEach(results) { movie in
                         Button { nav.movie = MovieRoute(
@@ -71,13 +99,91 @@ struct JoeSearchView: View {
                                 badge: Providers.badge(movie.provider),
                                 focused: focusedMovie == movie.id)
                         }
-                        .buttonStyle(.card)
+                        .buttonStyle(.plain)
                         .focused($focusedMovie, equals: movie.id)
+                        .onMoveCommand { direction in
+                            resultMove(direction, from: movie)
+                        }
                     }
                 }
                 .padding(.vertical, 8)
                 .padding(.horizontal, 4)
             }
+        }
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub entry (v1.5): pill DOWN while search is open
+            // lands focus on the query field.
+            if nav.focusTarget == .sectionTop {
+                topFocus = .field
+            }
+        }
+    }
+
+    /// The Tìm button's disabled condition, mirrored so LEFT/RIGHT
+    /// routing can skip it while it cannot take focus.
+    private var searchEnabled: Bool {
+        !searching && !query.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Top-row routing: the trap is enabled ONLY while a top-row
+    /// element holds focus, and all four directions are defined —
+    /// UP escapes to the shell pills through the hub (this closes
+    /// the v1.4 "LEFT from search cannot reach Cài đặt" class of
+    /// failure by construction), LEFT/RIGHT walk field ↔ Tìm ↔
+    /// Quay lại in visual order (skipping Tìm while disabled,
+    /// no-op at the ends), DOWN drops to the first result when
+    /// results exist, else no-op.
+    private func topMove(_ direction: MoveCommandDirection) {
+        switch direction {
+        case .up:
+            nav.requestFocus(.pills)
+        case .down:
+            if let first = results.first { focusedMovie = first.id }
+        case .left:
+            switch topFocus {
+            case .search: topFocus = .field
+            case .back: topFocus = searchEnabled ? .search : .field
+            default: break
+            }
+        case .right:
+            switch topFocus {
+            case .field: topFocus = searchEnabled ? .search : .back
+            case .search: topFocus = .back
+            default: break
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Result-grid routing: the handler sits on each result, so
+    /// it is active exactly while that result holds focus. Exact
+    /// arithmetic over the fixed 6-column grid — UP from a
+    /// first-row result returns focus to the query field,
+    /// LEFT/RIGHT stop at row edges, DOWN past the last row is a
+    /// defined no-op.
+    private func resultMove(_ direction: MoveCommandDirection, from movie: Movie) {
+        guard let idx = results.firstIndex(where: { $0.id == movie.id }) else { return }
+        let columns = 6
+        switch direction {
+        case .left:
+            if idx % columns > 0 { focusedMovie = results[idx - 1].id }
+        case .right:
+            if idx + 1 < results.count, idx % columns < columns - 1 {
+                focusedMovie = results[idx + 1].id
+            }
+        case .up:
+            if idx >= columns {
+                focusedMovie = results[idx - columns].id
+            } else {
+                topFocus = .field
+            }
+        case .down:
+            if idx + columns < results.count {
+                focusedMovie = results[idx + columns].id
+            }
+        @unknown default:
+            break
         }
     }
 
@@ -94,6 +200,27 @@ struct JoeSearchView: View {
             results = (a ?? []) + (b ?? []) + (c ?? []) + (d ?? [])
             searched = true
             searching = false
+        }
+    }
+}
+
+/// v1.5 focus outline colour (lighter violet) — the style law's
+/// focus stroke on every focusable element in this file.
+private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
+
+/// Local copy of the shell's conditional move-trap pattern (the
+/// shell's JoeMoveTrap is file-private to JoeTVApp.swift): the
+/// move handler exists ONLY while `enabled`, and while enabled
+/// its handler gives all four directions a defined outcome.
+private struct JoeSearchMoveTrap: ViewModifier {
+    let enabled: Bool
+    let action: (MoveCommandDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onMoveCommand(perform: action)
+        } else {
+            content
         }
     }
 }

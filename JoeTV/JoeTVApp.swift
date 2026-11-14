@@ -1,5 +1,9 @@
 import SwiftUI
 
+/// v1.5 focus outline colour (lighter violet) — the style law's
+/// focus stroke on every focusable element in this file.
+private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
+
 /// Joe TV for Apple TV — one app for live TV, the aggregated Phim
 /// library (KKPhim + Film4K + VSMOV + Tủ Phim) and the debrid
 /// Torrent section. v1.1 reaches parity with the Android app the
@@ -48,6 +52,21 @@ final class JoeNavigator: ObservableObject {
     @Published var tor: TorRoute?
     @Published var searchOpen = false
 
+    /// v1.5 focus hub: explicit, guaranteed focus routing between
+    /// the shell's pill row and the visible section. A section (or
+    /// the search view) calls requestFocus(.pills) to escape
+    /// upward; the shell calls requestFocus(.sectionTop) on pill
+    /// DOWN and the visible section lands focus on its own first
+    /// element. focusNonce increments on EVERY request so repeated
+    /// requests to the same target still fire .onChange.
+    enum JoeFocusTarget { case pills, sectionTop }
+    @Published var focusTarget: JoeFocusTarget?
+    @Published var focusNonce = 0
+    func requestFocus(_ target: JoeFocusTarget) {
+        focusTarget = target
+        focusNonce &+= 1
+    }
+
     /// Close the topmost layer; returns false when nothing is
     /// open (the caller then lets the system have the press).
     func closeTop() -> Bool {
@@ -67,8 +86,11 @@ final class JoeNavigator: ObservableObject {
 /// the TV section's channels or the Settings fields at all, and
 /// the system focus effect washed a pale halo over focused rail
 /// rows despite .buttonStyle(.plain)+.focusEffectDisabled().
-/// Every pill now uses .buttonStyle(.card) with a label fully
-/// backed by its own solid capsule, exactly like Đá Banh.
+/// v1.5: pills use .buttonStyle(.plain) and draw focus themselves
+/// (violet fill + lighter-violet outline + scale) — .card's pale
+/// focus card washed titles out in the owner's v1.4 videos and is
+/// banned. Focus routing between pills and sections is explicit
+/// through the JoeNavigator focus hub, never left to geometry.
 struct JoeRootView: View {
     enum Section: String, CaseIterable {
         case tv, phim, torrent, settings
@@ -100,6 +122,9 @@ struct JoeRootView: View {
             JoeTheme.background
             VStack(spacing: 24) {
                 topBar
+                    .modifier(JoeMoveTrap(enabled: focusedSection != nil) { direction in
+                        pillMove(direction)
+                    })
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -125,6 +150,13 @@ struct JoeRootView: View {
             }
         }
         .environmentObject(nav)
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub consumer (shell side): a section escaping upward
+            // lands focus back on the CURRENT section's pill.
+            if nav.focusTarget == .pills {
+                focusedSection = section
+            }
+        }
         .modifier(JoeExitTrap(enabled: nav.movie != nil || nav.tor != nil
                                        || nav.searchOpen) {
             _ = nav.closeTop()
@@ -143,7 +175,7 @@ struct JoeRootView: View {
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.4")
+            Text("Joe TV v1.5")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
@@ -181,16 +213,47 @@ struct JoeRootView: View {
             .foregroundStyle((selected || focused) ? .white : .white.opacity(0.85))
             .padding(.horizontal, 26)
             .padding(.vertical, 12)
-            // The label's own solid capsule is what keeps the
-            // text readable under the .card focus treatment —
-            // exactly like Đá Banh's tealFill selected pill.
+            // v1.5 style law: .plain draws NO system focus effect,
+            // so focus is drawn here and only here — the violet
+            // fill on the pill's own dark capsule keeps the white
+            // text readable; a focused pill adds the lighter-violet
+            // outline and a slight scale. No pale card, no white
+            // ring (both banned after the v1.4 videos).
             .background(Capsule().fill(selected ? JoeTheme.accentViolet
-                                       : Color.white.opacity(0.08)))
-            .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
+                                       : (focused ? JoeTheme.accentViolet
+                                                  : Color.white.opacity(0.08))))
+            .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
                                             lineWidth: 2.5))
+            .scaleEffect(focused ? 1.06 : 1.0)
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedSection, equals: s)
+    }
+
+    /// Guaranteed pill-row routing (v1.5 hub): the topBar move
+    /// trap is enabled ONLY while a pill holds focus, and every
+    /// direction has a defined outcome — LEFT/RIGHT walk the
+    /// CaseIterable order arithmetically (no-op at the ends),
+    /// DOWN hands off to the visible section through the hub,
+    /// UP is a defined no-op (the pills are the top screen edge).
+    /// Pills still change section only on select-press.
+    private func pillMove(_ direction: MoveCommandDirection) {
+        guard let current = focusedSection,
+              let idx = Section.allCases.firstIndex(of: current) else { return }
+        switch direction {
+        case .left:
+            if idx > 0 { focusedSection = Section.allCases[idx - 1] }
+        case .right:
+            if idx + 1 < Section.allCases.count {
+                focusedSection = Section.allCases[idx + 1]
+            }
+        case .down:
+            nav.requestFocus(.sectionTop)
+        case .up:
+            break
+        @unknown default:
+            break
+        }
     }
 
     @ViewBuilder
@@ -219,6 +282,25 @@ private struct JoeExitTrap: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content.onExitCommand(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
+/// Conditional move trap, same shape as JoeExitTrap: the move
+/// handler exists ONLY while `enabled`. A trap is enabled only
+/// while focus sits on a boundary element, and while enabled its
+/// handler must give ALL FOUR directions a defined outcome
+/// (forced target, arithmetic neighbour, or explicit no-op at a
+/// screen edge) — never swallow a direction silently.
+private struct JoeMoveTrap: ViewModifier {
+    let enabled: Bool
+    let action: (MoveCommandDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onMoveCommand(perform: action)
         } else {
             content
         }

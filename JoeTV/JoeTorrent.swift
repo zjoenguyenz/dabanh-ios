@@ -24,6 +24,12 @@ struct JoeTorrentHome: View {
     @FocusState private var focusedMeta: TorMeta.ID?
     @FocusState private var focusedEntry: String?
 
+    /// The search row's focusable elements, in visual order.
+    private enum SearchRowFocus: Hashable {
+        case field, search, clear
+    }
+    @FocusState private var searchFocus: SearchRowFocus?
+
     var body: some View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
@@ -47,7 +53,20 @@ struct JoeTorrentHome: View {
                     }
                 }
             }
+            .modifier(JoeMoveTrap(enabled: searchFocus != nil) { dir in
+                handleSearchRowMove(dir)
+            })
+            .modifier(JoeMoveTrap(enabled: firstRailFocusIndex != nil) { dir in
+                handleFirstRailMove(dir)
+            })
         .task { store.loadIfNeeded() }
+        .onChange(of: nav.focusNonce) { _, _ in
+            // Hub contract: the shell asks this section to take
+            // focus at its top — the torrent search field.
+            if nav.focusTarget == .sectionTop {
+                searchFocus = .field
+            }
+        }
     }
 
     private var header: some View {
@@ -71,7 +90,11 @@ struct JoeTorrentHome: View {
                 .padding(.vertical, 14)
                 .background(RoundedRectangle(cornerRadius: 14)
                     .fill(Color.white.opacity(0.10)))
+                .overlay(RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(searchFocus == .field ? JoeTheme.focusViolet : Color.clear,
+                                  lineWidth: 3))
                 .frame(width: 820)
+                .focused($searchFocus, equals: .field)
                 .onSubmit { runSearch() }
             Button {
                 runSearch()
@@ -81,10 +104,14 @@ struct JoeTorrentHome: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 14)
-                    .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
+                    .background(Capsule().fill(searchFocus == .search
+                                               ? JoeTheme.accentViolet
+                                               : JoeTheme.accentViolet.opacity(0.45)))
                     .overlay(JoeFocusRing(shape: Capsule()))
+                    .scaleEffect(searchFocus == .search ? 1.05 : 1.0)
             }
-            .buttonStyle(.card)
+            .buttonStyle(.plain)
+            .focused($searchFocus, equals: .search)
             if !searchResults.isEmpty {
                 Button {
                     searchResults = []
@@ -97,8 +124,10 @@ struct JoeTorrentHome: View {
                         .padding(.vertical, 14)
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .overlay(JoeFocusRing(shape: Capsule()))
+                        .scaleEffect(searchFocus == .clear ? 1.05 : 1.0)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
+                .focused($searchFocus, equals: .clear)
             }
         }
     }
@@ -128,7 +157,7 @@ struct JoeTorrentHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.card)
+                    .buttonStyle(.plain)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -164,7 +193,7 @@ struct JoeTorrentHome: View {
                             meta: entry.year,
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.card)
+                    .buttonStyle(.plain)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -174,6 +203,112 @@ struct JoeTorrentHome: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: - Focus traversal (boundary traps)
+
+    /// One focusable card in a rail, whichever FocusState owns it.
+    private enum TorRailItem: Equatable {
+        case entry(String)
+        case meta(TorMeta.ID)
+    }
+
+    /// Every rail in on-screen order, empty rails skipped. In
+    /// search mode the single "rail" is the results grid. The
+    /// first element is the section's first rail: the
+    /// Continue-Watching entry rail when non-empty, else the
+    /// ♥ Yêu thích entry rail, else the first catalog rail.
+    private var torRails: [[TorRailItem]] {
+        if searching || !searchResults.isEmpty {
+            return searchResults.isEmpty
+                ? [] : [searchResults.map { .meta($0.id) }]
+        }
+        var rails: [[TorRailItem]] = []
+        if !torProgress.isEmpty {
+            rails.append(torProgress.map { .entry($0.key) })
+        }
+        if !torFavorites.isEmpty {
+            rails.append(torFavorites.map { .entry($0.key) })
+        }
+        for cat in store.catalogs {
+            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
+                rails.append(metas.map { .meta($0.id) })
+            }
+        }
+        return rails
+    }
+
+    private var currentTorRailItem: TorRailItem? {
+        if let focusedEntry { return .entry(focusedEntry) }
+        if let focusedMeta { return .meta(focusedMeta) }
+        return nil
+    }
+
+    /// Non-nil only while focus sits in the FIRST rail — that is
+    /// the one state where the first-rail trap is enabled.
+    private var firstRailFocusIndex: Int? {
+        guard let item = currentTorRailItem,
+              let first = torRails.first,
+              let idx = first.firstIndex(of: item) else { return nil }
+        return idx
+    }
+
+    private func setTorRailFocus(_ item: TorRailItem) {
+        switch item {
+        case .entry(let key):
+            focusedMeta = nil
+            focusedEntry = key
+        case .meta(let id):
+            focusedEntry = nil
+            focusedMeta = id
+        }
+    }
+
+    /// Search-row boundary: UP escapes the section to the shell
+    /// pills, LEFT/RIGHT step through the row's elements in
+    /// visual order (field → Tìm → Xoá tìm kiếm when present;
+    /// no-op at either end), DOWN lands on the first rail's
+    /// first card (no-op while there is nothing below).
+    private func handleSearchRowMove(_ dir: MoveCommandDirection) {
+        guard let current = searchFocus else { return }
+        if dir == .up {
+            nav.requestFocus(.pills)
+        } else if dir == .down {
+            if let first = torRails.first?.first {
+                setTorRailFocus(first)
+            }
+        } else if dir == .left || dir == .right {
+            var order: [SearchRowFocus] = [.field, .search]
+            if !searchResults.isEmpty { order.append(.clear) }
+            guard let idx = order.firstIndex(of: current) else { return }
+            let next = dir == .left ? idx - 1 : idx + 1
+            if order.indices.contains(next) {
+                searchFocus = order[next]
+            }
+        }
+    }
+
+    /// First-rail boundary: UP to the search row (the field),
+    /// LEFT/RIGHT arithmetic neighbours inside the rail (no-op
+    /// at its ends), DOWN to the same-index card (clamped) in
+    /// the next rail (no-op when there is no next rail). Deeper
+    /// rails are not trapped — the focus engine's geometry
+    /// handles them.
+    private func handleFirstRailMove(_ dir: MoveCommandDirection) {
+        guard let idx = firstRailFocusIndex,
+              let first = torRails.first else { return }
+        if dir == .up {
+            searchFocus = .field
+        } else if dir == .left {
+            if idx > 0 { setTorRailFocus(first[idx - 1]) }
+        } else if dir == .right {
+            if idx < first.count - 1 { setTorRailFocus(first[idx + 1]) }
+        } else if dir == .down {
+            if torRails.count > 1 {
+                let next = torRails[1]
+                setTorRailFocus(next[min(idx, next.count - 1)])
             }
         }
     }
@@ -188,7 +323,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == meta.id)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
                 .focused($focusedMeta, equals: meta.id)
             }
         }
@@ -205,7 +340,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == meta.id)
                 }
-                .buttonStyle(.card)
+                .buttonStyle(.plain)
                 .focused($focusedMeta, equals: meta.id)
             }
         }
@@ -354,7 +489,7 @@ struct JoeTorrentDetail: View {
                 .background(Capsule().fill(Color.white.opacity(0.10)))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
     }
 
     // MARK: - Episodes (series)
@@ -370,6 +505,7 @@ struct JoeTorrentDetail: View {
                           alignment: .leading, spacing: 16) {
                     ForEach(videos) { video in
                         let selected = videoId == video.id
+                        let rowFocused = focusedRow == "ep|" + video.id
                         Button {
                             selectedVideo = video
                             Task { await loadStreams() }
@@ -386,8 +522,9 @@ struct JoeTorrentDetail: View {
                                           : Color.white.opacity(0.08)))
                                 .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
                         }
-                        .buttonStyle(.card)
+                        .buttonStyle(.plain)
                         .focused($focusedRow, equals: "ep|" + video.id)
+                        .scaleEffect(rowFocused ? 1.05 : 1.0)
                     }
                 }
             }
@@ -457,10 +594,11 @@ struct JoeTorrentDetail: View {
             .background(RoundedRectangle(cornerRadius: 13)
                 .fill(focused ? Color.white.opacity(0.13) : Color.white.opacity(0.06)))
             .overlay(RoundedRectangle(cornerRadius: 13)
-                .strokeBorder(focused ? Color.white : Color.clear, lineWidth: 2.5))
+                .strokeBorder(focused ? JoeTheme.focusViolet : Color.clear, lineWidth: 2.5))
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
+        .scaleEffect(focused ? 1.04 : 1.0)
     }
 
     private func streamTag(_ s: TorStream) -> String {
@@ -563,5 +701,21 @@ struct JoeTorrentDetail: View {
             },
             hopIdentity: nil)
         playerHolder = JoeMovieDetail.DirectorHolder(director: director)
+    }
+}
+
+/// Conditional move trap (hub contract): installed only while
+/// focus sits on a boundary element, so every direction it
+/// intercepts must have a defined outcome in the handler.
+private struct JoeMoveTrap: ViewModifier {
+    let enabled: Bool
+    let action: (MoveCommandDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onMoveCommand(perform: action)
+        } else {
+            content
+        }
     }
 }
