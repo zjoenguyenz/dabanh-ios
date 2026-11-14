@@ -58,10 +58,17 @@ final class JoeNavigator: ObservableObject {
     }
 }
 
-/// The shell: Joe TV's own left rail (wordmark + four sections),
-/// content swapping on the right. The rail never collapses — the
-/// Android app's rail is permanent too, and a stable silhouette is
-/// what keeps this app unmistakable next to Đá Banh.
+/// The shell (v1.4 rework): a single VStack — topBar (wordmark +
+/// four section pills + version) on top, content filling the rest
+/// below. This mirrors the proven Đá Banh tvOS geometry (pills
+/// directly above content) so focus flows DOWN into the content
+/// and UP back to the pills by construction. v1.3's left rail is
+/// gone: with the rail, focus could not move from the rail into
+/// the TV section's channels or the Settings fields at all, and
+/// the system focus effect washed a pale halo over focused rail
+/// rows despite .buttonStyle(.plain)+.focusEffectDisabled().
+/// Every pill now uses .buttonStyle(.card) with a label fully
+/// backed by its own solid capsule, exactly like Đá Banh.
 struct JoeRootView: View {
     enum Section: String, CaseIterable {
         case tv, phim, torrent, settings
@@ -91,11 +98,14 @@ struct JoeRootView: View {
     var body: some View {
         ZStack {
             JoeTheme.background
-            HStack(spacing: 0) {
-                rail
+            VStack(spacing: 24) {
+                topBar
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .padding(.horizontal, 56)
+            .padding(.top, 34)
+            .padding(.bottom, 24)
             .disabled(nav.movie != nil || nav.tor != nil)
             if let route = nav.movie {
                 ZStack {
@@ -121,73 +131,65 @@ struct JoeRootView: View {
         })
     }
 
-    private var rail: some View {
-        VStack(alignment: .leading, spacing: 0) {
+    // The top row stays well under ~1,800pt wide on purpose
+    // (Đá Banh lesson: an over-wide row crushes its trailing
+    // buttons until the focus engine cannot land on them) —
+    // every pill label is .lineLimit(1) + .fixedSize so it can
+    // never be squeezed.
+    private var topBar: some View {
+        HStack(alignment: .center, spacing: 28) {
             wordmark
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Section.allCases, id: \.self) { s in
-                    railRow(s)
-                }
+            ForEach(Section.allCases, id: \.self) { s in
+                sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.3")
+            Text("Joe TV v1.4")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
-                .padding(.leading, 12)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 44)
-        .padding(.bottom, 30)
-        .frame(width: 300)
-        .frame(maxHeight: .infinity)
-        .background(Color.black.opacity(0.30))
     }
 
     private var wordmark: some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text("Joe TV")
-                .font(.system(size: 36, weight: .heavy))
+                .font(.system(size: 34, weight: .heavy))
                 .foregroundStyle(.white)
             Text(".")
-                .font(.system(size: 36, weight: .heavy))
+                .font(.system(size: 34, weight: .heavy))
                 .foregroundStyle(JoeTheme.accentRed)
         }
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .padding(.leading, 12)
-        .padding(.bottom, 30)
     }
 
-    private func railRow(_ s: Section) -> some View {
+    private func sectionPill(_ s: Section) -> some View {
         let selected = section == s
         let focused = focusedSection == s
         return Button {
             section = s
         } label: {
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Image(systemName: s.icon)
                     .font(.system(size: 24, weight: .medium))
-                    .frame(width: 40)
                 Text(s.title)
-                    .font(.system(size: 25, weight: (selected || focused) ? .bold : .medium))
+                    .font(.system(size: 24, weight: selected ? .bold : .medium))
                     .lineLimit(1)
-                Spacer(minLength: 0)
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .foregroundStyle(focused ? .white
-                             : (selected ? JoeTheme.accentRed : .white.opacity(0.82)))
+            .foregroundStyle((selected || focused) ? .white : .white.opacity(0.85))
+            .padding(.horizontal, 26)
             .padding(.vertical, 12)
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 13)
-                    .fill(focused ? JoeTheme.accentViolet
-                          : (selected ? Color.white.opacity(0.06) : Color.clear)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 13)
-                    .strokeBorder(focused ? Color.white : Color.clear, lineWidth: 2.5))
+            // The label's own solid capsule is what keeps the
+            // text readable under the .card focus treatment —
+            // exactly like Đá Banh's tealFill selected pill.
+            .background(Capsule().fill(selected ? JoeTheme.accentViolet
+                                       : Color.white.opacity(0.08)))
+            .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
+                                            lineWidth: 2.5))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
         .focused($focusedSection, equals: s)
     }
 

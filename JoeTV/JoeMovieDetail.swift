@@ -210,8 +210,7 @@ struct JoeMovieDetail: View {
             .background(Capsule().fill(JoeTheme.accentViolet))
             .overlay(JoeFocusRing(shape: Capsule(), lineWidth: 3.5))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
         .focused($focusedPlay)
         .disabled(startEpisode(d) == nil || switching)
     }
@@ -238,8 +237,7 @@ struct JoeMovieDetail: View {
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
     }
 
     // MARK: - "Nguồn khác:" chips
@@ -265,8 +263,7 @@ struct JoeMovieDetail: View {
                         .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.35)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
             }
         }
     }
@@ -317,8 +314,7 @@ struct JoeMovieDetail: View {
                                   : (preselected ? JoeTheme.accentViolet : Color.clear),
                                   lineWidth: focused ? 3 : 2))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
         .focused($focusedEp, equals: ep.name)
         .disabled(!playable || switching)
     }

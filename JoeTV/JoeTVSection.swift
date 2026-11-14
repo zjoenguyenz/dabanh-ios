@@ -49,10 +49,9 @@ struct JoeTVSection: View {
             sections
             footer
         }
-        .padding(.leading, 44)
-        .padding(.trailing, 52)
-        .padding(.top, 40)
-        .padding(.bottom, 26)
+        // No outer padding here: the shell (JoeRootView) owns the
+        // screen padding since v1.4, so focus geometry is one
+        // single VStack hierarchy from the pills down.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await store.start() }
         .onChange(of: scenePhase) { _, phase in
@@ -181,17 +180,25 @@ struct JoeTVSection: View {
             selectedGroup = group
             store.noteSelectedGroup(group)
         } label: {
+            // Chip text is ALWAYS .white (v1.4 rule): the old
+            // accentRed selected text was unreadable under the
+            // pale focus backdrop. Selection is carried by the
+            // decisive red fill instead; focus by the white ring
+            // plus a violet fill when the chip is not selected.
             Text(group)
                 .font(.system(size: 22, weight: selected ? .bold : .medium))
-                .foregroundStyle(selected ? JoeTheme.accentRed : .white.opacity(0.85))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(focused ? Color.white.opacity(0.14)
-                                           : Color.white.opacity(0.07)))
+                .background(Capsule().fill(selected ? JoeTheme.accentRed.opacity(0.85)
+                                           : (focused ? JoeTheme.accentViolet.opacity(0.45)
+                                                      : Color.white.opacity(0.07))))
                 .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
                                                 lineWidth: 2.5))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focused($focusedChip, equals: group)
     }
 
@@ -201,14 +208,15 @@ struct JoeTVSection: View {
             Text(title)
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.white)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(focused ? Color.white.opacity(0.14)
-                                           : Color.white.opacity(0.07)))
+                .background(Capsule().fill(Color.white.opacity(0.08)))
                 .overlay(Capsule().strokeBorder(focused ? Color.white : Color.clear,
                                                 lineWidth: 2.5))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focused($focusedChip, equals: id)
         .disabled(store.isLoading || store.isValidating)
     }
@@ -267,6 +275,12 @@ struct JoeTVSection: View {
         return Button {
             play(channel)
         } label: {
+            // The background + ring cover the WHOLE tile, art and
+            // title together (v1.4, like Đá Banh's matchCard whose
+            // label background covers all its text): previously
+            // the ring wrapped only the art, so the title sat
+            // outside the label's backing and washed out under
+            // the system focus treatment.
             VStack(spacing: 9) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 18)
@@ -286,17 +300,20 @@ struct JoeTVSection: View {
                     }
                 }
                 .frame(width: 280, height: 158)
-                .overlay(RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
-                                  lineWidth: focused ? 4.5 : 1.2))
                 Text(channel.title)
                     .font(.system(size: 20, weight: focused ? .semibold : .medium))
-                    .foregroundStyle(focused ? .white : .white.opacity(0.72))
+                    .foregroundStyle(.white)
                     .lineLimit(1)
                     .frame(width: 280)
             }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.07)))
+            .overlay(RoundedRectangle(cornerRadius: 18)
+                .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
+                              lineWidth: focused ? 4.5 : 1.2))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focused($focusedChannel, equals: channel.id)
     }
 

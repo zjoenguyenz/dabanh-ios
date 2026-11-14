@@ -83,10 +83,6 @@ struct JoePhimHome: View {
                             .padding(.top, 30)
                     }
                 }
-                .padding(.leading, 44)
-                .padding(.trailing, 52)
-                .padding(.top, 36)
-                .padding(.bottom, 30)
             }
     }
 
@@ -114,11 +110,10 @@ struct JoePhimHome: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 26)
                 .padding(.vertical, 14)
-                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
                 .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.plain)
-            .focusEffectDisabled()
+            .buttonStyle(.card)
         }
     }
 
@@ -154,8 +149,7 @@ struct JoePhimHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
+                    .buttonStyle(.card)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -185,8 +179,7 @@ struct JoePhimHome: View {
                             badge: Providers.badge(entry.source),
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
+                    .buttonStyle(.card)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -215,8 +208,7 @@ struct JoePhimHome: View {
                         badge: badges ? Providers.badge(movie.provider) : nil,
                         focused: focusedMovie == movie.id)
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
                 .focused($focusedMovie, equals: movie.id)
             }
         }

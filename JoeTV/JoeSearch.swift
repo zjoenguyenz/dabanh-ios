@@ -36,22 +36,20 @@ struct JoeSearchView: View {
                         .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
                 .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button {
                     nav.searchOpen = false
                 } label: {
                     Text("⟵ Quay lại")
-                        .font(.system(size: 26, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.85))
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(.white)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
-                        .background(Capsule().fill(Color.white.opacity(0.10)))
+                        .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
             }
             if searched && results.isEmpty && !searching {
                 Text("Không thấy phim nào với từ khoá này.")
@@ -73,8 +71,7 @@ struct JoeSearchView: View {
                                 badge: Providers.badge(movie.provider),
                                 focused: focusedMovie == movie.id)
                         }
-                        .buttonStyle(.plain)
-                        .focusEffectDisabled()
+                        .buttonStyle(.card)
                         .focused($focusedMovie, equals: movie.id)
                     }
                 }
@@ -82,10 +79,6 @@ struct JoeSearchView: View {
                 .padding(.horizontal, 4)
             }
         }
-        .padding(.leading, 44)
-        .padding(.trailing, 52)
-        .padding(.top, 36)
-        .padding(.bottom, 30)
     }
 
     private func runSearch() {

@@ -46,10 +46,6 @@ struct JoeTorrentHome: View {
                         }
                     }
                 }
-                .padding(.leading, 44)
-                .padding(.trailing, 52)
-                .padding(.top, 36)
-                .padding(.bottom, 30)
             }
         .task { store.loadIfNeeded() }
     }
@@ -88,8 +84,7 @@ struct JoeTorrentHome: View {
                     .background(Capsule().fill(JoeTheme.accentViolet.opacity(0.45)))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.plain)
-            .focusEffectDisabled()
+            .buttonStyle(.card)
             if !searchResults.isEmpty {
                 Button {
                     searchResults = []
@@ -103,8 +98,7 @@ struct JoeTorrentHome: View {
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
             }
         }
     }
@@ -134,8 +128,7 @@ struct JoeTorrentHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
+                    .buttonStyle(.card)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -171,8 +164,7 @@ struct JoeTorrentHome: View {
                             meta: entry.year,
                             focused: focusedEntry == entry.key)
                     }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
+                    .buttonStyle(.card)
                     .focused($focusedEntry, equals: entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -196,8 +188,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == meta.id)
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
                 .focused($focusedMeta, equals: meta.id)
             }
         }
@@ -214,8 +205,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == meta.id)
                 }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
+                .buttonStyle(.card)
                 .focused($focusedMeta, equals: meta.id)
             }
         }
@@ -364,8 +354,7 @@ struct JoeTorrentDetail: View {
                 .background(Capsule().fill(Color.white.opacity(0.10)))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
     }
 
     // MARK: - Episodes (series)
@@ -397,8 +386,7 @@ struct JoeTorrentDetail: View {
                                           : Color.white.opacity(0.08)))
                                 .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
                         }
-                        .buttonStyle(.plain)
-                        .focusEffectDisabled()
+                        .buttonStyle(.card)
                         .focused($focusedRow, equals: "ep|" + video.id)
                     }
                 }
@@ -471,8 +459,7 @@ struct JoeTorrentDetail: View {
             .overlay(RoundedRectangle(cornerRadius: 13)
                 .strokeBorder(focused ? Color.white : Color.clear, lineWidth: 2.5))
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
+        .buttonStyle(.card)
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
     }
 

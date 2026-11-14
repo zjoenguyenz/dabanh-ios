@@ -32,9 +32,9 @@ enum JoeTheme {
 
     static var background: some View {
         LinearGradient(
-            colors: [Color(red: 0.16, green: 0.12, blue: 0.52),
-                     Color(red: 0.11, green: 0.08, blue: 0.38),
-                     Color(red: 0.05, green: 0.04, blue: 0.20)],
+            colors: [Color(red: 0.016, green: 0.024, blue: 0.051),
+                     Color(red: 0.027, green: 0.043, blue: 0.086),
+                     Color(red: 0.043, green: 0.067, blue: 0.125)],
             startPoint: .topLeading, endPoint: .bottomTrailing)
             .ignoresSafeArea()
     }
@@ -72,12 +72,6 @@ enum JoeTheme {
                 }
                 .frame(width: width, height: width * 1.5)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
-                                      lineWidth: focused ? 4.5 : 1.2))
-                .shadow(color: .black.opacity(focused ? 0.55 : 0),
-                        radius: focused ? 20 : 0, x: 0, y: focused ? 10 : 0)
                 .overlay(alignment: .topLeading) {
                     if let badge {
                         Text(badge)
@@ -103,7 +97,7 @@ enum JoeTheme {
                 }
                 Text(title)
                     .font(.system(size: 21, weight: focused ? .semibold : .medium))
-                    .foregroundStyle(focused ? .white : .white.opacity(0.78))
+                    .foregroundStyle(.white)
                     .lineLimit(1)
                     .frame(width: width, alignment: .leading)
                 if let subline {
@@ -120,6 +114,16 @@ enum JoeTheme {
                         .frame(width: width, alignment: .leading)
                 }
             }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.white.opacity(0.07))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .strokeBorder(focused ? Color.white : Color.white.opacity(0.10),
+                                          lineWidth: focused ? 4.5 : 1.2))
+                    .shadow(color: .black.opacity(focused ? 0.55 : 0),
+                            radius: focused ? 20 : 0, x: 0, y: focused ? 10 : 0))
         }
 
         private var placeholder: some View {

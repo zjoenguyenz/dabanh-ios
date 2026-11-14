@@ -66,10 +66,6 @@ struct JoeSettingsView: View {
                     .foregroundStyle(.white.opacity(0.45))
                     .frame(maxWidth: 1200, alignment: .leading)
             }
-            .padding(.leading, 44)
-            .padding(.trailing, 52)
-            .padding(.top, 36)
-            .padding(.bottom, 40)
         }
         .onDisappear { save(silent: true) }
         .onChange(of: addonURL) { save() }
