@@ -126,48 +126,65 @@ struct TVContentView: View {
     }
 
     private var tabBar: some View {
-        HStack(spacing: 16) {
-            tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
-            tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
-            ForEach(League.allCases) { league in
-                tabPill(title: league.name, value: league.rawValue)
-            }
-            Spacer()
-            Text(countText)
-                .font(.system(size: 24))
-                .foregroundStyle(.white.opacity(0.75))
-            // Làm mới lives in the tab row on purpose: as a lone
-            // button in the header row above, tvOS spatial focus
-            // could not reach it from the pills (owner, v1.1).
-            Button {
-                Task { await store.refresh() }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("Làm mới")
+        // Two rows since v1.2.7: the pills + count fill row one, and
+        // the two action buttons get a row of their own. In v1.2.6
+        // everything shared one HStack whose intrinsic width (~2,290pt)
+        // exceeded the 1,800pt available, so SwiftUI crushed the two
+        // trailing buttons to a sliver — their labels wrapped letter by
+        // letter vertically and Kiểm tra link's frame collapsed until
+        // the focus engine could not land on it (owner photo, 2026-11-13).
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 16) {
+                tabPill(title: "🔴 Trực tiếp", value: PlaylistStore.liveTabValue)
+                tabPill(title: "🔥 Hot", value: PlaylistStore.hotTabValue)
+                ForEach(League.allCases) { league in
+                    tabPill(title: league.name, value: league.rawValue)
                 }
-                .font(.system(size: 24, weight: .medium))
-                .padding(.horizontal, 26)
-                .padding(.vertical, 12)
+                Spacer()
+                Text(countText)
+                    .font(.system(size: 24))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .buttonStyle(.card)
-            .disabled(store.isLoading)
-            // Manual link check (owner's request, 2026-11-13): fetch
-            // the newest list, re-probe every link from this TV, and
-            // republish the match rails without the dead ones.
-            Button {
-                Task { await store.refreshAndValidate() }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark.shield")
-                    Text("Kiểm tra link")
+            HStack(spacing: 16) {
+                // The action buttons stay near the pills on purpose: as
+                // a lone button in the header row above, tvOS spatial
+                // focus could not reach it from the pills (owner, v1.1).
+                Button {
+                    Task { await store.refresh() }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Làm mới")
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .font(.system(size: 24, weight: .medium))
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 12)
                 }
-                .font(.system(size: 24, weight: .medium))
-                .padding(.horizontal, 26)
-                .padding(.vertical, 12)
+                .buttonStyle(.card)
+                .disabled(store.isLoading)
+                // Manual link check (owner's request, 2026-11-13): fetch
+                // the newest list, re-probe every link from this TV, and
+                // republish the match rails without the dead ones.
+                Button {
+                    Task { await store.refreshAndValidate() }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.shield")
+                        Text(store.isValidating ? "Đang kiểm tra…" : "Kiểm tra link")
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .font(.system(size: 24, weight: .medium))
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 12)
+                }
+                .buttonStyle(.card)
+                .disabled(store.isLoading || store.isValidating)
             }
-            .buttonStyle(.card)
-            .disabled(store.isLoading || store.isValidating)
         }
     }
 
@@ -242,7 +259,7 @@ struct TVContentView: View {
                     }
                     HStack {
                         Spacer()
-                        Text("Đá Banh TV v1.2.6")
+                        Text("Đá Banh TV v1.2.7")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.4))
                     }
