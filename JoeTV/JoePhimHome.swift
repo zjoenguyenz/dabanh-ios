@@ -25,6 +25,7 @@ struct JoePhimHome: View {
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var focusedEntry: String?
     @FocusState private var headerFocused: Bool
+    @FocusState private var retryFocused: Bool
 
     var body: some View {
         Group {
@@ -111,6 +112,29 @@ struct JoePhimHome: View {
                             .foregroundStyle(.white)
                             .tint(.white)
                             .padding(.top, 30)
+                    }
+                    if !phim.loading && !phim.hasData {
+                        // v1.8: a fully failed load used to leave
+                        // a bare header over an empty page. Say so,
+                        // and give the owner a way back in.
+                        VStack(alignment: .leading, spacing: 20) {
+                            Text("Không tải được thư viện phim. Kiểm tra mạng rồi thử lại.")
+                                .font(.title3)
+                                .foregroundStyle(.orange)
+                            Button { phim.retry() } label: {
+                                Text("Thử lại")
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 30)
+                                    .padding(.vertical, 13)
+                                    .background(Capsule().fill(JoeTheme.accentViolet))
+                                    .overlay(JoeFocusRing(shape: Capsule()))
+                            }
+                            .buttonStyle(.plain)
+                            .focused($retryFocused)
+                            .scaleEffect(retryFocused ? 1.05 : 1.0)
+                        }
+                        .padding(.top, 30)
                     }
                 }
             }

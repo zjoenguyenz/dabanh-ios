@@ -48,58 +48,85 @@ final class PhimStore: ObservableObject {
         loadTask = Task { await load() }
     }
 
-    /// Fail-soft per rail, like the Android home: one dead
-    /// provider never blanks the section.
+    /// v1.8: PROGRESSIVE per-rail publish. v1.7 awaited all 12
+    /// rails (plus 12 more sequential fetches) before assigning
+    /// ANYTHING, so one stalled provider froze the whole home on
+    /// the spinner — the owner's "load đứng luôn screen". Now
+    /// every fetch streams its result back and the rail appears
+    /// the moment IT lands; a failed fetch keeps previous data.
     private func load() async {
         loading = true
         defer { loading = false }
-        async let kkN = try? Providers.newest(Providers.KK, page: 1)
-        async let f4kN = try? Providers.newest(Providers.F4K, page: 1)
-        async let vsN = try? Providers.newest(Providers.VS, page: 1)
-        async let kkS = try? Providers.listByType(Providers.KK, type: "phim-bo", page: 1)
-        async let kkM = try? Providers.listByType(Providers.KK, type: "phim-le", page: 1)
-        async let kkA = try? Providers.listByType(Providers.KK, type: "hoat-hinh", page: 1)
-        async let f4kM = try? Providers.listByType(Providers.F4K, type: "phim-le", page: 1)
-        async let vsS = try? Providers.listByType(Providers.VS, type: "phim-bo", page: 1)
-        async let tpN = try? Providers.newest(Providers.TP, page: 1)
-        async let tpL = try? Providers.listByType(Providers.TP, type: "phim-le", page: 1)
-        async let tpS = try? Providers.listByType(Providers.TP, type: "phim-bo", page: 1)
-        async let cr = try? Providers.listByType(Providers.KK, type: "phim-chieu-rap", page: 1)
-        let (a, b, c, d, e, f, g, h, i, j, k, l) = await (kkN, f4kN, vsN, kkS, kkM, kkA, f4kM, vsS, tpN, tpL, tpS, cr)
-        // A rail that failed this round keeps its previous data.
-        if let a { kkNew = a }
-        if let b { f4kNew = b }
-        if let c { vsNew = c }
-        if let d { kkSeries = d }
-        if let e { kkMovies = e }
-        if let f { kkAnime = f }
-        if let g { f4kMovies = g }
-        if let h { vsSeries = h }
-        if let i { tpNew = i }
-        if let j { tpMovies = j }
-        if let k { tpSeries = k }
-        if let l { chieuRap = l }
-        // Genre / country rails (KK): fail-soft per rail, exactly
-        // like the rails above — a failed fetch keeps its
-        // previous data.
+        struct Job {
+            let key: String
+            let fetch: () async -> [Movie]?
+        }
+        var jobs: [Job] = [
+            Job(key: "kkNew") { try? await Providers.newest(Providers.KK, page: 1) },
+            Job(key: "f4kNew") { try? await Providers.newest(Providers.F4K, page: 1) },
+            Job(key: "vsNew") { try? await Providers.newest(Providers.VS, page: 1) },
+            Job(key: "tpNew") { try? await Providers.newest(Providers.TP, page: 1) },
+            Job(key: "kkSeries") { try? await Providers.listByType(Providers.KK, type: "phim-bo", page: 1) },
+            Job(key: "kkMovies") { try? await Providers.listByType(Providers.KK, type: "phim-le", page: 1) },
+            Job(key: "kkAnime") { try? await Providers.listByType(Providers.KK, type: "hoat-hinh", page: 1) },
+            Job(key: "f4kMovies") { try? await Providers.listByType(Providers.F4K, type: "phim-le", page: 1) },
+            Job(key: "vsSeries") { try? await Providers.listByType(Providers.VS, type: "phim-bo", page: 1) },
+            Job(key: "tpMovies") { try? await Providers.listByType(Providers.TP, type: "phim-le", page: 1) },
+            Job(key: "tpSeries") { try? await Providers.listByType(Providers.TP, type: "phim-bo", page: 1) },
+            Job(key: "chieuRap") { try? await Providers.listByType(Providers.KK, type: "phim-chieu-rap", page: 1) },
+            Job(key: "vietnam") { try? await Providers.kkCountry("viet-nam", page: 1, limit: 48) },
+        ]
         for spec in Self.genreSpec {
-            if let movies = try? await Providers.kkGenre(spec.slug, page: 1) {
-                genreLists[spec.slug] = movies
-            }
+            jobs.append(Job(key: "genre:" + spec.slug) {
+                try? await Providers.kkGenre(spec.slug, page: 1) })
         }
         for spec in Self.countrySpec {
-            if let movies = try? await Providers.kkCountry(spec.slug, page: 1) {
-                countryLists[spec.slug] = movies
+            jobs.append(Job(key: "country:" + spec.slug) {
+                try? await Providers.kkCountry(spec.slug, page: 1) })
+        }
+        await withTaskGroup(of: (String, [Movie]?).self) { group in
+            for job in jobs {
+                group.addTask { (job.key, await job.fetch()) }
+            }
+            for await (key, movies) in group {
+                guard let movies else { continue }
+                applyRail(key, movies)
             }
         }
-        // Dedicated Vietnam block: one large country fetch,
-        // fail-soft like every other rail (keeps previous data).
-        if let movies = try? await Providers.kkCountry("viet-nam", page: 1, limit: 48) {
-            vietnamAll = movies
-        }
-        merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
         if hasData { loadedAt = Date() }
     }
+
+    private func applyRail(_ key: String, _ movies: [Movie]) {
+        switch key {
+        case "kkNew": kkNew = movies; refreshMerged()
+        case "f4kNew": f4kNew = movies; refreshMerged()
+        case "vsNew": vsNew = movies; refreshMerged()
+        case "tpNew": tpNew = movies; refreshMerged()
+        case "kkSeries": kkSeries = movies
+        case "kkMovies": kkMovies = movies
+        case "kkAnime": kkAnime = movies
+        case "f4kMovies": f4kMovies = movies
+        case "vsSeries": vsSeries = movies
+        case "tpMovies": tpMovies = movies
+        case "tpSeries": tpSeries = movies
+        case "chieuRap": chieuRap = movies
+        case "vietnam": vietnamAll = movies
+        default:
+            if key.hasPrefix("genre:") {
+                genreLists[String(key.dropFirst(6))] = movies
+            } else if key.hasPrefix("country:") {
+                countryLists[String(key.dropFirst(8))] = movies
+            }
+        }
+    }
+
+    private func refreshMerged() {
+        merged = Providers.mergeDedupe([kkNew, f4kNew, vsNew, tpNew])
+    }
+
+    /// Manual retry for the home's error state (a failed load
+    /// leaves loadedAt nil, so loadIfNeeded runs again).
+    func retry() { loadIfNeeded() }
 }
 
 struct TorGenreRail {

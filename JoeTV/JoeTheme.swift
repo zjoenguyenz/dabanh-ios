@@ -35,11 +35,17 @@ enum JoeTheme {
     /// The one focus-outline colour app-wide (lighter violet).
     static let focusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
+    /// v1.8: glossy Apple black — pure neutral greys, ZERO blue
+    /// tint. The v1.4–v1.7 indigo gradient read as bright BLUE
+    /// on the owner's TV (his photo + verdict, 2026-11-14); the
+    /// black family matches the Android theme he picked there
+    /// ("Đen bóng đêm (Apple)": #000000 / #0B0B0D / #1B1B20)
+    /// and the design render he approved before this build.
     static var background: some View {
         LinearGradient(
-            colors: [Color(red: 0.016, green: 0.024, blue: 0.051),
-                     Color(red: 0.027, green: 0.043, blue: 0.086),
-                     Color(red: 0.043, green: 0.067, blue: 0.125)],
+            colors: [Color(red: 0.0, green: 0.0, blue: 0.0),
+                     Color(red: 0.043, green: 0.043, blue: 0.051),
+                     Color(red: 0.106, green: 0.106, blue: 0.125)],
             startPoint: .topLeading, endPoint: .bottomTrailing)
             .ignoresSafeArea()
     }

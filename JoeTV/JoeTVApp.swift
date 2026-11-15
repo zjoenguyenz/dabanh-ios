@@ -150,6 +150,13 @@ struct JoeRootView: View {
             }
         }
         .environmentObject(nav)
+        // v1.8: the "no system focus effect" law was previously
+        // only a comment — .focusEffectDisabled was never actually
+        // applied anywhere, so on the owner's Apple TV the system
+        // washed a huge pale card over the focused pill (his photo,
+        // 2026-11-14). Applied ONCE here, it covers the whole
+        // hierarchy: pills, sections, search and both detail layers.
+        .focusEffectDisabled(true)
         .onChange(of: nav.focusNonce) { _, _ in
             // Hub consumer (shell side): a section escaping upward
             // lands focus back on the CURRENT section's pill.
@@ -175,7 +182,7 @@ struct JoeRootView: View {
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.7")
+            Text("Joe TV v1.8")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
@@ -183,17 +190,30 @@ struct JoeRootView: View {
         }
     }
 
+    /// v1.8: the real Joe TV wordmark (the approved master, the
+    /// same art the Android app carries) replaces the plain text
+    /// wordmark, per the owner-approved design render. Falls back
+    /// to the text wordmark if the image asset is ever missing.
+    @ViewBuilder
     private var wordmark: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text("Joe TV")
-                .font(.system(size: 34, weight: .heavy))
-                .foregroundStyle(.white)
-            Text(".")
-                .font(.system(size: 34, weight: .heavy))
-                .foregroundStyle(JoeTheme.accentRed)
+        if UIImage(named: "LogoWordmark") != nil {
+            Image("LogoWordmark")
+                .resizable()
+                .scaledToFit()
+                .frame(height: 54)
+                .accessibilityLabel("Joe TV")
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text("Joe TV")
+                    .font(.system(size: 34, weight: .heavy))
+                    .foregroundStyle(.white)
+                Text(".")
+                    .font(.system(size: 34, weight: .heavy))
+                    .foregroundStyle(JoeTheme.accentRed)
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
         }
-        .lineLimit(1)
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func sectionPill(_ s: Section) -> some View {
