@@ -13,6 +13,10 @@ struct Movie: Identifiable, Hashable {
     var slug = ""
     var originName = ""
     var poster = ""
+    /// Landscape art (KK/VS thumb_url), kept apart from the
+    /// portrait poster: the detail screen's full-width backdrop
+    /// strip shows it instantly, before the TMDB backdrop lands.
+    var thumb = ""
     var year = ""
     var type = ""
     var episodeCurrent = ""
@@ -29,6 +33,7 @@ struct Movie: Identifiable, Hashable {
 
     var id: String { provider + "|" + slug }
     var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
+    var thumbURL: URL? { thumb.isEmpty ? nil : URL(string: thumb) }
 
     /// Short card meta line: year · episode/quality fragments.
     var cardMeta: String {

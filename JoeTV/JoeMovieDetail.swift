@@ -39,6 +39,7 @@ struct JoeMovieDetail: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 30) {
                 if let detail {
+                    backdropStrip(detail)
                     header(detail)
                     if let tmdb, !tmdb.cast.isEmpty { castRow(tmdb.cast) }
                     if !alternatives.isEmpty || switching { altChips }
@@ -119,7 +120,7 @@ struct JoeMovieDetail: View {
 
     private func header(_ d: Detail) -> some View {
         HStack(alignment: .top, spacing: 40) {
-            headerArt(d)
+            posterArt(d.movie)
             VStack(alignment: .leading, spacing: 16) {
                 Text(d.movie.name)
                     .font(.system(size: 50, weight: .heavy))
@@ -189,33 +190,49 @@ struct JoeMovieDetail: View {
             .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
     }
 
-    /// Header art with TMDB priority (v1.6): a non-empty TMDB
-    /// backdrop replaces the poster as the header image, in the
-    /// same frame / crop / chrome as posterArt; the backdrop
-    /// loads async over the existing poster art, so the header
-    /// is never blank while it arrives. Without a backdrop the
-    /// poster header is used exactly as before.
+    /// Full-width backdrop strip (v1.7, Android parity): a wide
+    /// cinematic frame across the top of the detail page, above
+    /// the poster header, separated from it by the stack spacing
+    /// so the two read as distinct parts. The provider landscape
+    /// thumb (KK/VS thumb_url) shows the moment the detail lands;
+    /// the TMDB backdrop fades in over it when the enrichment
+    /// arrives. Pure decoration — no focusable elements — so the
+    /// v1.5 focus traversal is untouched. Hidden entirely when
+    /// neither image exists.
     @ViewBuilder
-    private func headerArt(_ d: Detail) -> some View {
-        if let backdrop = tmdb?.backdropURL, !backdrop.isEmpty,
-           let url = URL(string: backdrop) {
+    private func backdropStrip(_ d: Detail) -> some View {
+        let tmdbURL = (tmdb?.backdropURL).flatMap {
+            $0.isEmpty ? nil : URL(string: $0) }
+        if d.movie.thumbURL != nil || tmdbURL != nil {
             ZStack {
-                posterArt(d.movie)
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        Color.clear
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color.black.opacity(0.45))
+                if let url = d.movie.thumbURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                        default:
+                            Color.clear
+                        }
+                    }
+                }
+                if let url = tmdbURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                        default:
+                            Color.clear
+                        }
                     }
                 }
             }
-            .frame(width: 300, height: 450)
+            .frame(maxWidth: .infinity)
+            .frame(height: 540)
             .clipShape(RoundedRectangle(cornerRadius: 18))
             .overlay(RoundedRectangle(cornerRadius: 18)
                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
-        } else {
-            posterArt(d.movie)
         }
     }
 

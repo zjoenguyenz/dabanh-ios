@@ -183,7 +183,8 @@ enum KkClient {
         m.slug = JSON.str(o, "slug")
         m.originName = JSON.str(o, "origin_name")
         m.poster = absImage(JSON.str(o, "poster_url"), cdn: cdn)
-        if m.poster.isEmpty { m.poster = absImage(JSON.str(o, "thumb_url"), cdn: cdn) }
+        m.thumb = absImage(JSON.str(o, "thumb_url"), cdn: cdn)
+        if m.poster.isEmpty { m.poster = m.thumb }
         m.year = cleanField(JSON.str(o, "year"))
         m.type = JSON.str(o, "type")
         m.episodeCurrent = cleanField(JSON.str(o, "episode_current"))

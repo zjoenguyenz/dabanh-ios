@@ -104,7 +104,8 @@ enum VsClient {
         m.slug = JSON.str(o, "slug")
         m.originName = JSON.str(o, "origin_name")
         m.poster = JSON.str(o, "poster_url")
-        if m.poster.isEmpty { m.poster = JSON.str(o, "thumb_url") }
+        m.thumb = JSON.str(o, "thumb_url")
+        if m.poster.isEmpty { m.poster = m.thumb }
         m.year = cleanField(JSON.str(o, "year"))
         m.type = JSON.str(o, "type")
         m.episodeCurrent = cleanField(JSON.str(o, "episode_current"))

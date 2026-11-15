@@ -175,7 +175,7 @@ struct JoeRootView: View {
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.6")
+            Text("Joe TV v1.7")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
