@@ -64,6 +64,10 @@ final class PlaylistStore: ObservableObject {
     /// Persisted so a cold start opens already clean, and re-probed
     /// after every refresh so a revived link returns on its own.
     private var invalidURLs: Set<String> = []
+    /// The mirror's EN block from the most recent successful mirror
+    /// fetch (seeded from the mirror disk cache at launch). Kept
+    /// separately so the EN merge below survives a mirror outage.
+    private var lastMirrorEN: [Channel] = []
     private var validating = false
     /// Bumped when the crest map is swapped for a fresher remote copy,
     /// so crest-reading views re-render with the new badges.
@@ -172,6 +176,7 @@ final class PlaylistStore: ObservableObject {
         if let text = readCache(mirrorCacheFileURL) {
             let parsed = M3UParser.parse(text)
             if !parsed.isEmpty {
+                noteMirrorEN(parsed)
                 setData(parsed)
                 setHot(parsed)
                 return
@@ -200,6 +205,7 @@ final class PlaylistStore: ObservableObject {
             // GitHub mirror first (the primary since 2026-11-13): one
             // file carries the leagues, the extras and the Hot group.
             let (data, parsed, text) = try await fetchPlaylist(from: Self.backupPlaylistURL)
+            noteMirrorEN(parsed)
             // Freshness gate (root cause measured 2026-11-13): a
             // REACHABLE mirror can still be hours stale — its stamp
             // read 03:08 VN while the origin already carried 06:37 —
@@ -211,7 +217,7 @@ final class PlaylistStore: ObservableObject {
                Date().timeIntervalSince(stamp) > Self.mirrorStaleThreshold,
                let (odata, oparsed, _) = try? await fetchPlaylist(from: Self.playlistURL) {
                 try? odata.write(to: cacheFileURL, options: .atomic)
-                setData(oparsed)
+                setData(mergingEN(oparsed))
                 setHot(parsed)
                 statusMessage = "Gương đang chậm — đã dùng nguồn gốc mới hơn."
             } else {
@@ -226,7 +232,7 @@ final class PlaylistStore: ObservableObject {
             do {
                 let (data, parsed, _) = try await fetchPlaylist(from: Self.playlistURL)
                 try? data.write(to: cacheFileURL, options: .atomic)
-                setData(parsed)
+                setData(mergingEN(parsed))
                 statusMessage = "Đang dùng nguồn dự phòng."
             } catch {
                 if !loadedOnce {
@@ -263,6 +269,29 @@ final class PlaylistStore: ObservableObject {
         lastFetch = Date()
         loadedOnce = true
         statusMessage = nil
+    }
+
+    /// Remember the newest EN block the mirror has served. An empty
+    /// extraction never overwrites a good one (a bad mirror publish
+    /// must not be able to erase the block everywhere at once).
+    private func noteMirrorEN(_ parsed: [Channel]) {
+        let en = parsed.filter { LeagueClassifier.isEN($0) }
+        if !en.isEmpty { lastMirrorEN = en }
+    }
+
+    /// EN merge rule (owner's ecosystem ruling, 2026-11-15): the
+    /// English-commentary block ALWAYS comes from the mirror,
+    /// whichever source wins the main list. Before this rule, a stale
+    /// mirror sent the main list to the origin — which carries no EN
+    /// group — and the BLV Anh tab vanished until the mirror caught
+    /// up. Measured flicker window: the origin's stamp ticks every
+    /// 15–90 minutes while the mirror syncs every 15, so the tab
+    /// blinked in and out. The web app carries the same rule (v6.2).
+    private func mergingEN(_ main: [Channel]) -> [Channel] {
+        if lastMirrorEN.isEmpty { return main }
+        let have = Set(main.map { $0.url })
+        let extra = lastMirrorEN.filter { !have.contains($0.url) }
+        return extra.isEmpty ? main : main + extra
     }
 
     /// The Hot tab's list: the mirror's "🔥 Hot" group only, put
