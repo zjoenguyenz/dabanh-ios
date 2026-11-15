@@ -169,7 +169,7 @@ enum JoeTheme {
 
 // MARK: - Focus ring (value-only: colour/width change inside an always-installed shape)
 
-struct JoeFocusRing<S: Shape>: View {
+struct JoeFocusRing<S: InsettableShape>: View {
     let shape: S
     var lineWidth: CGFloat? = nil
     @Environment(\.isFocused) private var isFocused

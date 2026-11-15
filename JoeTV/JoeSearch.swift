@@ -192,6 +192,7 @@ struct JoeSearchView: View {
         }
     }
 
+    @ViewBuilder
     private func resultCard(_ movie: Movie, routed: Bool) -> some View {
         let card = Button { nav.movie = MovieRoute(
             provider: movie.provider, slug: movie.slug,

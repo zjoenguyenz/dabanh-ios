@@ -128,6 +128,7 @@ struct JoeBrowseFilter: Hashable {
     /// merged items — the list IS the source); both together
     /// intersect by movie id. Every other facet is a pure
     /// predicate over the base; sort applies last.
+    @MainActor
     func apply(phim: PhimStore) -> [Movie] {
         var base: [Movie]
         if type == .chieuRap, let slug = genre {

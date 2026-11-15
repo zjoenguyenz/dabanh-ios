@@ -785,6 +785,7 @@ struct JoeRailSpec: Identifiable {
     var id: String { scope }
 }
 
+@MainActor
 func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
     var specs: [JoeRailSpec] = []
     if themeID == .sourceBoard {

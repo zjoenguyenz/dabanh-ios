@@ -158,12 +158,7 @@ struct JoeMovieDetail: View {
     /// placeholder follows the active design's head anatomy.
     @ViewBuilder
     private var placeholderHeader: some View {
-        var m = Movie()
-        m.provider = provider
-        m.slug = slug
-        m.name = route.name
-        m.poster = route.poster
-        m.year = route.year
+        let m = placeholderMovie()
         switch theme.id {
         case .posterWall:
             VStack(alignment: .center, spacing: 18) {
@@ -211,6 +206,20 @@ struct JoeMovieDetail: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    /// The placeholder header's movie, assembled OUTSIDE the
+    /// @ViewBuilder block above: assignment statements are ()
+    /// expressions, and a () child cannot conform to View —
+    /// the builder block may only declare the finished value.
+    private func placeholderMovie() -> Movie {
+        var m = Movie()
+        m.provider = provider
+        m.slug = slug
+        m.name = route.name
+        m.poster = route.poster
+        m.year = route.year
+        return m
     }
 
     private var providerChip: some View {
