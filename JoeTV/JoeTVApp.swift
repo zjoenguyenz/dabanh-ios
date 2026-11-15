@@ -24,9 +24,14 @@ struct JoeTVApp: App {
         URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024,
                                    diskCapacity: 512 * 1024 * 1024,
                                    diskPath: "joetv-images")
-        // Warm the segment-cleaning proxy so its loopback port is
-        // ready long before the first play tap.
-        JoeProxy.shared.start()
+        // CONVERGENCE (Team 7 D7, 2026-11-15): the proxy is NOT
+        // warmed here any more. JoeProxy.start() binds a
+        // loopback port and starts a socket pump on a background
+        // queue during application init; Đá Banh TV — the proven
+        // app on the owner's box — has no equivalent launch
+        // work. The proxy already starts lazily at the first
+        // play tap (JoeProxy.playlistURL / resolveForPlayback),
+        // so nothing is lost by removing the warm start.
     }
 
     var body: some Scene {
@@ -52,20 +57,15 @@ final class JoeNavigator: ObservableObject {
     @Published var tor: TorRoute?
     @Published var searchOpen = false
 
-    /// v1.5 focus hub: explicit, guaranteed focus routing between
-    /// the shell's pill row and the visible section. A section (or
-    /// the search view) calls requestFocus(.pills) to escape
-    /// upward; the shell calls requestFocus(.sectionTop) on pill
-    /// DOWN and the visible section lands focus on its own first
-    /// element. focusNonce increments on EVERY request so repeated
-    /// requests to the same target still fire .onChange.
-    enum JoeFocusTarget { case pills, sectionTop }
-    @Published var focusTarget: JoeFocusTarget?
-    @Published var focusNonce = 0
-    func requestFocus(_ target: JoeFocusTarget) {
-        focusTarget = target
-        focusNonce &+= 1
-    }
+    // CONVERGENCE (Team 7 D4/D5, 2026-11-15): the v1.5 focus hub
+    // (focusTarget / focusNonce / requestFocus) is REMOVED. It
+    // was the write side of the convicted feedback loop: hub
+    // requests landed in @FocusState properties whose flips
+    // installed and uninstalled the conditional move/exit
+    // traps, changing the view tree's identity under the focus
+    // engine. Focus routing is geometric again — the Đá Banh TV
+    // construction (pills directly above content, plain Buttons,
+    // no programmatic focus writes on the launch path).
 
     /// Close the topmost layer; returns false when nothing is
     /// open (the caller then lets the system have the press).
@@ -89,11 +89,22 @@ final class JoeNavigator: ObservableObject {
 /// v1.5: pills draw focus themselves (violet fill +
 /// lighter-violet outline + scale) — .card's pale focus card
 /// washed titles out in the owner's v1.4 videos and is banned.
-/// v1.9: the pills are .focusable() views, not Buttons (the
-/// system focus effect survived root-level disabling on the
-/// owner's tvOS — see sectionPill). Focus routing between pills
-/// and sections is explicit through the JoeNavigator focus hub,
-/// never left to geometry.
+/// CONVERGENCE (Team 7, 2026-11-15): v1.9's answer to the pale
+/// blob — .focusable() non-Button pills, a @FocusState hub, and
+/// conditional move/exit traps that installed and uninstalled
+/// themselves as focus moved — is CONVICTED as the freeze/crash
+/// mechanism on the owner's tvOS (the trap bodies switched the
+/// view structure on @FocusState values the focus engine itself
+/// writes: focus lands → trap flips → subtree identity changes
+/// → teardown/rebuild → focus re-resolves → can flip again).
+/// The pills are real Buttons again (.buttonStyle(.card), the
+/// Đá Banh TV construction) with the app-drawn look kept via a
+/// label that reads its own focus from the environment and
+/// .focusEffectDisabled(true) on the Button itself; routing
+/// between pills and sections is geometric; Menu handling lives
+/// unconditionally on the detail/search layers themselves, so
+/// at root there is NO exit handler anywhere and Menu exits
+/// the app on the first press (the G-EXIT contract).
 struct JoeRootView: View {
     enum Section: String, CaseIterable {
         case tv, phim, torrent, settings
@@ -117,17 +128,17 @@ struct JoeRootView: View {
     }
 
     @State private var section: Section = .phim
-    @FocusState private var focusedSection: Section?
     @StateObject private var nav = JoeNavigator()
 
     /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
     /// Phim section's view. If the owner opened search, escaped
     /// UP to the pills and selected another section, searchOpen
-    /// stayed true while no search was on screen — and the exit
-    /// trap below stayed armed, so the next Menu press was eaten
-    /// closing an invisible "layer" instead of exiting the app.
-    /// Leaving the Phim section now always closes search, so
-    /// searchOpen == true implies the search is actually visible.
+    /// stayed true while no search was on screen — and an exit
+    /// handler keyed on it stayed armed, so the next Menu press
+    /// was eaten closing an invisible "layer" instead of
+    /// exiting the app. Leaving the Phim section now always
+    /// closes search, so searchOpen == true implies the search
+    /// is actually visible.
 
     var body: some View {
         ZStack {
@@ -139,9 +150,6 @@ struct JoeRootView: View {
             // never stacks (the old manual 56/34/24 did stack).
             VStack(spacing: 32) {
                 topBar
-                    .modifier(JoeMoveTrap(enabled: focusedSection != nil) { direction in
-                        pillMove(direction)
-                    })
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -151,6 +159,13 @@ struct JoeRootView: View {
                     JoeTheme.background
                     JoeMovieDetail(route: route)
                 }
+                // Menu closes THIS layer (convergence, Team 7):
+                // the handler is unconditional and lives on the
+                // layer itself, so it exists exactly while the
+                // layer does — no state-driven installation, and
+                // at root no exit handler exists anywhere, so a
+                // root Menu press exits the app (G-EXIT).
+                .onExitCommand { nav.movie = nil }
                 .transition(.opacity)
                 .zIndex(2)
             }
@@ -159,6 +174,7 @@ struct JoeRootView: View {
                     JoeTheme.background
                     JoeTorrentDetail(route: route)
                 }
+                .onExitCommand { nav.tor = nil }
                 .transition(.opacity)
                 .zIndex(3)
             }
@@ -169,25 +185,12 @@ struct JoeRootView: View {
             if nav.searchOpen { nav.searchOpen = false }
         }
         .environmentObject(nav)
-        // "No system focus effect" law: this root application is
-        // the BACKSTOP only. The v1.8 build had exactly this and
-        // the owner's tvOS still washed a pale blob over the
-        // focused pill (his photo, 2026-11-14) — so since v1.9
-        // EVERY focusable control also carries
-        // .focusEffectDisabled(true) on itself, and the top-bar
-        // pills are not Buttons at all (see sectionPill).
-        .focusEffectDisabled(true)
-        .onChange(of: nav.focusNonce) { _, _ in
-            // Hub consumer (shell side): a section escaping upward
-            // lands focus back on the CURRENT section's pill.
-            if nav.focusTarget == .pills {
-                focusedSection = section
-            }
-        }
-        .modifier(JoeExitTrap(enabled: nav.movie != nil || nav.tor != nil
-                                       || nav.searchOpen) {
-            _ = nav.closeTop()
-        })
+        // CONVERGENCE (2026-11-15): the root-level
+        // .focusEffectDisabled(true) backstop and the shell's
+        // focus-hub consumer are REMOVED (spec items 3–4).
+        // Focus-effect suppression is per-view, on the controls
+        // themselves, exactly as it already was everywhere
+        // except this root line.
     }
 
     // The top row stays well under ~1,800pt wide on purpose
@@ -202,7 +205,7 @@ struct JoeRootView: View {
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.9")
+            Text("Joe TV v1.9.1")
                 .font(.system(size: 23))
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
@@ -237,70 +240,29 @@ struct JoeRootView: View {
         }
     }
 
-    /// v1.9: the pills are NOT Buttons any more. On the owner's
-    /// tvOS (Liquid Glass) the system focus effect drew a pale
-    /// blob over the focused Button pill despite the root-level
-    /// .focusEffectDisabled (v1.7 AND v1.8 photos) — so the pill
-    /// is now a plain .focusable() view whose focus rendering is
-    /// 100% app-drawn (violet fill + lighter-violet outline +
-    /// scale on its own capsule), with the system effect disabled
-    /// on the view itself as well. Hub integration is unchanged:
-    /// the pill still binds the same @FocusState
-    /// (.focused($focusedSection, equals:)), the topBar move trap
-    /// still routes LEFT/RIGHT/DOWN arithmetically (pillMove),
-    /// and select arrives as a tap on the focused view, which is
-    /// what changes the section (select-press only, as before).
+    /// CONVERGENCE (Team 7 item 2 — the middle path, 2026-11-15):
+    /// the pills are real Buttons again, exactly the Đá Banh TV
+    /// TVContentView construction — Button + .buttonStyle(.card),
+    /// selection in the action, NO @FocusState binding on the row,
+    /// no .onTapGesture, no hub write on focus. LEFT/RIGHT walk
+    /// the row and DOWN lands on the section's top element
+    /// GEOMETRICALLY (pills sit directly above the content — the
+    /// geometry this shell already had), which is the routing the
+    /// owner gets on Đá Banh TV on the same box. The app-drawn
+    /// look is kept: the label (PillLabel) reads its own focus
+    /// from the environment and draws the v1.9 capsule (violet
+    /// fill + lighter-violet outline + scale), and the system
+    /// focus effect is disabled on the Button itself —
+    /// unconditionally, as a plain modifier, never as a
+    /// structure switch.
     private func sectionPill(_ s: Section) -> some View {
-        let selected = section == s
-        let focused = focusedSection == s
-        return HStack(spacing: 10) {
-            Image(systemName: s.icon)
-                .font(.system(size: 26, weight: .medium))
-            Text(s.title)
-                .font(.system(size: 29, weight: (selected || focused) ? .semibold : .medium))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+        Button {
+            section = s
+        } label: {
+            PillLabel(title: s.title, icon: s.icon, selected: section == s)
         }
-        .foregroundStyle((selected || focused) ? .white : .white.opacity(0.85))
-        .padding(.horizontal, 28)
-        .padding(.vertical, 14)
-        .background(Capsule().fill(selected ? JoeTheme.accentViolet
-                                   : (focused ? JoeTheme.accentViolet
-                                              : Color.white.opacity(0.07))))
-        .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                        lineWidth: 4))
-        .scaleEffect(focused ? 1.06 : 1.0)
-        .contentShape(Capsule())
-        .focusable()
-        .focused($focusedSection, equals: s)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
-        .onTapGesture { section = s }
-    }
-
-    /// Guaranteed pill-row routing (v1.5 hub): the topBar move
-    /// trap is enabled ONLY while a pill holds focus, and every
-    /// direction has a defined outcome — LEFT/RIGHT walk the
-    /// CaseIterable order arithmetically (no-op at the ends),
-    /// DOWN hands off to the visible section through the hub,
-    /// UP is a defined no-op (the pills are the top screen edge).
-    /// Pills still change section only on select-press.
-    private func pillMove(_ direction: MoveCommandDirection) {
-        guard let current = focusedSection,
-              let idx = Section.allCases.firstIndex(of: current) else { return }
-        switch direction {
-        case .left:
-            if idx > 0 { focusedSection = Section.allCases[idx - 1] }
-        case .right:
-            if idx + 1 < Section.allCases.count {
-                focusedSection = Section.allCases[idx + 1]
-            }
-        case .down:
-            nav.requestFocus(.sectionTop)
-        case .up:
-            break
-        @unknown default:
-            break
-        }
     }
 
     @ViewBuilder
@@ -318,43 +280,59 @@ struct JoeRootView: View {
     }
 }
 
-/// Installs the root Menu handler ONLY while a layer is open.
-/// PROOF (S1.1, Team 4 gate G-EXIT): with `enabled == false` the
-/// modifier returns the content untouched — there is NO
-/// .onExitCommand anywhere in the tree, so a Menu press at root
-/// state has no app consumer and travels the full responder
-/// chain to UIApplication: the app exits immediately, first
-/// press. With a layer open, exactly one press closes exactly
-/// one layer (JoeNavigator.closeTop), and the NEXT press is a
-/// root press again. The trap must never be made unconditional.
-private struct JoeExitTrap: ViewModifier {
-    let enabled: Bool
-    let action: () -> Void
+/// The pill's label (convergence, Team 7 item 2): reads its OWN
+/// focus state from the environment — the focus engine writes
+/// `isFocused` into a focused view's subtree as a pure rendering
+/// input; the label branches on it only to pick colours/scale
+/// INSIDE one stable view, writes nothing back, and no view's
+/// structure depends on it. Reproduces the app-drawn v1.9 pill
+/// look exactly: violet fill when selected or focused,
+/// lighter-violet 4 pt outline and 1.06 scale when focused,
+/// semibold title when selected or focused.
+private struct PillLabel: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    @Environment(\.isFocused) private var isFocused
 
-    func body(content: Content) -> some View {
-        if enabled {
-            content.onExitCommand(perform: action)
-        } else {
-            content
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 26, weight: .medium))
+            Text(title)
+                .font(.system(size: 29, weight: (selected || isFocused) ? .semibold : .medium))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
+        .foregroundStyle((selected || isFocused) ? .white : .white.opacity(0.85))
+        .padding(.horizontal, 28)
+        .padding(.vertical, 14)
+        .background(Capsule().fill(selected ? JoeTheme.accentViolet
+                                   : (isFocused ? JoeTheme.accentViolet
+                                                : Color.white.opacity(0.07))))
+        .overlay(Capsule().strokeBorder(isFocused ? joeFocusViolet : Color.clear,
+                                        lineWidth: 4))
+        .scaleEffect(isFocused ? 1.06 : 1.0)
     }
 }
 
-/// Conditional move trap, same shape as JoeExitTrap: the move
-/// handler exists ONLY while `enabled`. A trap is enabled only
-/// while focus sits on a boundary element, and while enabled its
-/// handler must give ALL FOUR directions a defined outcome
-/// (forced target, arithmetic neighbour, or explicit no-op at a
-/// screen edge) — never swallow a direction silently.
-private struct JoeMoveTrap: ViewModifier {
-    let enabled: Bool
-    let action: (MoveCommandDirection) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content.onMoveCommand(perform: action)
-        } else {
-            content
-        }
-    }
-}
+// CONVERGENCE RECORD (2026-11-15): JoeMoveTrap and JoeExitTrap
+// — the conditional ViewModifiers whose bodies switched between
+// `content` and `content.onMoveCommand/.onExitCommand` on an
+// `enabled` flag fed by @FocusState — are DELETED, here and in
+// every file that duplicated them (JoePhimHome, JoeTorrent,
+// JoeSearch, JoeSettings, JoeTVSection). Team 7 convicted that
+// shape (D4) as the launch freeze/crash mechanism: every
+// `enabled` input was a value the focus engine itself writes,
+// so a focus landing could install/uninstall a handler over a
+// whole subtree, change its identity, force a rebuild, and
+// re-resolve focus — a feedback loop on the main thread that
+// needs no remote input to start. The routing the traps
+// provided is preserved by construction instead: geometric
+// focus movement between plain focusable elements (the Đá
+// Banh TV pattern), per-element .onMoveCommand handlers that
+// are ALWAYS installed on the specific cards that need
+// arithmetic routing, and unconditional .onExitCommand
+// handlers attached to the detail/search layers themselves.
+// Team 4 gate going forward: NO @FocusState-driven conditional
+// view modifier anywhere in this target.

@@ -76,25 +76,13 @@ struct JoeTVSection: View {
             if selectedGroup == nil { selectedGroup = store.groups.first }
             store.noteSelectedGroup(effectiveGroup)
         }
-        .onChange(of: nav.focusNonce) { _, _ in
-            // Hub entry (v1.5): pill DOWN lands focus on the chips
-            // (the effective group's chip); DOWN from a chip then
-            // enters the grid — see moveChip.
-            // C-17: when there is no effective group yet (store
-            // still loading / zero groups), effectiveGroup is nil
-            // and the old code assigned nil — focus never landed
-            // in the section at all. Fall back to the first chip
-            // id that exists, then to the first grid channel.
-            if nav.focusTarget == .sectionTop {
-                if let group = effectiveGroup {
-                    focusedChip = group
-                } else if let first = chipIDs.first {
-                    focusedChip = first
-                } else if let first = gridChannels.first {
-                    focusedChannel = first.id
-                }
-            }
-        }
+        // CONVERGENCE (spec item 3, 2026-11-15): the focus-hub
+        // consumer that used to sit here (onChange of
+        // nav.focusNonce → focusedChip / focusedChannel writes)
+        // is REMOVED — no programmatic focus writes on the
+        // launch path. DOWN from the pills lands on the chip row
+        // geometrically (the chips sit directly below the hero),
+        // and DOWN from a chip enters the grid the same way.
     }
 
     // MARK: - Hero
@@ -234,7 +222,6 @@ struct JoeTVSection: View {
         .buttonStyle(.plain)
         .focusEffectDisabled(true)
         .focused($focusedChip, equals: group)
-        .onMoveCommand { direction in moveChip(direction, from: group) }
     }
 
     private func actionChip(id: String, title: String, action: @escaping () -> Void) -> some View {
@@ -256,52 +243,21 @@ struct JoeTVSection: View {
         .buttonStyle(.plain)
         .focusEffectDisabled(true)
         .focused($focusedChip, equals: id)
-        .onMoveCommand { direction in moveChip(direction, from: id) }
         .disabled(store.isLoading || store.isValidating)
     }
 
-    /// Ordered focus ids of the chip row: every visible group,
-    /// then the two action chips. The action ids drop out of the
-    /// list while the store is busy because their buttons are
-    /// disabled then and could not take focus anyway.
-    private var chipIDs: [String] {
-        var ids = store.visibleGroups
-        if !store.isLoading && !store.isValidating {
-            ids += ["refresh", "validate"]
-        }
-        return ids
-    }
-
-    /// Chip routing: the move handler sits on each chip, so it is
-    /// active exactly while that chip holds focus, and all four
-    /// directions have defined outcomes — LEFT/RIGHT walk chipIDs
-    /// arithmetically (no-op at the ends), UP escapes to the shell
-    /// pills through the focus hub, DOWN enters the grid at the
-    /// effective group's first channel.
-    private func moveChip(_ direction: MoveCommandDirection, from id: String) {
-        switch direction {
-        case .left:
-            let ids = chipIDs
-            if let idx = ids.firstIndex(of: id), idx > 0 {
-                focusedChip = ids[idx - 1]
-            }
-        case .right:
-            let ids = chipIDs
-            if let idx = ids.firstIndex(of: id), idx + 1 < ids.count {
-                focusedChip = ids[idx + 1]
-            }
-        case .up:
-            nav.requestFocus(.pills)
-        case .down:
-            // C-17: with an empty grid there is nowhere to land —
-            // hold focus on the chip instead of assigning nil.
-            if let first = gridChannels.first {
-                focusedChannel = first.id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // CONVERGENCE (2026-11-15): the chips' per-chip move
+    // handler (moveChip) and its chipIDs table are DELETED.
+    // Their outcomes are what geometric focus movement does on
+    // this layout unaided: LEFT/RIGHT walk the chip row in
+    // visual order (the engine also skips the action chips
+    // while they are disabled — the case chipIDs hand-managed),
+    // UP reaches the pills, DOWN enters the grid at its first
+    // tile. The grid tiles keep their own per-tile handler
+    // (moveInGrid below): exact 6-column arithmetic the owner
+    // asked for, always installed, per-element — its UP from
+    // the first row writes focusedChip, a plain focus move
+    // between stable elements that no structure depends on.
 
     // MARK: - Channel grid (v1.5: ONE grid, no nested rails)
 

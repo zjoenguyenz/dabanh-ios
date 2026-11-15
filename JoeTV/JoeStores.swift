@@ -104,17 +104,34 @@ final class PhimStore: ObservableObject {
     /// at once — up to 58 requests with KK's sequential failover —
     /// with NO deadline, no cache and every error discarded; on
     /// the owner's TV that froze the whole device (his report:
-    /// many Menu presses to escape). Now:
+    /// many Menu presses to escape).
+    ///
+    /// CONVERGENCE (Team 6 A1/D + Team 8, 2026-11-15): the v1.9
+    /// shape still ran every job's synchronous tail (cache save,
+    /// JSON parse, rail application) ON this main actor — the
+    /// task-group children inherited the actor — so the load,
+    /// the 20 s watchdog (an unstructured task created inside
+    /// load(), hence also main-actor-isolated: its publication
+    /// had to win a slot on the very executor it monitored) and
+    /// the view state all shared one executor, and any stall
+    /// presented as the joint symptom the owner hit: frozen UI,
+    /// spinner forever, no error surface. Now:
     ///   1. the disk cache renders first (decoded OFF-actor),
-    ///   2. a 20 s watchdog publishes loadTimedOut,
-    ///   3. the refresh runs under a 4-permit gate in priority
-    ///      order (≤ ~12 provider connections at once),
-    ///   4. fetch + cache-write + parse happen in the child
-    ///      tasks. The tasks inherit this actor's context, so
-    ///      what keeps the main actor responsive is that every
-    ///      wait (network, gate, file IO) suspends instead of
-    ///      blocking, and only small parsed rails cross back
-    ///      for this loop to publish.
+    ///   2. the watchdog runs on an INDEPENDENT clock (a
+    ///      detached task + a lock-guarded box) — its trip
+    ///      never needs this actor to be free, and the
+    ///      attempted/landed signposts attribute any delay,
+    ///   3. the refresh is STAGED: the four "newest" jobs run
+    ///      first; the remaining twenty start only after that
+    ///      phase completes,
+    ///   4. fetch + cache-write + parse run in a DETACHED
+    ///      worker (non-isolated context); results cross back
+    ///      through a lock-guarded box and only the @Published
+    ///      application happens here, in a findAlternatives-
+    ///      style poll loop,
+    ///   5. a HARD 25 s overall deadline (the same box
+    ///      pattern) stops the awaiting, keeps partial rails
+    ///      and always clears `loading`.
     private func load() async {
         loading = true
         loadTimedOut = false
@@ -123,17 +140,28 @@ final class PhimStore: ObservableObject {
         defer { loading = false }
 
         let jobs = Self.jobs
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(25)
+        LoadSignpost.log("load started gen=\(generation)")
 
-        // 1) Deadline watchdog (board contract), started before
-        // any work so the 20 s is measured from the load's start.
-        let watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(20))
-            guard let self, !Task.isCancelled else { return }
-            if self.loadGeneration == generation && !self.hasData {
+        // 1) Independent deadline watchdog (board contract),
+        // armed before any work so the 20 s is measured from
+        // the load's start. The clock task is DETACHED: it
+        // does not inherit this actor. When it trips, the
+        // publication hop to the main actor is attempted from
+        // off-actor and signposted on both sides of the hop.
+        let watchdogBox = LoadWatchdogBox(generation: generation)
+        watchdogBox.arm()
+        Task.detached { [weak self, watchdogBox] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard watchdogBox.tripIfNoData() else { return }
+            LoadSignpost.log("publication attempted gen=\(generation)")
+            await MainActor.run { [weak self] in
+                guard let self, self.loadGeneration == generation else { return }
                 self.loadTimedOut = true
+                LoadSignpost.log("publication landed gen=\(generation)")
             }
         }
-        defer { watchdog.cancel() }
 
         // 2) Cache first (the TVStore pattern). PhimRailCache is
         // non-isolated, so awaiting it suspends this actor
@@ -143,41 +171,103 @@ final class PhimStore: ObservableObject {
         for (key, movies) in cached {
             applyRail(key, movies)
         }
+        if !cached.isEmpty, watchdogBox.markHasData() {
+            LoadSignpost.log("first rail landed gen=\(generation) (cache)")
+        }
 
-        // 3) Refresh behind the cache, gated.
+        // 3) Staged refresh behind the cache, in the detached
+        // worker: phase 1 is the four "newest" jobs (the jobs
+        // list is priority-ordered, so they are its head);
+        // phase 2 — the remaining twenty — starts only after
+        // phase 1's group has fully drained.
         let gate = AsyncGate(permits: 4)
-        await withTaskGroup(of: (String, String, [Movie]?, String?).self) { group in
-            for job in jobs {
+        let box = PhimLoadBox()
+        let phase1 = Array(jobs.prefix(4))
+        let phase2 = Array(jobs.dropFirst(4))
+        let worker = Task.detached {
+            await Self.runPhase(phase1, gate: gate, deadline: deadline, box: box)
+            LoadSignpost.log("phase2 started gen=\(generation)")
+            await Self.runPhase(phase2, gate: gate, deadline: deadline, box: box)
+            box.finish()
+        }
+
+        // 4) Consume results until the worker finishes, this
+        // load is superseded, the task is cancelled, or the
+        // hard 25 s deadline passes — whichever comes first.
+        while true {
+            applyResults(box.drain(), watchdogBox: watchdogBox, generation: generation)
+            if box.isFinished { break }
+            if loadGeneration != generation || Task.isCancelled { break }
+            if Date() >= deadline {
+                LoadSignpost.log("deadline hit gen=\(generation)")
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        applyResults(box.drain(), watchdogBox: watchdogBox, generation: generation)
+        if !box.isFinished { worker.cancel() }
+        LoadSignpost.log("load completed gen=\(generation)")
+    }
+
+    /// Apply one drained batch of worker results on this
+    /// actor — the ONLY part of the refresh that runs here.
+    /// Partial-success semantics preserved from v1.9: ANY
+    /// landed rail stamps the load and clears that provider's
+    /// error (v1.8 stamped only a hasData success, so a
+    /// partial load re-fired the whole storm on every visit).
+    /// A skipped job (gate deadline) publishes movies == nil
+    /// AND error == nil and is ignored: it is not evidence
+    /// about the provider.
+    private func applyResults(_ results: [PhimLoadBox.Result],
+                              watchdogBox: LoadWatchdogBox, generation: Int) {
+        for result in results {
+            if let movies = result.movies {
+                applyRail(result.key, movies)
+                if !movies.isEmpty {
+                    loadedAt = Date()
+                    loadTimedOut = false
+                    providerErrors[result.provider] = nil
+                    if watchdogBox.markHasData() {
+                        LoadSignpost.log("first rail landed gen=\(generation)")
+                    }
+                }
+            } else if let error = result.error {
+                providerErrors[result.provider] = error
+            }
+        }
+    }
+
+    /// One refresh phase, run ENTIRELY off the main actor
+    /// (nonisolated; the worker task is detached): gate,
+    /// fetch, cache-write and parse all happen in the
+    /// children's generic-executor context, and only the
+    /// small parsed rails cross back through the box.
+    nonisolated private static func runPhase(_ phaseJobs: [Job], gate: AsyncGate,
+                                             deadline: Date, box: PhimLoadBox) async {
+        await withTaskGroup(of: Void.self) { group in
+            for job in phaseJobs {
                 group.addTask {
-                    await gate.acquire()
-                    let result: (String, String, [Movie]?, String?)
+                    guard await gate.acquire(deadline: deadline) else {
+                        // Could not start inside the load's
+                        // overall deadline: report a skip
+                        // (no movies, no error).
+                        box.publish((key: job.key, provider: job.provider,
+                                     movies: nil, error: nil))
+                        return
+                    }
+                    let result: PhimLoadBox.Result
                     do {
                         let root = try await Providers.fetchListRaw(job.provider, job.request)
                         PhimRailCache.save(key: job.key, root: root)
-                        result = (job.key, job.provider,
-                                  Providers.parseList(job.provider, job.request, root), nil)
+                        result = (key: job.key, provider: job.provider,
+                                  movies: Providers.parseList(job.provider, job.request, root),
+                                  error: nil)
                     } catch {
-                        result = (job.key, job.provider, nil,
-                                  error.localizedDescription)
+                        result = (key: job.key, provider: job.provider,
+                                  movies: nil, error: error.localizedDescription)
                     }
                     await gate.release()
-                    return result
-                }
-            }
-            for await (key, provider, movies, error) in group {
-                if let movies {
-                    applyRail(key, movies)
-                    if !movies.isEmpty {
-                        // Partial-success semantics: ANY landed
-                        // rail stamps the load. (v1.8 stamped only
-                        // a hasData success, so a partial load
-                        // re-fired the whole storm on every visit.)
-                        loadedAt = Date()
-                        loadTimedOut = false
-                        providerErrors[provider] = nil
-                    }
-                } else if let error {
-                    providerErrors[provider] = error
+                    box.publish(result)
                 }
             }
         }
@@ -223,28 +313,53 @@ final class PhimStore: ObservableObject {
 /// Cancellation-safe: a waiter whose task is cancelled is
 /// removed and resumed, so a cancelled load can never wedge
 /// the gate (and with it the task group) shut.
+///
+/// CONVERGENCE (Team 6 census A11, 2026-11-15): acquire now
+/// takes the load's overall DEADLINE. Pre-fix a parked waiter
+/// could wait forever — nothing resumed it except a release
+/// or its own task's cancellation — so a wedged gate held the
+/// whole load open with it. A waiter still parked at the
+/// deadline is resumed with false by its own warden task and
+/// its job reports a skip instead of starting late. Every
+/// resume path removes the waiter BEFORE resuming, so each
+/// continuation is resumed exactly once.
 private actor AsyncGate {
     private var permits: Int
-    private var waiters: [(UUID, CheckedContinuation<Void, Never>)] = []
+    private var waiters: [(UUID, CheckedContinuation<Bool, Never>)] = []
 
     init(permits: Int) { self.permits = permits }
 
-    func acquire() async {
+    /// True when a permit was granted; false when the
+    /// deadline passed (or the task was cancelled) first.
+    func acquire(deadline: Date) async -> Bool {
         if permits > 0 {
             permits -= 1
-            return
+            return true
         }
+        if Date() >= deadline { return false }
         let id = UUID()
-        await withTaskCancellationHandler {
+        return await withTaskCancellationHandler {
             await withCheckedContinuation {
-                (cont: CheckedContinuation<Void, Never>) in
+                (cont: CheckedContinuation<Bool, Never>) in
                 // Already cancelled before parking: never queue
                 // (the onCancel may already have run and found
                 // no waiter to remove).
                 if Task.isCancelled {
-                    cont.resume()
+                    cont.resume(returning: false)
                 } else {
                     waiters.append((id, cont))
+                    // Deadline warden: if this waiter is still
+                    // parked when the deadline passes, fail it.
+                    // (If release() grants it first, the warden
+                    // finds no waiter and does nothing.)
+                    Task.detached { [self] in
+                        let remaining = deadline.timeIntervalSinceNow
+                        if remaining > 0 {
+                            try? await Task.sleep(
+                                nanoseconds: UInt64(remaining * 1_000_000_000))
+                        }
+                        await self.expireWaiter(id)
+                    }
                 }
             }
         } onCancel: {
@@ -252,9 +367,15 @@ private actor AsyncGate {
         }
     }
 
+    private func expireWaiter(_ id: UUID) {
+        if let i = waiters.firstIndex(where: { $0.0 == id }) {
+            waiters.remove(at: i).1.resume(returning: false)
+        }
+    }
+
     private func cancelWaiter(_ id: UUID) {
         if let i = waiters.firstIndex(where: { $0.0 == id }) {
-            waiters.remove(at: i).1.resume()
+            waiters.remove(at: i).1.resume(returning: false)
         }
     }
 
@@ -262,8 +383,124 @@ private actor AsyncGate {
         if waiters.isEmpty {
             permits += 1
         } else {
-            waiters.removeFirst().1.resume()
+            waiters.removeFirst().1.resume(returning: true)
         }
+    }
+}
+
+/// Persisted signpost log for the Phim load path (convergence
+/// spec 5d): timestamped one-line events in UserDefaults under
+/// "joetv.signposts", newest last, capped at 200 entries. If a
+/// stall ever recurs, the tail of this log attributes it —
+/// watchdog armed / sleep done / publication attempted vs
+/// landed separates "the clock never fired" from "the main
+/// actor never took the hop".
+enum LoadSignpost {
+    private static let lock = NSLock()
+    private static let key = "joetv.signposts"
+
+    /// Read-only snapshot for the Settings diagnostics
+    /// surface: the stored entries, oldest→newest as stored.
+    /// Never writes.
+    static func entries() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+
+    static func log(_ event: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        var entries = UserDefaults.standard.stringArray(forKey: key) ?? []
+        entries.append(stamp + " " + event)
+        if entries.count > 200 {
+            entries.removeFirst(entries.count - 200)
+        }
+        UserDefaults.standard.set(entries, forKey: key)
+    }
+}
+
+/// Lock-guarded state shared between PhimStore and its
+/// INDEPENDENT watchdog clock (convergence spec 5d): the clock
+/// task is detached, so the "has any data landed" fact and the
+/// trip decision live here — never on the main actor the
+/// watchdog exists to monitor.
+private final class LoadWatchdogBox: @unchecked Sendable {
+    let generation: Int
+    private let lock = NSLock()
+    private var hasDataFlag = false
+    private var tripped = false
+
+    init(generation: Int) { self.generation = generation }
+
+    func arm() {
+        LoadSignpost.log("watchdog armed gen=\(generation)")
+    }
+
+    /// Mark that data has landed (cache or network). Returns
+    /// true only for the FIRST mark, so the caller can
+    /// signpost the first-rail landing exactly once.
+    @discardableResult
+    func markHasData() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if hasDataFlag { return false }
+        hasDataFlag = true
+        return true
+    }
+
+    /// Called by the independent clock when its 20 s sleep
+    /// ends: trips (returns true) iff no data has landed and
+    /// it has not tripped before.
+    func tripIfNoData() -> Bool {
+        lock.lock()
+        let shouldTrip = !hasDataFlag && !tripped
+        if shouldTrip { tripped = true }
+        let hadData = hasDataFlag
+        lock.unlock()
+        LoadSignpost.log("watchdog sleep done gen=\(generation) hasData=\(hadData)")
+        return shouldTrip
+    }
+}
+
+/// Lock-guarded result box between the detached load worker
+/// and the store's consumer loop (the findAlternatives
+/// pattern): the worker publishes parsed rails; the consumer
+/// drains them on the main actor. The worker is never awaited
+/// by the consumer, so a stuck job cannot hold the load open
+/// past its deadline.
+private final class PhimLoadBox: @unchecked Sendable {
+    typealias Result = (key: String, provider: String, movies: [Movie]?, error: String?)
+
+    private let lock = NSLock()
+    private var pending: [Result] = []
+    private var finishedFlag = false
+
+    func publish(_ result: Result) {
+        lock.lock()
+        pending.append(result)
+        lock.unlock()
+    }
+
+    func drain() -> [Result] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = pending
+        pending = []
+        return out
+    }
+
+    func finish() {
+        lock.lock()
+        finishedFlag = true
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finishedFlag
     }
 }
 

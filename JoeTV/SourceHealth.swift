@@ -211,26 +211,68 @@ enum SourceHealth {
     /// the outcome. Cancellation is NOT evidence about the
     /// source (a race loser, a view going away) and is never
     /// recorded.
+    ///
+    /// CONVERGENCE (Team 6 census A8, 2026-11-15): the budget
+    /// is now enforced HERE, not merely handed to the callee.
+    /// Pre-fix this wrapper only passed the number into op —
+    /// the call's real worst case was whatever op's own
+    /// enforcement happened to be. Now op runs in an
+    /// unstructured task publishing into a lock-guarded box,
+    /// raced against a budget timer task (the findAlternatives
+    /// pattern): whichever lands first decides, the loser is
+    /// cancelled and NEVER awaited, so an op that ignores its
+    /// budget cannot hold the caller past it. A budget expiry
+    /// throws URLError(.timedOut) and records .timeout with
+    /// the elapsed ≈ budget — the same evidence the old
+    /// URLSession-driven timeout produced.
     static func run<T>(provider: String, stage: Stage, url: String,
                        cap: TimeInterval,
-                       _ op: (TimeInterval) async throws -> T) async throws -> T {
+                       _ op: @escaping (TimeInterval) async throws -> T) async throws -> T {
         let budget = fuse(provider: provider, stage: stage, url: url, cap: cap)
         let start = Date()
-        do {
-            let value = try await op(budget)
-            record(provider: provider, stage: stage, url: url,
-                   seconds: Date().timeIntervalSince(start), outcome: .success)
-            return value
-        } catch {
-            if error is CancellationError { throw error }
-            if let urlError = error as? URLError, urlError.code == .cancelled {
-                throw error
+        let box = RunRaceBox<T>()
+        let opTask = Task {
+            do {
+                box.complete(try await op(budget))
+            } catch {
+                box.fail(error)
             }
-            let outcome: Outcome =
-                (error as? URLError)?.code == .timedOut ? .timeout : .instantFail
-            record(provider: provider, stage: stage, url: url,
-                   seconds: Date().timeIntervalSince(start), outcome: outcome)
-            throw error
+        }
+        let timerTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, budget) * 1_000_000_000))
+            box.expire()
+        }
+        defer {
+            opTask.cancel()
+            timerTask.cancel()
+        }
+        while true {
+            if let outcome = box.outcome {
+                switch outcome {
+                case .value(let value):
+                    record(provider: provider, stage: stage, url: url,
+                           seconds: Date().timeIntervalSince(start), outcome: .success)
+                    return value
+                case .error(let error):
+                    if error is CancellationError { throw error }
+                    if let urlError = error as? URLError, urlError.code == .cancelled {
+                        throw error
+                    }
+                    let mapped: Outcome =
+                        (error as? URLError)?.code == .timedOut ? .timeout : .instantFail
+                    record(provider: provider, stage: stage, url: url,
+                           seconds: Date().timeIntervalSince(start), outcome: mapped)
+                    throw error
+                case .expired:
+                    record(provider: provider, stage: stage, url: url,
+                           seconds: Date().timeIntervalSince(start), outcome: .timeout)
+                    throw URLError(.timedOut)
+                }
+            }
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
     }
 
@@ -387,5 +429,45 @@ enum SourceHealth {
             snap.keys[k.key] = nil
             excess -= 1
         }
+    }
+}
+
+/// Lock-guarded outcome box for SourceHealth.run's budget race
+/// (the findAlternatives pattern): the operation task and the
+/// budget timer publish here; the FIRST outcome wins and later
+/// publications are dropped, so a loser that finishes after
+/// the race was decided records nothing and changes nothing.
+private final class RunRaceBox<T> {
+    enum Outcome {
+        case value(T)
+        case error(Error)
+        case expired
+    }
+
+    private let lock = NSLock()
+    private var result: Outcome?
+
+    func complete(_ value: T) {
+        lock.lock()
+        if result == nil { result = .value(value) }
+        lock.unlock()
+    }
+
+    func fail(_ error: Error) {
+        lock.lock()
+        if result == nil { result = .error(error) }
+        lock.unlock()
+    }
+
+    func expire() {
+        lock.lock()
+        if result == nil { result = .expired }
+        lock.unlock()
+    }
+
+    var outcome: Outcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return result
     }
 }

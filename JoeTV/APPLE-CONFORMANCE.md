@@ -464,6 +464,15 @@ recorded; artifact SHA-256 matches the run page digest.
 - B-2 Every focusable site in Team 1's inventory carries per-view
   `.focusEffectDisabled(true)`; pills/cards use the S-3 treatment;
   `.buttonStyle(.card)` appears nowhere in target sources.
+  **AMENDMENT 2026-11-15 (WAIVED-BY-CONVERGENCE, Team 4 gate):**
+  the `.card` ban is superseded for the top-bar section pills ONLY
+  (JoeTVApp `sectionPill`): the Team 7 differential convicted the
+  custom `.focusable()` pill construction as part of the freeze
+  mechanism, and the convergence spec (Team 7 item 2) mandates real
+  Buttons with `.buttonStyle(.card)` — the construction proven on
+  the owner's box by Đá Banh TV — with per-view
+  `.focusEffectDisabled(true)` retained on the Button itself. The
+  ban stands everywhere else in the target.
 - B-3 No root-state exit handler can consume a Menu press (S-5/R-4);
   every `.onMoveCommand`/`.onExitCommand` in the target has an
   explicit route or release for every direction/state, including
@@ -496,6 +505,14 @@ evidence — §3).** These are hard gates, equal in rank to playback:
   path: **zero hits allowed.** (This gate exists because the current
   code has one: JoeProxy's 3 s wait — it must be gone, not merely
   shortened.)
+  **AMENDMENT 2026-11-15 (Team 4 gate, waiver 2):** the parenthetical
+  above is stale. Measured fact: JoeProxy's single DispatchSemaphore
+  (JoeProxy.swift:206/241) is a 90 s-bounded wait on the proxy's own
+  queue — off the main thread, playback-only, unreachable from
+  launch — and was eliminated as a freeze factor by Team 6's census.
+  The gate's operative rule is unchanged for MAIN-THREAD blocking
+  waits (zero allowed on the launch path); the JoeProxy semaphore is
+  recorded as a known, bounded, off-main exception, not a violation.
 - **G-EXIT-5 — Input stays live during load.** The Phim launch load
   (post-Auditor-B shape: deadline, phased jobs, cache-first) runs
   fully async; no store or view blocks the main actor while it runs;

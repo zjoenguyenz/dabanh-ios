@@ -476,7 +476,11 @@ enum RdClient {
             req.httpBody = form.map { "\(JoeHTTP.qenc($0.key))=\(JoeHTTP.qenc($0.value))" }
                 .joined(separator: "&").data(using: .utf8)
         }
-        let (data, response) = try await URLSession.shared.data(for: req)
+        // Convergence (Team 6 D): the debrid API rides JoeHTTP's
+        // bounded sessions (resource timeout = the call class's
+        // 25 s) instead of URLSession.shared's unbounded default;
+        // status/parse handling below is unchanged.
+        let (data, response) = try await JoeHTTP.data(for: req, timeout: 25)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }

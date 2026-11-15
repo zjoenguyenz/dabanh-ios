@@ -45,13 +45,11 @@ struct JoePhimHome: View {
             attempted = true
             phim.loadIfNeeded()
         }
-        .onChange(of: nav.focusNonce) { _, _ in
-            // Hub contract: the shell asks this section to take
-            // focus at its top — the "Tìm phim" header button.
-            if nav.focusTarget == .sectionTop {
-                headerFocused = true
-            }
-        }
+        // CONVERGENCE (spec item 3, 2026-11-15): the focus-hub
+        // consumer that used to sit here (onChange of
+        // nav.focusNonce → headerFocused = true) is REMOVED —
+        // no programmatic focus writes on the launch path.
+        // DOWN from the pills lands on the header geometrically.
     }
 
     private var grid: some View {
@@ -154,15 +152,18 @@ struct JoePhimHome: View {
                     }
                 }
             }
-            .modifier(JoeMoveTrap(enabled: headerFocused) { dir in
-                handleHeaderMove(dir)
-            })
-            .modifier(JoeMoveTrap(enabled: firstRailFocusIndex != nil) { dir in
-                handleFirstRailMove(dir)
-            })
-            .modifier(JoeMoveTrap(enabled: retryFocused) { dir in
-                handleRetryMove(dir)
-            })
+            // CONVERGENCE (Team 7 D4, 2026-11-15): the three
+            // JoeMoveTrap modifiers that wrapped this ScrollView
+            // (enabled by headerFocused / firstRailFocusIndex /
+            // retryFocused) are REMOVED — each flip rebuilt the
+            // ENTIRE ScrollView subtree under the focus engine.
+            // Routing now: header and Retry are plain focusable
+            // elements in the stack, so UP/DOWN between them and
+            // the pills is geometric; the first rail's exact
+            // arithmetic routing survives as an ALWAYS-installed
+            // .onMoveCommand on the first rail's own cards (see
+            // handleFirstRailMove), the codebase's per-element
+            // shape that never fed back into the tree's identity.
     }
 
     // MARK: - Header
@@ -319,7 +320,7 @@ struct JoePhimHome: View {
             .prefix(WatchStore.railCap))
     }
 
-    // MARK: - Focus traversal (boundary traps)
+    // MARK: - Focus traversal (first-rail routing)
 
     /// One focusable card in a rail, whichever FocusState owns it.
     private enum RailItem: Equatable {
@@ -372,13 +373,53 @@ struct JoePhimHome: View {
         return nil
     }
 
-    /// Non-nil only while focus sits in the FIRST rail — that is
-    /// the one state where the first-rail trap is enabled.
+    /// Non-nil only while focus sits in the FIRST rail — the
+    /// cards of that rail carry the always-installed
+    /// .onMoveCommand whose handler (handleFirstRailMove)
+    /// reads this.
     private var firstRailFocusIndex: Int? {
         guard let item = currentRailItem,
               let first = phimRails.first,
               let idx = first.firstIndex(of: item) else { return nil }
         return idx
+    }
+
+    /// The scope of the first CATALOGUE rail on screen, or nil
+    /// when an entry rail (Continue Watching / Favourites)
+    /// leads. Mirrors the body's rail order exactly; movieRail
+    /// compares its own scope against this to decide whether
+    /// its cards carry the first-rail move handler. This is a
+    /// pure function of catalogue data — the handler attachment
+    /// changes only when the DATA changes (a rail landing),
+    /// never when focus moves.
+    private var firstRailScope: String? {
+        if !movieProgress.isEmpty || !movieFavorites.isEmpty { return nil }
+        var scoped: [(scope: String, hasData: Bool)] = [
+            ("merged", !phim.merged.isEmpty),
+            ("chieuRap", !phim.chieuRap.isEmpty),
+            ("vnAll", !phim.vietnamAll.isEmpty),
+            ("vnSeries", !phim.vietnamSeries.isEmpty),
+            ("vnSingle", !phim.vietnamSingle.isEmpty),
+        ]
+        for (slug, _) in PhimStore.genreSpec {
+            scoped.append(("genre:" + slug, !(phim.genreLists[slug] ?? []).isEmpty))
+        }
+        for (slug, _) in PhimStore.countrySpec {
+            scoped.append(("country:" + slug, !(phim.countryLists[slug] ?? []).isEmpty))
+        }
+        scoped.append(contentsOf: [
+            ("kkNew", !phim.kkNew.isEmpty),
+            ("kkSeries", !phim.kkSeries.isEmpty),
+            ("kkMovies", !phim.kkMovies.isEmpty),
+            ("kkAnime", !phim.kkAnime.isEmpty),
+            ("f4kNew", !phim.f4kNew.isEmpty),
+            ("f4kMovies", !phim.f4kMovies.isEmpty),
+            ("vsNew", !phim.vsNew.isEmpty),
+            ("vsSeries", !phim.vsSeries.isEmpty),
+            ("tpMovies", !phim.tpMovies.isEmpty),
+            ("tpSeries", !phim.tpSeries.isEmpty),
+        ])
+        return scoped.first { $0.hasData }?.scope
     }
 
     private func setRailFocus(_ item: RailItem) {
@@ -392,49 +433,27 @@ struct JoePhimHome: View {
         }
     }
 
-    /// Header boundary: UP escapes the section to the shell
-    /// pills, DOWN lands on the first rail's first card,
-    /// LEFT/RIGHT are explicit no-ops (the header button is the
-    /// only focusable element in its row, at the screen's top).
-    private func handleHeaderMove(_ dir: MoveCommandDirection) {
-        if dir == .up {
-            nav.requestFocus(.pills)
-        } else if dir == .down {
-            if let first = phimRails.first?.first {
-                setRailFocus(first)
-            } else if showPhimError {
-                // C-1 / F5.6: with no rails on screen, DOWN from
-                // the header lands on the error surface's Retry —
-                // the v1.8 trap consumed this press as a no-op and
-                // the button was unreachable by remote.
-                retryFocused = true
-            }
-            // else: defined no-op. Two states land here: still
-            // loading (nothing below yet), and G5
-            // (showPhimEmpty) — G5 has NO Retry by spec, so
-            // there is nothing below the header to route to;
-            // the press is consumed as an explicit no-op rather
-            // than falling through to the focus engine.
-        }
-        // .left / .right: explicit no-op (see above).
-    }
-
-    /// Retry boundary (installed only while Retry holds focus):
-    /// UP returns to the header button; every other direction is
-    /// an explicit no-op — the error surface is the only content.
-    private func handleRetryMove(_ dir: MoveCommandDirection) {
-        if dir == .up {
-            headerFocused = true
-        }
-    }
+    // CONVERGENCE (2026-11-15): the header and Retry boundary
+    // handlers (handleHeaderMove / handleRetryMove) are DELETED
+    // with their traps. Every outcome they produced is what
+    // geometric focus movement does on this layout unaided:
+    // header UP → the pills (the row directly above), header
+    // DOWN → the first rail's first card, or — in the C-1/F5.6
+    // error state — the Retry button, the only focusable
+    // element below the header; Retry UP → the header. The
+    // header's LEFT/RIGHT no-ops were the screen edge, which
+    // geometry also gives. What geometry does NOT reproduce is
+    // the first rail's exact arithmetic, kept below.
 
     /// First-rail boundary: UP to the header button, LEFT/RIGHT
     /// arithmetic neighbours inside the rail (no-op at its ends),
     /// DOWN to the same-index card (clamped) in the next rail;
     /// with a single rail, DOWN lands on the error surface's
     /// Retry when one is showing (Scope-3), else a no-op.
-    /// Deeper rails are not
-    /// trapped — the focus engine's geometry handles them.
+    /// Installed per-card on the first rail's cards only (the
+    /// handler is unconditional; it reads the CURRENT focus
+    /// index when a press arrives). Deeper rails carry no
+    /// handler — the focus engine's geometry handles them.
     private func handleFirstRailMove(_ dir: MoveCommandDirection) {
         guard let idx = firstRailFocusIndex,
               let first = phimRails.first else { return }
@@ -466,7 +485,7 @@ struct JoePhimHome: View {
         if !movieProgress.isEmpty {
             JoeTheme.Rail(title: "▶ Đang xem dở") {
                 ForEach(movieProgress) { entry in
-                    Button { nav.movie = MovieRoute(
+                    let card = Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year, preselectEp: entry.ep) } label: {
@@ -489,6 +508,10 @@ struct JoePhimHome: View {
                             Text("Xoá khỏi Đang xem dở")
                         }
                     }
+                    // This rail IS the first rail whenever it
+                    // renders, so its cards always carry the
+                    // first-rail move handler.
+                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
                 }
             }
         }
@@ -499,7 +522,7 @@ struct JoePhimHome: View {
         if !movieFavorites.isEmpty {
             JoeTheme.Rail(title: "♥ Yêu thích") {
                 ForEach(movieFavorites) { entry in
-                    Button { nav.movie = MovieRoute(
+                    let card = Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year) } label: {
@@ -520,6 +543,13 @@ struct JoePhimHome: View {
                             Text("Bỏ yêu thích")
                         }
                     }
+                    // First rail only when Continue Watching is
+                    // empty (it precedes this rail when present).
+                    if movieProgress.isEmpty {
+                        card.onMoveCommand { dir in handleFirstRailMove(dir) }
+                    } else {
+                        card
+                    }
                 }
             }
         }
@@ -531,7 +561,7 @@ struct JoePhimHome: View {
                            scope: String) -> some View {
         JoeTheme.Rail(title: title) {
             ForEach(movies) { movie in
-                Button { nav.movie = MovieRoute(
+                let card = Button { nav.movie = MovieRoute(
                     provider: movie.provider, slug: movie.slug,
                     name: movie.name, poster: movie.poster, year: movie.year) } label: {
                     JoeTheme.PosterCard(
@@ -544,24 +574,23 @@ struct JoePhimHome: View {
                 .buttonStyle(.plain)
                 .focusEffectDisabled(true)
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
+                // Only the FIRST catalogue rail's cards carry
+                // the first-rail move handler (see
+                // firstRailScope); the attachment follows the
+                // catalogue data, never the focus state.
+                if scope == firstRailScope {
+                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
+                } else {
+                    card
+                }
             }
         }
     }
 
 }
 
-/// Conditional move trap (hub contract): installed only while
-/// focus sits on a boundary element, so every direction it
-/// intercepts must have a defined outcome in the handler.
-private struct JoeMoveTrap: ViewModifier {
-    let enabled: Bool
-    let action: (MoveCommandDirection) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content.onMoveCommand(perform: action)
-        } else {
-            content
-        }
-    }
-}
+// CONVERGENCE RECORD (2026-11-15): this file's duplicated
+// JoeMoveTrap struct is DELETED — see the record at the end of
+// JoeTVApp.swift. The header/Retry/first-rail traps it powered
+// are replaced by geometric focus movement plus the per-card
+// always-installed first-rail handler above.

@@ -14,8 +14,7 @@ struct JoeSearchView: View {
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
 
-    /// The top row's three focusable elements, in visual order —
-    /// the conditional move trap routes among them explicitly.
+    /// The top row's three focusable elements, in visual order.
     private enum TopFocus: Hashable { case field, search, back }
     @FocusState private var topFocus: TopFocus?
 
@@ -75,9 +74,15 @@ struct JoeSearchView: View {
                 .focusEffectDisabled(true)
                 .focused($topFocus, equals: .back)
             }
-            .modifier(JoeSearchMoveTrap(enabled: topFocus != nil) { direction in
-                topMove(direction)
-            })
+            // CONVERGENCE (Team 7 D4, 2026-11-15): the
+            // JoeSearchMoveTrap that wrapped this row (enabled:
+            // topFocus != nil) is REMOVED — its flips rebuilt
+            // the row subtree under the focus engine. The row's
+            // routing is geometric now: LEFT/RIGHT walk the
+            // three elements in visual order (the engine skips
+            // the Tìm button while it is disabled — the skip
+            // the old arithmetic walk hand-coded), UP reaches
+            // the pills, DOWN reaches the first result / Retry.
             // §8: searching, failure and no-results are three
             // DIFFERENT surfaces. v1.8 merged the last two into
             // one line, so a dead network read as "no such film".
@@ -110,9 +115,11 @@ struct JoeSearchView: View {
                     .focusEffectDisabled(true)
                     .focused($retryFocused)
                     .scaleEffect(retryFocused ? 1.05 : 1.0)
-                    .modifier(JoeSearchMoveTrap(enabled: retryFocused) { direction in
-                        if direction == .up { topFocus = .field }
-                    })
+                    // (Its UP-to-field routing is geometric:
+                    // the field is the nearest focusable above.
+                    // The conditional trap that used to force
+                    // it is removed — see the note at the top
+                    // row.)
                 }
             } else if searched && results.isEmpty {
                 Text("Không tìm thấy phim nào.")
@@ -152,54 +159,17 @@ struct JoeSearchView: View {
                 .padding(.horizontal, 4)
             }
         }
-        .onChange(of: nav.focusNonce) { _, _ in
-            // Hub entry (v1.5): pill DOWN while search is open
-            // lands focus on the query field.
-            if nav.focusTarget == .sectionTop {
-                topFocus = .field
-            }
-        }
-    }
-
-    /// The Tìm button's disabled condition, mirrored so LEFT/RIGHT
-    /// routing can skip it while it cannot take focus.
-    private var searchEnabled: Bool {
-        !searching && !query.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    /// Top-row routing: the trap is enabled ONLY while a top-row
-    /// element holds focus, and all four directions are defined —
-    /// UP escapes to the shell pills through the hub (this closes
-    /// the v1.4 "LEFT from search cannot reach Cài đặt" class of
-    /// failure by construction), LEFT/RIGHT walk field ↔ Tìm ↔
-    /// Quay lại in visual order (skipping Tìm while disabled,
-    /// no-op at the ends), DOWN drops to the first result when
-    /// results exist, else no-op.
-    private func topMove(_ direction: MoveCommandDirection) {
-        switch direction {
-        case .up:
-            nav.requestFocus(.pills)
-        case .down:
-            if let first = results.first {
-                focusedMovie = "search|" + first.id
-            } else if searchFailed {
-                retryFocused = true
-            }
-        case .left:
-            switch topFocus {
-            case .search: topFocus = .field
-            case .back: topFocus = searchEnabled ? .search : .field
-            default: break
-            }
-        case .right:
-            switch topFocus {
-            case .field: topFocus = searchEnabled ? .search : .back
-            case .search: topFocus = .back
-            default: break
-            }
-        @unknown default:
-            break
-        }
+        // Menu closes the search layer (convergence, Team 7):
+        // the handler is unconditional and lives on the layer
+        // itself, so it exists exactly while the layer does —
+        // and while a movie detail is open above the search,
+        // the detail's own handler is the nearer ancestor and
+        // wins, preserving exactly-one-layer-per-press.
+        .onExitCommand { nav.searchOpen = false }
+        // CONVERGENCE (spec item 3): the focus-hub consumer
+        // (onChange of nav.focusNonce → topFocus = .field) is
+        // REMOVED — DOWN from the pills lands on the query
+        // field geometrically.
     }
 
     /// Result-grid routing: the handler sits on each result, so
@@ -207,7 +177,10 @@ struct JoeSearchView: View {
     /// arithmetic over the fixed 6-column grid — UP from a
     /// first-row result returns focus to the query field,
     /// LEFT/RIGHT stop at row edges, DOWN past the last row is a
-    /// defined no-op.
+    /// defined no-op. (KEPT under convergence spec item 3: this
+    /// is a per-element handler inside the search layer; its
+    /// @FocusState writes are plain focus moves between stable
+    /// elements — no view's structure depends on them any more.)
     private func resultMove(_ direction: MoveCommandDirection, from movie: Movie) {
         guard let idx = results.firstIndex(where: { $0.id == movie.id }) else { return }
         let columns = 6
@@ -258,19 +231,9 @@ struct JoeSearchView: View {
 /// focus stroke on every focusable element in this file.
 private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
-/// Local copy of the shell's conditional move-trap pattern (the
-/// shell's JoeMoveTrap is file-private to JoeTVApp.swift): the
-/// move handler exists ONLY while `enabled`, and while enabled
-/// its handler gives all four directions a defined outcome.
-private struct JoeSearchMoveTrap: ViewModifier {
-    let enabled: Bool
-    let action: (MoveCommandDirection) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content.onMoveCommand(perform: action)
-        } else {
-            content
-        }
-    }
-}
+// CONVERGENCE RECORD (2026-11-15): JoeSearchMoveTrap — this
+// file's copy of the conditional move-trap pattern — is
+// DELETED; see the record at the end of JoeTVApp.swift. The
+// top-row and Retry traps it powered are replaced by geometric
+// focus movement; the per-result grid handler (resultMove)
+// stays, as it was always per-element and unconditional.

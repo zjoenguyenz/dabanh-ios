@@ -91,18 +91,19 @@ struct JoeSettingsView: View {
                     .frame(maxWidth: 1200, alignment: .leading)
 
                 diagnosticsBlock
+
+                signpostBlock
             }
         }
-        .modifier(JoeSettingsMoveTrap(enabled: focusedField == "addon") { direction in
-            firstFieldMove(direction)
-        })
-        .onChange(of: nav.focusNonce) { _, _ in
-            // Hub entry (v1.5): pill DOWN lands focus on the first
-            // field (the Torrentio link, id "addon").
-            if nav.focusTarget == .sectionTop {
-                focusedField = "addon"
-            }
-        }
+        // CONVERGENCE (Team 7 D4 + spec item 3, 2026-11-15):
+        // the JoeSettingsMoveTrap (enabled: focusedField ==
+        // "addon") and the focus-hub consumer that used to sit
+        // here are REMOVED. The trap's flips rebuilt the whole
+        // settings ScrollView; its routing — UP from the first
+        // field to the pills, DOWN to the second field — is
+        // what geometric focus movement does on this
+        // single-column layout unaided, and pill DOWN lands on
+        // the first field geometrically.
         .onDisappear { save(silent: true) }
         .onChange(of: addonURL) { save() }
         .onChange(of: rdToken) { save() }
@@ -216,23 +217,35 @@ struct JoeSettingsView: View {
         }
     }
 
-    /// First-field routing: the trap is enabled ONLY while the
-    /// first field (id "addon") holds focus, and all four
-    /// directions are defined — UP escapes to the shell pills
-    /// through the focus hub, DOWN steps to the second field
-    /// (id "rd"), LEFT/RIGHT are explicit no-ops (the fields are
-    /// full-width rows; there is nothing beside them). Other
-    /// fields keep the focus engine's default vertical movement.
-    private func firstFieldMove(_ direction: MoveCommandDirection) {
-        switch direction {
-        case .up:
-            nav.requestFocus(.pills)
-        case .down:
-            focusedField = "rd"
-        case .left, .right:
-            break
-        @unknown default:
-            break
+    /// Phim load signposts (convergence spec 5d): the tail of
+    /// the persisted LoadSignpost log, read-only. After any
+    /// future stall the owner force-closes, relaunches, opens
+    /// Settings and photographs this block — the last entries
+    /// say where the load path stopped. No buttons, no writes.
+    @ViewBuilder
+    private var signpostBlock: some View {
+        let entries = LoadSignpost.entries()
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Nhật ký tải phim (chẩn đoán)")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(.white)
+            if entries.isEmpty {
+                Text("Chưa có dữ liệu — mở trang Phim một lần rồi quay lại.")
+                    .font(.system(size: 25))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: 1200, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(entries.suffix(15).enumerated()), id: \.offset) { _, entry in
+                        Text(entry)
+                            .font(.system(size: 20, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: 1400, alignment: .leading)
+                    }
+                }
+            }
         }
     }
 
@@ -257,19 +270,7 @@ struct JoeSettingsView: View {
 /// focus stroke; replaces the fields' old white focused stroke.
 private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
-/// Local copy of the shell's conditional move-trap pattern (the
-/// shell's JoeMoveTrap is file-private to JoeTVApp.swift): the
-/// move handler exists ONLY while `enabled`, and while enabled
-/// its handler gives all four directions a defined outcome.
-private struct JoeSettingsMoveTrap: ViewModifier {
-    let enabled: Bool
-    let action: (MoveCommandDirection) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content.onMoveCommand(perform: action)
-        } else {
-            content
-        }
-    }
-}
+// CONVERGENCE RECORD (2026-11-15): JoeSettingsMoveTrap — this
+// file's copy of the conditional move-trap pattern — is
+// DELETED; see the record at the end of JoeTVApp.swift. The
+// first-field routing it powered is geometric on this layout.

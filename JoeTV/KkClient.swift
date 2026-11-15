@@ -76,58 +76,67 @@ enum KkClient {
                                            stage: SourceHealth.Stage,
                                            cap: TimeInterval)? = nil)
         async throws -> [String: Any] {
-        let outcome: (root: [String: Any]?, error: Error?) = await withTaskGroup(
-            of: (Int, [String: Any]?, Error?).self
-        ) { group in
-            for h in hosts.indices {
-                group.addTask {
-                    let url = hosts[h] + path(h != 0)
-                    do {
-                        if let health {
-                            // Predictor-wired leg (detail):
-                            // each host races under its OWN
-                            // SourceHealth fuse and records its
-                            // own sample. The shape check sits
-                            // inside the measured closure, so a
-                            // fast-but-invalid stub answer
-                            // records as an instant-fail, never
-                            // as a healthy call. A cancelled
-                            // race loser records nothing.
-                            let root = try await SourceHealth.run(
-                                provider: health.provider, stage: health.stage,
-                                url: url, cap: health.cap
-                            ) { budget in
-                                let r = try await JoeHTTP.getJSON(url, timeout: budget)
-                                guard shape(r) else {
-                                    throw URLError(.badServerResponse)
-                                }
-                                return r
+        // CONVERGENCE (Team 6 census A4, 2026-11-15): the race
+        // no longer consumes a task group. The old `for await`
+        // join awaited EVERY child to actually finish — after
+        // cancelAll() a loser whose request ignored cancellation
+        // could hold the whole call hostage. Now each host runs
+        // in an unstructured task publishing into a lock-guarded
+        // box (the findAlternatives pattern): the moment a
+        // winner lands, the caller returns it and cancels the
+        // losers WITHOUT awaiting them.
+        let box = KkRaceBox()
+        let tasks = hosts.indices.map { h in
+            Task {
+                let url = hosts[h] + path(h != 0)
+                do {
+                    if let health {
+                        // Predictor-wired leg (detail):
+                        // each host races under its OWN
+                        // SourceHealth fuse and records its
+                        // own sample. The shape check sits
+                        // inside the measured closure, so a
+                        // fast-but-invalid stub answer
+                        // records as an instant-fail, never
+                        // as a healthy call. A cancelled
+                        // race loser records nothing.
+                        let root = try await SourceHealth.run(
+                            provider: health.provider, stage: health.stage,
+                            url: url, cap: health.cap
+                        ) { budget in
+                            let r = try await JoeHTTP.getJSON(url, timeout: budget)
+                            guard shape(r) else {
+                                throw URLError(.badServerResponse)
                             }
-                            return (h, root, nil)
+                            return r
                         }
+                        box.report(host: h, root: root, error: nil)
+                    } else {
                         let root = try await JoeHTTP.getJSON(url, timeout: timeout)
-                        return shape(root)
-                            ? (h, root, nil)
-                            : (h, nil, URLError(.badServerResponse))
-                    } catch {
-                        return (h, nil, error)
+                        if shape(root) {
+                            box.report(host: h, root: root, error: nil)
+                        } else {
+                            box.report(host: h, root: nil,
+                                       error: URLError(.badServerResponse))
+                        }
                     }
+                } catch {
+                    box.report(host: h, root: nil, error: error)
                 }
             }
-            var winner: [String: Any]? = nil
-            var lastError: Error = URLError(.cannotConnectToHost)
-            for await (h, root, error) in group {
-                if let error { lastError = error }
-                if let root, winner == nil {
-                    winner = root
-                    setActiveHost(h)
-                    group.cancelAll()
-                }
-            }
-            return (winner, lastError)
         }
-        if let root = outcome.root { return root }
-        throw outcome.error ?? URLError(.cannotConnectToHost)
+        defer { tasks.forEach { $0.cancel() } }
+        while true {
+            if let winner = box.winner {
+                setActiveHost(winner.host)
+                return winner.root
+            }
+            if box.settledCount >= hosts.count {
+                throw box.lastError ?? URLError(.cannotConnectToHost)
+            }
+            if Task.isCancelled { throw CancellationError() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     private static func itemsArray(_ root: [String: Any]) -> [[String: Any]]? {
@@ -317,5 +326,47 @@ enum KkClient {
         if base.hasSuffix("/") && url.hasPrefix("/") { return base + String(url.dropFirst()) }
         if !base.hasSuffix("/") && !url.hasPrefix("/") { return base + "/" + url }
         return base + url
+    }
+}
+
+/// Lock-guarded outcome box for the KK host race (the
+/// findAlternatives pattern): each host task reports its
+/// result here; the caller polls the box and returns the
+/// FIRST shape-valid answer the moment it lands — cancelled
+/// losers are never awaited. A failed host also settles, so
+/// an all-fail race ends as soon as the last host reports.
+private final class KkRaceBox {
+    private let lock = NSLock()
+    private var winnerValue: (host: Int, root: [String: Any])?
+    private var errorValue: Error?
+    private var settledValue = 0
+
+    func report(host: Int, root: [String: Any]?, error: Error?) {
+        lock.lock()
+        settledValue += 1
+        if let root {
+            if winnerValue == nil { winnerValue = (host, root) }
+        } else if let error {
+            errorValue = error
+        }
+        lock.unlock()
+    }
+
+    var winner: (host: Int, root: [String: Any])? {
+        lock.lock()
+        defer { lock.unlock() }
+        return winnerValue
+    }
+
+    var lastError: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return errorValue
+    }
+
+    var settledCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return settledValue
     }
 }
