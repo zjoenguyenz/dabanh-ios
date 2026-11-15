@@ -22,6 +22,13 @@ struct ContentView: View {
         store.channels.filter { LeagueClassifier.isLive($0) }
     }
 
+    /// The English-commentary block (24/7 channels, no kickoffs), in
+    /// the store's sorted order — shown only under its own chip,
+    /// never inside the fixture tabs.
+    private var enChannels: [Channel] {
+        store.channels.filter { LeagueClassifier.isEN($0) }
+    }
+
     /// Featured rail entries: live fixtures across every list (the
     /// store's live view already merges the leagues and the Hot
     /// group), one entry per fixture.
@@ -189,6 +196,9 @@ struct ContentView: View {
                     liveChip
                 }
                 hotChip
+                if !enChannels.isEmpty {
+                    enChip
+                }
                 ForEach(League.allCases) { league in
                     let selected = store.selectedLeague == league.rawValue
                     Button {
@@ -231,6 +241,27 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    /// The BLV Anh chip: the mirror's English-commentary block
+    /// ("EN · BLV Anh" group) — 24/7 channels kept as a fallback
+    /// pool for when the Vietnamese sources are slow or dead.
+    /// Hidden when the current list carries no EN channels.
+    private var enChip: some View {
+        let selected = store.selectedLeague == LeagueClassifier.enTabValue
+        return Button {
+            store.selectedLeague = LeagueClassifier.enTabValue
+        } label: {
+            Text("BLV Anh")
+                .font(.subheadline.weight(selected ? .bold : .regular))
+                .foregroundStyle(selected ? .white : .white.opacity(0.7))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(selected ? accentGreen : Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     /// The 🔥 Hot chip: matches the source sites themselves flag hot,
     /// fed by the backup mirror's "🔥 Hot" group (see PlaylistStore).
     private var hotChip: some View {
@@ -259,6 +290,9 @@ struct ContentView: View {
         if store.selectedLeague == PlaylistStore.hotTabValue {
             return AnyView(hotList)
         }
+        if store.selectedLeague == LeagueClassifier.enTabValue {
+            return AnyView(enList)
+        }
         return AnyView(leagueBucketList)
     }
 
@@ -274,8 +308,47 @@ struct ContentView: View {
 
     private var leagueBucketList: some View {
         let league = League(rawValue: store.selectedLeague) ?? .england
-        return bucketList(channels: store.channels(in: league),
+        // The EN block lives under its own chip only — keep its
+        // channels out of the league lists (they are all rank 9, so
+        // without this they pile into the Khác tab as pseudo-fixtures).
+        return bucketList(channels: store.channels(in: league).filter { !LeagueClassifier.isEN($0) },
                           emptyText: "Chưa có kênh nào trong mục này.")
+    }
+
+    /// The BLV Anh tab: the English-commentary channels as a plain
+    /// channel list — one row per channel, no fixture grouping, no
+    /// kickoff stamps (they are 24/7 channels). Tapping a row hands
+    /// the channel to the same player as every other tab.
+    private var enList: some View {
+        List {
+            if enChannels.isEmpty {
+                Text("Chưa có kênh tiếng Anh nào trong danh sách.")
+                    .foregroundStyle(.white.opacity(0.6))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+            if !enChannels.isEmpty {
+                Section {
+                    ForEach(enChannels) { channel in
+                        Button {
+                            selectedChannel = channel
+                        } label: {
+                            ENChannelRow(channel: channel)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                    }
+                } header: {
+                    sectionHeader("Kênh tiếng Anh", live: false)
+                }
+            }
+            footerRow
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .refreshable { await store.refresh() }
     }
 
     private func bucketList(channels: [Channel], emptyText: String) -> some View {
@@ -351,7 +424,7 @@ struct ContentView: View {
     }
 
     private var footerRow: some View {
-        Text("Đá Banh v1.11 • \(store.channels.count) trận")
+        Text("Đá Banh v1.12 • \(store.channels.count) trận")
             .font(.caption)
             .foregroundStyle(.white.opacity(0.35))
             .frame(maxWidth: .infinity, alignment: .center)

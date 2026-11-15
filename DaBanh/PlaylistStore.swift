@@ -297,6 +297,11 @@ final class PlaylistStore: ObservableObject {
     /// (the tvOS UI builds the same ladder; the store owns it so the
     /// iOS player gets it too).
     func sources(for ch: Channel) -> [Channel] {
+        // EN backup channels are standalone 24/7 channels, not fixtures:
+        // their ladder is the tapped channel alone. (fixtureKey drops
+        // trailing numerals, which would otherwise pair ESPN with
+        // ESPN 2 and FOX Sports with Fox Sports 1 as "fallbacks".)
+        if LeagueClassifier.isEN(ch) { return [ch] }
         let key = MatchTitle.fixtureKey(ch.title)
         if key.isEmpty { return [ch] }
         var seen = Set<String>()

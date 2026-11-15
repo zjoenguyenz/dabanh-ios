@@ -82,4 +82,28 @@ enum LeagueClassifier {
     static func isLive(_ channel: Channel, now: Date = Date()) -> Bool {
         bucket(of: channel, now: now) == 0
     }
+
+    // MARK: - English-commentary block
+
+    /// group-title of the English-commentary block the mirror appends
+    /// after the Vietnamese list (scrape_en.py, 2026-11-14): 24/7
+    /// channels with English commentary, kept as a fallback pool
+    /// beside the fixture tabs. Identified by GROUP, not by title —
+    /// the league rules above stay title-only, exactly as on Android.
+    static let enGroupName = "EN · BLV Anh"
+
+    /// selectedLeague value meaning "the BLV Anh tab" (league
+    /// rawValues are 1, 2, 3, 4 and 9; PlaylistStore uses 0 for the
+    /// Hot tab and -1 for Trực tiếp, so -2 is free).
+    static let enTabValue = -2
+
+    /// True for a channel from the English-commentary block. These
+    /// channels carry no kickoff, so the bucket sort parks them in
+    /// bucket 3 and their titles match no league keyword (rank 9) —
+    /// without this carve-out they surface inside the Khác league
+    /// list as pseudo-fixtures. The UI keeps them under their own
+    /// chip instead and filters them out of every league list.
+    static func isEN(_ channel: Channel) -> Bool {
+        channel.group == enGroupName
+    }
 }

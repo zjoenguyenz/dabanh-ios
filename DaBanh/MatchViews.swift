@@ -353,6 +353,57 @@ struct LogoTile: View {
     }
 }
 
+/// One row of the BLV Anh tab: a 24/7 English-commentary channel —
+/// logo tile, channel name, an always-on LIVE badge and the play
+/// affordance, in the same card chrome as MatchCard. No time block
+/// and no fixture face-off: these channels have no kickoff to show
+/// and are not fixtures, so the row never pretends otherwise.
+struct ENChannelRow: View {
+    let channel: Channel
+
+    /// Channel name without the block's "EN · " title prefix — the
+    /// tab itself already says whose channels these are.
+    var displayName: String {
+        channel.title.hasPrefix("EN · ")
+            ? String(channel.title.dropFirst(5))
+            : channel.title
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            LogoTile(channel: channel, size: 44, corner: 10)
+            Text(displayName)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+            HStack(spacing: 5) {
+                Circle().fill(Color.white).frame(width: 6, height: 6)
+                Text("LIVE")
+                    .font(.caption2.bold())
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.red, in: Capsule())
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 24))
+                .foregroundStyle(accentGreen)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
 /// One team crest with a shield placeholder while loading / missing.
 struct CrestImg: View {
     let url: URL?
