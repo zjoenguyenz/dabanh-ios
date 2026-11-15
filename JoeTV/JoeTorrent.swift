@@ -126,11 +126,18 @@ struct JoeTorrentHome: View {
             torAttempted = true
             store.loadIfNeeded()
         }
-        // CONVERGENCE (spec item 3): the focus-hub consumer
-        // (onChange of nav.focusNonce → searchFocus = .field)
-        // is REMOVED — no programmatic focus writes on the
-        // launch path; DOWN from the pills lands on the search
-        // field geometrically.
+        // 1.9.2 (Team 9 items 4 + 8): Menu in this SECTION
+        // returns to the Phim section — the app's main menu —
+        // instead of exiting the app (the owner's Android
+        // model: Back walks inside the app; exit only from the
+        // Phim root, which carries no handler). Unconditional,
+        // on this section's own root. And the search field is
+        // the section's declared initial focus — the same
+        // static .defaultFocus construction as JoeSearchView's
+        // (the convergence round's geometric assumption left
+        // the torrent search row with no declared landing).
+        .onExitCommand { nav.section = .phim }
+        .defaultFocus($searchFocus, .field)
     }
 
     private var header: some View {
@@ -175,7 +182,7 @@ struct JoeTorrentHome: View {
                     .overlay(JoeFocusRing(shape: Capsule()))
                     .scaleEffect(searchFocus == .search ? 1.05 : 1.0)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.card)
             .focusEffectDisabled(true)
             .focused($searchFocus, equals: .search)
             .disabled(searching)
@@ -195,7 +202,7 @@ struct JoeTorrentHome: View {
                         .overlay(JoeFocusRing(shape: Capsule()))
                         .scaleEffect(searchFocus == .clear ? 1.05 : 1.0)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($searchFocus, equals: .clear)
             }
@@ -227,7 +234,7 @@ struct JoeTorrentHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == "cw|" + entry.key)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.card)
                     .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
@@ -268,7 +275,7 @@ struct JoeTorrentHome: View {
                             meta: entry.year,
                             focused: focusedEntry == "fav|" + entry.key)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.card)
                     .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
@@ -395,9 +402,11 @@ struct JoeTorrentHome: View {
             Text("Không tải được danh mục torrent.")
                 .font(.system(size: 29, weight: .semibold))
                 .foregroundStyle(.white)
-            Text(store.loadTimedOut
-                 ? "Quá 20 giây chưa có dữ liệu. Kiểm tra mạng và profile Sing-box trên Apple TV."
-                 : "Các danh mục đều lỗi hoặc trả về trống. Kiểm tra mạng rồi thử lại.")
+            // 1.9.2 (Team 9 item 6): the copy names the likely
+            // cause — the torrent route itself, and the tunnel
+            // profile's known habit of blocking it — instead of
+            // a generic network shrug.
+            Text("Chưa tải được mục Torrent — đường tới Torrentio/Cinemeta đang không thông. Nếu profile hầm đang bật, đường này thường bị chặn; thử tắt hầm rồi bấm Thử lại.")
                 .font(.system(size: 25))
                 .foregroundStyle(.white.opacity(0.7))
             Button { store.reload() } label: {
@@ -409,7 +418,7 @@ struct JoeTorrentHome: View {
                     .background(Capsule().fill(JoeTheme.accentViolet))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.card)
             .focusEffectDisabled(true)
             .focused($torRetryFocused)
             .scaleEffect(torRetryFocused ? 1.05 : 1.0)
@@ -434,7 +443,7 @@ struct JoeTorrentHome: View {
                         .background(Capsule().fill(JoeTheme.accentViolet))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($searchRetryFocused)
                 .scaleEffect(searchRetryFocused ? 1.05 : 1.0)
@@ -543,7 +552,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == scope + "|" + meta.id)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($focusedMeta, equals: scope + "|" + meta.id)
                 // Only the FIRST catalogue rail's cards carry
@@ -573,7 +582,7 @@ struct JoeTorrentHome: View {
                         meta: meta.year,
                         focused: focusedMeta == "torSearch|" + meta.id)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($focusedMeta, equals: "torSearch|" + meta.id)
                 .onMoveCommand { direction in
@@ -655,6 +664,7 @@ struct JoeTorrentHome: View {
 struct JoeTorrentDetail: View {
     let route: TorRoute
     @EnvironmentObject private var watch: WatchStore
+    @EnvironmentObject private var nav: JoeNavigator
     @State private var videos: [TorVideo] = []
     @State private var selectedVideo: TorVideo?
     @State private var streams: [TorStream] = []
@@ -687,6 +697,12 @@ struct JoeTorrentDetail: View {
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director)
         }
+        // 1.9.2 (Team 9 items 4 + 9): Menu closes THIS detail
+        // from its OWN root (the wrapper-handler lesson, same
+        // as JoeMovieDetail), and the favourite button is the
+        // declared initial focus — see favButton.
+        .onExitCommand { nav.tor = nil }
+        .defaultFocus($focusedRow, "fav")
     }
 
     // MARK: - Hero
@@ -775,8 +791,19 @@ struct JoeTorrentDetail: View {
                 .background(Capsule().fill(Color.white.opacity(0.07)))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
+        // 1.9.2 (Team 9 item 9): the button joins the detail's
+        // FocusState and is its declared default focus. It was
+        // the ONLY unbound focusable on this screen: for an
+        // UNCONFIGURED title (no stream rows, no episodes) it
+        // was also the only focusable element at all, so focus
+        // never landed and the owner could not favourite such
+        // a title — the toggle itself was never gated on
+        // configuration. On configured titles the initial
+        // landing is now this button (topmost action; one DOWN
+        // reaches the stream rows) — accepted by the leader.
+        .focused($focusedRow, equals: "fav")
     }
 
     // MARK: - Episodes (series)
@@ -811,7 +838,7 @@ struct JoeTorrentDetail: View {
                 .background(Capsule().fill(JoeTheme.accentViolet))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedRow, equals: focusKey)
         .scaleEffect(focusedRow == focusKey ? 1.05 : 1.0)
@@ -845,7 +872,7 @@ struct JoeTorrentDetail: View {
                                           : Color.white.opacity(0.08)))
                                 .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.card)
                         .focusEffectDisabled(true)
                         .focused($focusedRow, equals: "ep|" + video.id)
                         .scaleEffect(rowFocused ? 1.05 : 1.0)
@@ -934,7 +961,7 @@ struct JoeTorrentDetail: View {
             .overlay(RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(focused ? JoeTheme.focusViolet : Color.clear, lineWidth: 4))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
         .scaleEffect(focused ? 1.02 : 1.0)

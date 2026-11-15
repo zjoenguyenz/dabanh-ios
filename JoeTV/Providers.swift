@@ -205,13 +205,24 @@ enum Providers {
     /// True when candidate c is plausibly the same film as the
     /// target: a normalized title match on name or origin name
     /// (either direction), and years equal or either side empty.
+    ///
+    /// 1.9.2 (Team 9 item 2, leader-ruled): a ±1 year difference
+    /// ALSO counts as a match — cross-provider year variants
+    /// (a part/year mismatch between catalogues) used to kill
+    /// the failover hop before it started. The tolerance is
+    /// gated on the title matching EXACTLY (normalized equality
+    /// in one of the four pairings above): no title match, no
+    /// tolerance.
     static func sameFilm(_ c: Movie, name: String, origin: String, year: String) -> Bool {
-        let cy = yearOf(c), ty = yearOf(year)
-        if !cy.isEmpty && !ty.isEmpty && cy != ty { return false }
         let nn = normalizeTitle(name), no = normalizeTitle(origin)
         let cn = normalizeTitle(c.name), co = normalizeTitle(c.originName)
-        if !nn.isEmpty && (nn == cn || (!co.isEmpty && nn == co)) { return true }
-        if !no.isEmpty && (no == cn || (!co.isEmpty && no == co)) { return true }
+        let titleExact =
+            (!nn.isEmpty && (nn == cn || (!co.isEmpty && nn == co)))
+            || (!no.isEmpty && (no == cn || (!co.isEmpty && no == co)))
+        guard titleExact else { return false }
+        let cy = yearOf(c), ty = yearOf(year)
+        if cy.isEmpty || ty.isEmpty || cy == ty { return true }
+        if let a = Int(cy), let b = Int(ty), abs(a - b) == 1 { return true }
         return false
     }
 
@@ -335,7 +346,21 @@ enum Providers {
                 }
             }
         }
-        guard let target = byName ?? byNum else { return lad }
+        // 1.9.2 (Team 9 item 2): single-episode fallback.
+        // Cross-provider, name AND number can both miss while
+        // the film is identical — KK's "Full" carries episode
+        // number -1, VS's canonical single is "Tập 1" — and the
+        // hop ladder came back empty for a carried film. When
+        // the target detail holds exactly ONE playable episode
+        // in total there is nothing to confuse it with: it IS
+        // the episode.
+        var target = byName ?? byNum
+        if target == nil {
+            let playable = d.servers.flatMap { $0.episodes }
+                .filter { isPlayable(code: code, episode: $0) }
+            if playable.count == 1 { target = playable[0] }
+        }
+        guard let target else { return lad }
         lad.matchedEpName = target.name
         for s in orderServers(code: code, servers: d.servers) {
             var pick: Episode?

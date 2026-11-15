@@ -122,8 +122,12 @@ final class PhimStore: ObservableObject {
     ///      never needs this actor to be free, and the
     ///      attempted/landed signposts attribute any delay,
     ///   3. the refresh is STAGED: the four "newest" jobs run
-    ///      first; the remaining twenty start only after that
-    ///      phase completes,
+    ///      first; the remaining twenty start on phase 1's
+    ///      FIRST publish or after a 3 s fuse, whichever comes
+    ///      first (1.9.2, Team 9 item 2 — pre-fix phase 2 waited
+    ///      for phase 1 to drain completely, so one black-holing
+    ///      KK list call held all twenty jobs hostage behind its
+    ///      full timeout),
     ///   4. fetch + cache-write + parse run in a DETACHED
     ///      worker (non-isolated context); results cross back
     ///      through a lock-guarded box and only the @Published
@@ -178,16 +182,30 @@ final class PhimStore: ObservableObject {
         // 3) Staged refresh behind the cache, in the detached
         // worker: phase 1 is the four "newest" jobs (the jobs
         // list is priority-ordered, so they are its head);
-        // phase 2 — the remaining twenty — starts only after
-        // phase 1's group has fully drained.
+        // phase 2 — the remaining twenty — starts on phase 1's
+        // FIRST publish or after a 3 s fuse, whichever comes
+        // first (1.9.2, Team 9 item 2), then runs concurrently
+        // with whatever is left of phase 1 behind the same
+        // gate. The box is finished only when BOTH phases have
+        // drained.
         let gate = AsyncGate(permits: 4)
         let box = PhimLoadBox()
         let phase1 = Array(jobs.prefix(4))
         let phase2 = Array(jobs.dropFirst(4))
         let worker = Task.detached {
-            await Self.runPhase(phase1, gate: gate, deadline: deadline, box: box)
+            let phase1Task = Task {
+                await Self.runPhase(phase1, gate: gate, deadline: deadline, box: box)
+                box.markPhase1Done()
+            }
+            let fuseStart = Date()
+            while box.publishedCount == 0 && !box.phase1Done
+                    && Date().timeIntervalSince(fuseStart) < 3 {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
             LoadSignpost.log("phase2 started gen=\(generation)")
             await Self.runPhase(phase2, gate: gate, deadline: deadline, box: box)
+            if Task.isCancelled { phase1Task.cancel() }
+            await phase1Task.value
             box.finish()
         }
 
@@ -476,11 +494,34 @@ private final class PhimLoadBox: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [Result] = []
     private var finishedFlag = false
+    private var publishedTotal = 0
+    private var phase1DoneFlag = false
 
     func publish(_ result: Result) {
         lock.lock()
         pending.append(result)
+        publishedTotal += 1
         lock.unlock()
+    }
+
+    /// Total results published so far (drained or not) — the
+    /// phase-2 trigger reads it (1.9.2, Team 9 item 2).
+    var publishedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return publishedTotal
+    }
+
+    func markPhase1Done() {
+        lock.lock()
+        phase1DoneFlag = true
+        lock.unlock()
+    }
+
+    var phase1Done: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return phase1DoneFlag
     }
 
     func drain() -> [Result] {
@@ -608,7 +649,14 @@ final class TorHomeStore: ObservableObject {
         loadTimedOut = false
         loadGeneration += 1
         let generation = loadGeneration
-        defer { loading = false }
+        // Generation-guarded (1.9.2): the 15 s hard deadline
+        // below can clear `loading` while this load is still in
+        // flight, which makes a concurrent Retry load possible;
+        // a stale load's defer must not then clear the NEW
+        // load's flag when it finally returns.
+        defer {
+            if loadGeneration == generation { loading = false }
+        }
 
         // Deadline watchdog (board contract, BLOCK-1), started
         // before any work so the 20 s is measured from the
@@ -624,22 +672,53 @@ final class TorHomeStore: ObservableObject {
         }
         defer { watchdog.cancel() }
 
+        // Hard deadline (1.9.2, Team 9 item 6): at ~15 s the
+        // load STOPS presenting as in-flight — `loading` clears
+        // (so the error surface's Retry is live from that
+        // moment, instead of no-opping against a load that
+        // could grind on for ~100 s of sequential timeouts)
+        // and, when no rail has landed, the timeout surface
+        // shows. Fetches still in flight are NOT cancelled:
+        // late results still apply when they land, exactly as
+        // the catalogue loop below has always applied them.
+        let hardDeadline = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard let self, !Task.isCancelled else { return }
+            if self.loadGeneration == generation {
+                self.loading = false
+                if !self.hasAnyRail { self.loadTimedOut = true }
+            }
+        }
+        defer { hardDeadline.cancel() }
+
         let base = TorrentSettings.effectiveBase ?? TorrentSettings.cinemeta
         let cats = await TorrentClient.discoverCatalogs(addonBase: base)
         if !cats.isEmpty { catalogs = cats }
-        for cat in catalogs {
-            // Preserve-on-empty (C-5 class, matching the
-            // genre path below): an empty-but-successful
-            // fetch must not overwrite a rail a previous
-            // load already landed — only a non-empty result
-            // replaces the rail (and stamps the load).
-            if let metas = try? await TorrentClient.fetchCatalog(cat),
-               !metas.isEmpty {
-                rails[cat.id + "|" + cat.type] = metas
-                // A rail actually landed: stamp the load
-                // and clear any deadline state at once.
-                loadedAt = Date()
-                loadTimedOut = false
+        // Catalogue fetches run CONCURRENTLY and publish per
+        // landing (1.9.2, Team 9 item 6 — mirroring the genre
+        // path below and PhimStore's shape). The pre-fix
+        // SEQUENTIAL loop stacked the discovery timeouts end
+        // to end (≈100 s worst case on a dead route).
+        await withTaskGroup(of: (String, [TorMeta]?).self) { group in
+            for cat in catalogs {
+                group.addTask {
+                    (cat.id + "|" + cat.type,
+                     try? await TorrentClient.fetchCatalog(cat))
+                }
+            }
+            for await (key, metas) in group {
+                // Preserve-on-empty (C-5 class, matching the
+                // genre path below): an empty-but-successful
+                // fetch must not overwrite a rail a previous
+                // load already landed — only a non-empty result
+                // replaces the rail (and stamps the load).
+                if let metas, !metas.isEmpty {
+                    rails[key] = metas
+                    // A rail actually landed: stamp the load
+                    // and clear any deadline state at once.
+                    loadedAt = Date()
+                    loadTimedOut = false
+                }
             }
         }
         // Genre rails (C-5): fetched CONCURRENTLY and published

@@ -277,6 +277,13 @@ struct JoePlayerView: View {
                 // buttons, focus on the first button. (v1.8's
                 // slate was text-only — the only way out was
                 // Menu, which read as part of the freeze.)
+                // 1.9.2 (Team 9 item 1a): the text column is
+                // CAPPED (≈1150) and the padding sits INSIDE the
+                // flexible frame. Pre-fix the padding was applied
+                // OUTSIDE the .infinity frame with no width cap
+                // and no trailing inset, so the second line laid
+                // out as one long line and ran off the right edge
+                // of the owner's screen instead of wrapping.
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Không phát được nguồn này.")
                         .font(.system(size: 29, weight: .semibold))
@@ -294,9 +301,10 @@ struct JoePlayerView: View {
                     }
                     .padding(.top, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .frame(maxWidth: 1150, alignment: .leading)
                 .padding(.leading, 48)
                 .padding(.bottom, 36)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
         .onAppear { director.start() }
@@ -320,7 +328,7 @@ struct JoePlayerView: View {
                 .background(Capsule().fill(JoeTheme.accentViolet))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($slateFocus, equals: tag)
         .scaleEffect(slateFocus == tag ? 1.05 : 1.0)

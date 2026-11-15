@@ -9,6 +9,7 @@ import SwiftUI
 struct JoeMovieDetail: View {
     let route: MovieRoute
     @EnvironmentObject private var watch: WatchStore
+    @EnvironmentObject private var nav: JoeNavigator
     @State private var provider: String
     @State private var slug: String
     @State private var detail: Detail?
@@ -80,7 +81,7 @@ struct JoeMovieDetail: View {
                                 .background(Capsule().fill(JoeTheme.accentViolet))
                                 .overlay(JoeFocusRing(shape: Capsule()))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.card)
                         .focusEffectDisabled(true)
                         .focused($focusedRetry)
                         .scaleEffect(focusedRetry ? 1.05 : 1.0)
@@ -117,6 +118,14 @@ struct JoeMovieDetail: View {
             JoePlayerView(director: holder.director)
         }
         .defaultFocus($focusedPlay, true)
+        // Menu closes THIS detail (1.9.2, Team 9 item 4): the
+        // handler lives on the detail's OWN root — the
+        // placement the player's own-root handler device-proves.
+        // The 1.9.1 handler sat on the root ZStack's wrapper
+        // layer, outside this view, and Menu exited the app
+        // from here on device. Unconditional: it exists exactly
+        // while the detail does.
+        .onExitCommand { nav.movie = nil }
     }
 
     /// Instant header built from the tapped card's own data,
@@ -158,7 +167,11 @@ struct JoeMovieDetail: View {
     private func header(_ d: Detail) -> some View {
         HStack(alignment: .top, spacing: 40) {
             posterArt(d.movie)
-            VStack(alignment: .leading, spacing: 16) {
+            // 1.9.2 (Team 9 item 1b): gap 16 → 24 — defence in
+            // depth so a focused button's focus treatment can
+            // never visually touch the genre line above the
+            // button row (the owner's photo 2).
+            VStack(alignment: .leading, spacing: 24) {
                 Text(d.movie.name)
                     .font(.system(size: 64, weight: .heavy))
                     .foregroundStyle(.white)
@@ -379,7 +392,7 @@ struct JoeMovieDetail: View {
             .background(Capsule().fill(JoeTheme.accentViolet))
             .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedPlay)
         .scaleEffect(focusedPlay ? 1.05 : 1.0)
@@ -407,7 +420,7 @@ struct JoeMovieDetail: View {
                 .background(Capsule().fill(Color.white.opacity(0.07)))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
     }
 
@@ -437,7 +450,7 @@ struct JoeMovieDetail: View {
                                                    : JoeTheme.accentViolet.opacity(0.35)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($focusedAlt, equals: alt.code)
                 .scaleEffect(focusedAlt == alt.code ? 1.05 : 1.0)
@@ -494,7 +507,7 @@ struct JoeMovieDetail: View {
                                   : (preselected ? JoeTheme.accentViolet : Color.clear),
                                   lineWidth: focused ? 3 : 2))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedEp, equals: focusKey)
         .scaleEffect(focused ? 1.05 : 1.0)
@@ -603,28 +616,35 @@ struct JoeMovieDetail: View {
                 let alts = await Providers.findAlternatives(
                     fromCode: identity.entry.source, name: cur.movie.name,
                     origin: cur.movie.originName, year: cur.movie.year)
-                guard let alt = alts.first,
-                      let d = try? await Providers.detail(alt.code, slug: alt.slug)
-                else { return nil }
-                let epNum = Providers.episodeNumber(identity.entry.ep)
-                var newEp = identity.entry.ep
-                outer: for s in d.servers {
-                    for e in s.episodes where Providers.episodeNumber(e.name) == epNum {
-                        newEp = e.name
-                        break outer
+                // 1.9.2 (Team 9 item 2): iterate the alternatives
+                // in failover order (up to 3) instead of trying
+                // only alts.first — a first alternative whose
+                // detail fetch fails no longer ends the hop while
+                // a second carrier of the same film stands ready.
+                for alt in alts.prefix(3) {
+                    guard let d = try? await Providers.detail(alt.code, slug: alt.slug)
+                    else { continue }
+                    let epNum = Providers.episodeNumber(identity.entry.ep)
+                    var newEp = identity.entry.ep
+                    outer: for s in d.servers {
+                        for e in s.episodes where Providers.episodeNumber(e.name) == epNum {
+                            newEp = e.name
+                            break outer
+                        }
                     }
+                    var e2 = WatchStore.Entry()
+                    e2.kind = Providers.kindOf(alt.code)
+                    e2.key = Providers.progressKey(alt.code, slug: alt.slug, epName: newEp)
+                    e2.ep = newEp
+                    e2.epLabel = "Đang xem: \(newEp)"
+                    e2.title = d.movie.name
+                    e2.poster = d.movie.poster
+                    e2.year = d.movie.year
+                    e2.slug = alt.slug
+                    e2.source = alt.code
+                    return PlayIdentity(entry: e2)
                 }
-                var e2 = WatchStore.Entry()
-                e2.kind = Providers.kindOf(alt.code)
-                e2.key = Providers.progressKey(alt.code, slug: alt.slug, epName: newEp)
-                e2.ep = newEp
-                e2.epLabel = "Đang xem: \(newEp)"
-                e2.title = d.movie.name
-                e2.poster = d.movie.poster
-                e2.year = d.movie.year
-                e2.slug = alt.slug
-                e2.source = alt.code
-                return PlayIdentity(entry: e2)
+                return nil
             },
             fallbackCandidates: { identity in
                 await JoeMovieDetail.torrentFallbackCandidates(

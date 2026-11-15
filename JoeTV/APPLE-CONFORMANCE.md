@@ -473,7 +473,26 @@ recorded; artifact SHA-256 matches the run page digest.
   the owner's box by Đá Banh TV — with per-view
   `.focusEffectDisabled(true)` retained on the Button itself. The
   ban stands everywhere else in the target.
-- B-3 No root-state exit handler can consume a Menu press (S-5/R-4);
+  **AMENDMENT 2026-11-15 #2 (1.9.2, Team 4 re-gate — F9 DEVIATION,
+  leader-ruled, gate-accepted):** the waiver is EXTENDED to every
+  focusable control in the target. Spec F9 (DESIGN-SPEC-V19 §5)
+  prescribes converting an artifact-showing Button class to the F2
+  focusable-view pattern; the leader RULED AGAINST the literal F9
+  route on device evidence — in the shipped 1.9.1 the `.card` pills
+  rendered clean on the owner's box while every `.plain` control
+  blobbed (owner photos 1/2/4), and Đá Banh TV (owner-verified on
+  the same box) uses `.card` for every focusable control. 1.9.2
+  therefore converts ALL focusable controls to real Buttons with
+  `.buttonStyle(.card)` + per-view `.focusEffectDisabled(true)` +
+  the app-drawn F3 treatments; NO Button was converted to a
+  focusable view, and `.buttonStyle(.plain)` survives nowhere on a
+  focusable control (one comment mention only). The deviation from
+  F9's literal text is deliberate and recorded here; F9's operative
+  rule — no third attempt with modifiers alone on the `.plain`
+  construction — is honoured by changing the construction, not the
+  modifiers. The `.card` ban is retired in full.
+- B-3 No exit handler outside the G-EXIT inventory (below) exists,
+  and none can consume a Menu press at the Phim root (S-5/R-4);
   every `.onMoveCommand`/`.onExitCommand` in the target has an
   explicit route or release for every direction/state, including
   empty-data states (C-1, C-2, C-17 patterns re-grepped, not assumed).
@@ -487,17 +506,40 @@ evidence — §3).** These are hard gates, equal in rank to playback:
   path of the built source: cold launch ends with exactly one focused
   element and no continuing focus writes (no `@FocusState` cycles, no
   `onChange`/`focusNonce` loops that can re-fire without user input).
-- **G-EXIT-2 — Menu at root exits immediately.** In the root state
-  (Phim home; nothing presented), the code path for a Menu press
-  contains **no app consumer**: the press provably falls through to
-  the system. Static proof from source; the corresponding device
-  observation (one press → Home) is a DEVICE gate (P-E), not
-  desk-passable.
+- **G-EXIT-2 — Exit only at the Phim root (REDEFINED 2026-11-15,
+  1.9.2, by the owner's explicit order).** The pre-1.9.2 wording
+  ("Menu at root exits immediately", root = any top-level state) is
+  RETIRED. The owner's semantics, mirroring the Android app: Back
+  walks INSIDE the app, one level per press, and exits only from
+  the Phim root. The gate artefact is the handler INVENTORY, not an
+  ancestry argument (the ancestry argument failed on device twice:
+  v1.1 NavigationStack, 1.9.1 wrapper handlers). The target must
+  contain EXACTLY these 7 runtime `.onExitCommand` sites, each
+  unconditional and on the OWNING view's root:
+  (1) JoePlayerView — `{ dismiss() }`;
+  (2) JoeSearch — `{ nav.searchOpen = false }`;
+  (3) JoeMovieDetail — `{ nav.movie = nil }`;
+  (4) JoeTorrentDetail (in JoeTorrent.swift) — `{ nav.tor = nil }`;
+  (5) JoeTVSection — `{ nav.section = .phim }`;
+  (6) JoeTorrentHome (in JoeTorrent.swift) — `{ nav.section = .phim }`;
+  (7) JoeSettingsView — `{ nav.section = .phim }`.
+  NOTHING on JoePhimHome, the shell (JoeRootView), or the app root;
+  comment mentions do not count. Supporting structure the gate
+  verifies with it: `section` is `@Published` on JoeNavigator and
+  JoeRootView observes it; the detail layers are root-ZStack
+  SIBLINGS of the section container (never descendants of section
+  views), so exactly-one-consumer-per-press holds structurally; at
+  the Phim root no handler is in any possible focus ancestry, so
+  the press provably falls through to the system. The device
+  observation (Phim-root press → Home; section/detail presses walk
+  inward) is a DEVICE gate (P-E), not desk-passable.
 - **G-EXIT-3 — One press per level, everywhere.** For each presented
-  layer (detail, player, search, settings, torrent detail): Menu
-  pops exactly that layer; pressing Menu repeatedly walks to Home in
-  at most (layers + 1) presses, with no press swallowed in any layer
-  or in any failure state of that layer.
+  layer (player, search, movie detail, torrent detail) and each
+  non-Phim section (TV, Torrent, Settings): Menu performs exactly
+  that one inward step (close the layer / return to the Phim
+  section); pressing Menu repeatedly walks to the Phim root and
+  then out to Home, with no press swallowed in any layer, section,
+  or failure state of either.
 - **G-EXIT-4 — No main-thread blocking waits in the launch path.**
   Grep the built source for semaphore waits, `Thread.sleep`,
   synchronous `URLSession` usage, and `.wait(` on every path
@@ -531,7 +573,10 @@ execute on the owner's Apple TV. The following remain **UNVERIFIED
 until observed on the device**, and the leader's delivery report must
 carry them as such (the owner is the only device witness; his photo/
 report is the evidence): focus glow absent on pills and cards;
-background reads black; Menu-at-root exits in one press; each source
+background reads black; Menu at the Phim root exits in one press,
+and Menu inside the TV/Torrent/Settings sections and the two
+detail layers walks one level inward instead of exiting (G-EXIT-2,
+redefined); each source
 (KK, VS, F4K, TP, CacheVideo, Torrentio/RD) actually plays; subtitles
 render. **No desk evidence upgrades these to "proven."**
 

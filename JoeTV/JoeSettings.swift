@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Settings: ONLY the torrent/debrid credentials, exactly like
 /// the Android app — the owner's own Torrentio URL and/or his
@@ -23,8 +24,17 @@ struct JoeSettingsView: View {
     @State private var savedTick = false
     @State private var probeResults: [SourceProbe.Result] = []
     @State private var probing = false
+    /// Per-field empty-pasteboard hints (1.9.2, item 7).
+    @State private var pasteHints: [String: String] = [:]
+    /// KK route status for the tunnel-status row (item 5).
+    @State private var kkStatus: KKRouteStatus = .idle
     @FocusState private var focusedField: String?
     @FocusState private var probeFocused: Bool
+    @FocusState private var kkProbeFocused: Bool
+
+    private enum KKRouteStatus {
+        case idle, probing, ok(ms: Int), down
+    }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -41,15 +51,17 @@ struct JoeSettingsView: View {
                                          ? JoeTheme.okGreen : .orange)
                 }
 
+                tunnelStatusBlock
+
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox của anh. Để trống thì app tự dựng link từ token bên dưới.",
-                      text: $addonURL, id: "addon", secure: false)
+                      text: $addonURL, id: "addon", secure: false, allowsPaste: true)
                 field(title: "Token Real-Debrid",
                       hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
-                      text: $rdToken, id: "rd", secure: true)
+                      text: $rdToken, id: "rd", secure: true, allowsPaste: true)
                 field(title: "Token TorBox",
                       hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
-                      text: $torboxToken, id: "tb", secure: true)
+                      text: $torboxToken, id: "tb", secure: true, allowsPaste: true)
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
@@ -104,6 +116,13 @@ struct JoeSettingsView: View {
         // what geometric focus movement does on this
         // single-column layout unaided, and pill DOWN lands on
         // the first field geometrically.
+        // 1.9.2 (Team 9 item 4): Menu in this SECTION returns
+        // to the Phim section — the app's main menu — instead
+        // of exiting the app (the owner's Android model).
+        // Unconditional, on this section's own root.
+        .onExitCommand { nav.section = .phim }
+        // Item 5: the KK route probe runs when Settings opens.
+        .task { await runKKProbe() }
         .onDisappear { save(silent: true) }
         .onChange(of: addonURL) { save() }
         .onChange(of: rdToken) { save() }
@@ -113,37 +132,157 @@ struct JoeSettingsView: View {
     }
 
     private func field(title: String, hint: String,
-                       text: Binding<String>, id: String, secure: Bool) -> some View {
+                       text: Binding<String>, id: String, secure: Bool,
+                       allowsPaste: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 29, weight: .bold))
                 .foregroundStyle(.white)
-            Group {
-                if secure {
-                    SecureField("", text: text)
-                } else {
-                    TextField("", text: text)
+            HStack(alignment: .center, spacing: 16) {
+                Group {
+                    if secure {
+                        SecureField("", text: text)
+                    } else {
+                        TextField("", text: text)
+                    }
+                }
+                .textFieldStyle(.plain)
+                .font(.system(size: 29))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
+                .background(RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.white.opacity(0.07)))
+                .overlay(RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(focusedField == id ? joeFocusViolet : Color.clear,
+                                  lineWidth: 4))
+                .focused($focusedField, equals: id)
+                .focusEffectDisabled(true)
+                .onSubmit { save() }
+                if allowsPaste {
+                    pasteButton(text: text, id: id)
                 }
             }
-            .textFieldStyle(.plain)
-            .font(.system(size: 29))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(focusedField == id ? joeFocusViolet : Color.clear,
-                              lineWidth: 4))
-            .frame(maxWidth: 1250)
-            .focused($focusedField, equals: id)
-            .focusEffectDisabled(true)
-            .onSubmit { save() }
+            .frame(maxWidth: 1250, alignment: .leading)
             Text(hint)
                 .font(.system(size: 25))
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(maxWidth: 1250, alignment: .leading)
+            if let pasteHint = pasteHints[id] {
+                Text(pasteHint)
+                    .font(.system(size: 25))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: 1250, alignment: .leading)
+            }
         }
+    }
+
+    /// The paste path for a credential field (1.9.2, Team 9
+    /// item 7). The owner's flow: copy the code on his iPhone
+    /// (same Apple ID — Universal Clipboard carries it to the
+    /// Apple TV), then press "Dán" here; typing a long token
+    /// with the remote was the dead end that left torrent
+    /// unconfigured on this device. A non-empty pasteboard is
+    /// trimmed, assigned and saved through the fields'
+    /// existing auto-save (the onChange handlers on the view).
+    /// An empty pasteboard shows the hint under the field and
+    /// focuses the field itself, where the system input UI
+    /// offers the iPhone Remote keyboard — which carries its
+    /// own paste.
+    private func pasteButton(text: Binding<String>, id: String) -> some View {
+        Button {
+            let raw = UIPasteboard.general.string ?? ""
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                pasteHints[id] = "Chưa có gì trong bộ nhớ tạm — copy mã trên iPhone trước (cùng Apple ID, để gần Apple TV)"
+                focusedField = id
+            } else {
+                pasteHints[id] = nil
+                text.wrappedValue = trimmed
+            }
+        } label: {
+            Text("Dán")
+                .font(.system(size: 29, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 30)
+                .padding(.vertical, 16)
+                .background(Capsule().fill(JoeTheme.accentViolet))
+                .overlay(JoeFocusRing(shape: Capsule()))
+        }
+        .buttonStyle(.card)
+        .focusEffectDisabled(true)
+        .focused($focusedField, equals: "paste|" + id)
+        .scaleEffect(focusedField == "paste|" + id ? 1.05 : 1.0)
+    }
+
+    /// Tunnel status row (1.9.2, Team 9 item 5): READ-ONLY —
+    /// whether the Vietnam route is answering right now,
+    /// probed through KKPhim with a short fuse when Settings
+    /// opens and on demand. Display only: no switch, no
+    /// control (routing stays the Sing-box profile's job, per
+    /// this screen's standing rule). The copy labels the
+    /// verdict as what it is — an inference from KK answering,
+    /// not a read of the profile's actual state.
+    @ViewBuilder
+    private var tunnelStatusBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(kkStatusColor)
+                    .frame(width: 16, height: 16)
+                Text(kkStatusText)
+                    .font(.system(size: 29))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: 1250, alignment: .leading)
+            }
+            Button {
+                Task { await runKKProbe() }
+            } label: {
+                Text("Kiểm tra lại")
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 36)
+                    .padding(.vertical, 16)
+                    .background(Capsule().fill(JoeTheme.accentViolet))
+                    .overlay(JoeFocusRing(shape: Capsule()))
+            }
+            .buttonStyle(.card)
+            .focusEffectDisabled(true)
+            .focused($kkProbeFocused)
+            .scaleEffect(kkProbeFocused ? 1.05 : 1.0)
+            .disabled(kkProbing)
+        }
+    }
+
+    private var kkProbing: Bool {
+        if case .probing = kkStatus { return true }
+        return false
+    }
+
+    private var kkStatusColor: Color {
+        switch kkStatus {
+        case .ok: return JoeTheme.okGreen
+        case .down: return JoeTheme.accentRed
+        case .idle, .probing: return .white.opacity(0.4)
+        }
+    }
+
+    private var kkStatusText: String {
+        switch kkStatus {
+        case .ok(let ms):
+            return "Đường KKPhim: đang thông (~\(ms) ms) — đường Việt Nam đang tới được, hầm có vẻ đang bật"
+        case .down:
+            return "Đường KKPhim: không thông — kiểm tra profile hầm trên Apple TV"
+        case .idle, .probing:
+            return "Đang kiểm tra đường KKPhim…"
+        }
+    }
+
+    private func runKKProbe() async {
+        if kkProbing { return }
+        kkStatus = .probing
+        let r = await SourceProbe.probeKK()
+        kkStatus = r.ok ? .ok(ms: r.millis) : .down
     }
 
     /// Source diagnostics (§7.9, board contract): one lightweight
@@ -209,7 +348,7 @@ struct JoeSettingsView: View {
                     .background(Capsule().fill(JoeTheme.accentViolet))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.card)
             .focusEffectDisabled(true)
             .focused($probeFocused)
             .scaleEffect(probeFocused ? 1.05 : 1.0)

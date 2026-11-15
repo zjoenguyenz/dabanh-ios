@@ -195,7 +195,7 @@ struct JoePhimHome: View {
                 .overlay(JoeFocusRing(shape: Capsule()))
                 .scaleEffect(headerFocused ? 1.05 : 1.0)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.card)
             .focusEffectDisabled(true)
             .focused($headerFocused)
         }
@@ -298,7 +298,7 @@ struct JoePhimHome: View {
                     .background(Capsule().fill(JoeTheme.accentViolet))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.card)
             .focusEffectDisabled(true)
             .focused($retryFocused)
             .scaleEffect(retryFocused ? 1.05 : 1.0)
@@ -498,7 +498,7 @@ struct JoePhimHome: View {
                             subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
                             focused: focusedEntry == "cw|" + entry.key)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.card)
                     .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
@@ -533,7 +533,7 @@ struct JoePhimHome: View {
                             badge: Providers.badge(entry.source),
                             focused: focusedEntry == "fav|" + entry.key)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.card)
                     .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
@@ -571,7 +571,7 @@ struct JoePhimHome: View {
                         badge: badges ? Providers.badge(movie.provider) : nil,
                         focused: focusedMovie == scope + "|" + movie.id)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
                 // Only the FIRST catalogue rail's cards carry

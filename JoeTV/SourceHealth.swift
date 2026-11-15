@@ -63,6 +63,14 @@ import Foundation
 enum SourceHealth {
     enum Stage: String {
         case detail, resolve, playlist, segment
+        /// Catalogue (list/search) calls — added in 1.9.2
+        /// (Team 9 item 2): pre-fix, list calls had NO health
+        /// memory at all, so a dead provider's 17 launch jobs
+        /// re-burned their full 12 s caps on every load. The
+        /// list stage gives them the same fuse + latch
+        /// machinery as every other stage (cap 12 at the call
+        /// sites — the clients' existing listTimeout).
+        case list
     }
 
     enum Outcome {

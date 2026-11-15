@@ -26,9 +26,7 @@ enum VsClient {
     private static let resolveCap: TimeInterval = 8
 
     static func newestRaw(page: Int) async throws -> [String: Any] {
-        try await JoeHTTP.getJSON(
-            base + "/api/danh-sach/phim-moi-cap-nhat?page=\(page)",
-            timeout: listTimeout)
+        try await listJSON(base + "/api/danh-sach/phim-moi-cap-nhat?page=\(page)")
     }
 
     static func newest(page: Int) async throws -> [Movie] {
@@ -36,9 +34,7 @@ enum VsClient {
     }
 
     static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
-        try await JoeHTTP.getJSON(
-            base + "/api/danh-sach/\(type)?page=\(page)",
-            timeout: listTimeout)
+        try await listJSON(base + "/api/danh-sach/\(type)?page=\(page)")
     }
 
     static func listByType(_ type: String, page: Int) async throws -> [Movie] {
@@ -50,8 +46,22 @@ enum VsClient {
     }
 
     private static func listPath(_ path: String) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(base + path, timeout: listTimeout)
+        let root = try await listJSON(base + path)
         return parseList(root)
+    }
+
+    /// 1.9.2 (Team 9 item 2): every catalogue (list/search)
+    /// fetch rides SourceHealth's list stage — the dynamic
+    /// fuse tightens within the 12 s cap and the latch stops
+    /// a dead host's list calls from re-burning full caps on
+    /// every load. Pre-fix, list calls consulted no health
+    /// memory at all.
+    private static func listJSON(_ url: String) async throws -> [String: Any] {
+        try await SourceHealth.run(
+            provider: Providers.VS, stage: .list, url: url, cap: listTimeout
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
     }
 
     /// Parse a list response body — also used by

@@ -62,8 +62,7 @@ enum TpClient {
     private static let embedCap: TimeInterval = 8
 
     static func newestRaw(page: Int) async throws -> [String: Any] {
-        try await JoeHTTP.getJSON(
-            base + "/movies?page=\(page)&limit=24", timeout: listTimeout)
+        try await listJSON(base + "/movies?page=\(page)&limit=24")
     }
 
     static func newest(page: Int) async throws -> [Movie] {
@@ -72,8 +71,7 @@ enum TpClient {
 
     static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
         let t = type == "phim-bo" ? "series" : "single,movie"
-        return try await JoeHTTP.getJSON(
-            base + "/movies?page=\(page)&limit=24&type=\(t)", timeout: listTimeout)
+        return try await listJSON(base + "/movies?page=\(page)&limit=24&type=\(t)")
     }
 
     /// type: "phim-le" → single,movie; "phim-bo" → series.
@@ -82,10 +80,23 @@ enum TpClient {
     }
 
     static func search(_ keyword: String) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(
-            base + "/movies?search=\(JoeHTTP.qenc(keyword))&page=1&limit=30",
-            timeout: listTimeout)
+        let root = try await listJSON(
+            base + "/movies?search=\(JoeHTTP.qenc(keyword))&page=1&limit=30")
         return parseItems(root)
+    }
+
+    /// 1.9.2 (Team 9 item 2): every catalogue (list/search)
+    /// fetch rides SourceHealth's list stage — the dynamic
+    /// fuse tightens within the 12 s cap and the latch stops
+    /// a dead host's list calls from re-burning full caps on
+    /// every load. Pre-fix, list calls consulted no health
+    /// memory at all.
+    private static func listJSON(_ url: String) async throws -> [String: Any] {
+        try await SourceHealth.run(
+            provider: Providers.TP, stage: .list, url: url, cap: listTimeout
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
     }
 
     /// Internal (not private) so Providers.parseList can re-parse

@@ -65,6 +65,13 @@ struct JoeTVSection: View {
         // screen padding since v1.4, so focus geometry is one
         // single VStack hierarchy from the pills down.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // 1.9.2 (Team 9 item 4): Menu in this SECTION returns
+        // to the Phim section — the app's main menu — instead
+        // of exiting the app (the owner's Android model).
+        // Unconditional, on this section's own root; the player
+        // cover above this view carries its own handler and is
+        // the nearer consumer while it is up.
+        .onExitCommand { nav.section = .phim }
         .task { await store.start() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await store.refreshIfStale() } }
@@ -219,7 +226,7 @@ struct JoeTVSection: View {
                                                 lineWidth: 4))
                 .scaleEffect(focused ? 1.05 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedChip, equals: group)
     }
@@ -240,7 +247,7 @@ struct JoeTVSection: View {
                                                 lineWidth: 4))
                 .scaleEffect(focused ? 1.05 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedChip, equals: id)
         .disabled(store.isLoading || store.isValidating)
@@ -367,7 +374,7 @@ struct JoeTVSection: View {
                               lineWidth: focused ? 4 : 2))
             .scaleEffect(focused ? 1.05 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.card)
         .focusEffectDisabled(true)
         .focused($focusedChannel, equals: channel.id)
         .onMoveCommand { direction in

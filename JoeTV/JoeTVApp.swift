@@ -53,6 +53,33 @@ struct JoeTVApp: App {
 /// full-screen layers of the root view instead, and the root's
 /// exit command closes exactly one layer per Menu press.
 final class JoeNavigator: ObservableObject {
+    /// The shell's four sections. Moved here from JoeRootView
+    /// in 1.9.2 (Team 9 item 4): the section views themselves
+    /// must be able to send the shell back to Phim (their Menu
+    /// handlers set section = .phim), so the state lives on
+    /// the navigator they all already observe.
+    enum Section: String, CaseIterable {
+        case tv, phim, torrent, settings
+
+        var title: String {
+            switch self {
+            case .tv: return "TV"
+            case .phim: return "Phim"
+            case .torrent: return "Phim Torrent"
+            case .settings: return "Cài đặt"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .tv: return "tv"
+            case .phim: return "film"
+            case .torrent: return "magnet"
+            case .settings: return "gearshape"
+            }
+        }
+    }
+
+    @Published var section: Section = .phim
     @Published var movie: MovieRoute?
     @Published var tor: TorRoute?
     @Published var searchOpen = false
@@ -101,33 +128,24 @@ final class JoeNavigator: ObservableObject {
 /// Đá Banh TV construction) with the app-drawn look kept via a
 /// label that reads its own focus from the environment and
 /// .focusEffectDisabled(true) on the Button itself; routing
-/// between pills and sections is geometric; Menu handling lives
-/// unconditionally on the detail/search layers themselves, so
-/// at root there is NO exit handler anywhere and Menu exits
-/// the app on the first press (the G-EXIT contract).
+/// between pills and sections is geometric.
+///
+/// MENU SEMANTICS (1.9.2, Team 9 item 4 — G-EXIT REDEFINED by
+/// the owner's explicit order, mirroring the Android app):
+/// Back walks INSIDE the app, one layer per press, and exits
+/// only from the Phim root. Every handler is UNCONDITIONAL
+/// and lives on the root of the view that owns the focus:
+/// the player cover (JoePlayerView), the search layer
+/// (JoeSearchView), the two detail views (JoeMovieDetail /
+/// JoeTorrentDetail — moved INTO them in 1.9.2; the wrapper
+/// handlers that used to sit on the ZStack layers below were
+/// device-proven NOT to intercept), and the three non-Phim
+/// section roots (JoeTVSection / JoeTorrentHome /
+/// JoeSettingsView — Menu there returns to the Phim section).
+/// JoePhimHome carries NO handler, and neither does this
+/// shell or the app root — so at the Phim root no app consumer
+/// exists and the press reaches the system default: exit.
 struct JoeRootView: View {
-    enum Section: String, CaseIterable {
-        case tv, phim, torrent, settings
-
-        var title: String {
-            switch self {
-            case .tv: return "TV"
-            case .phim: return "Phim"
-            case .torrent: return "Phim Torrent"
-            case .settings: return "Cài đặt"
-            }
-        }
-        var icon: String {
-            switch self {
-            case .tv: return "tv"
-            case .phim: return "film"
-            case .torrent: return "magnet"
-            case .settings: return "gearshape"
-            }
-        }
-    }
-
-    @State private var section: Section = .phim
     @StateObject private var nav = JoeNavigator()
 
     /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
@@ -159,13 +177,16 @@ struct JoeRootView: View {
                     JoeTheme.background
                     JoeMovieDetail(route: route)
                 }
-                // Menu closes THIS layer (convergence, Team 7):
-                // the handler is unconditional and lives on the
-                // layer itself, so it exists exactly while the
-                // layer does — no state-driven installation, and
-                // at root no exit handler exists anywhere, so a
-                // root Menu press exits the app (G-EXIT).
-                .onExitCommand { nav.movie = nil }
+                // 1.9.2 (Team 9 item 4): NO exit handler on
+                // this wrapper any more. The 1.9.1 wrapper
+                // handler was desk-verified as an ancestor of
+                // the focused view and device-proved NOT to
+                // intercept — Menu exited the app from the
+                // detail (the second time a cross-subtree
+                // placement failed this way; v1.1's
+                // NavigationStack did the same). The handler
+                // now lives on JoeMovieDetail's OWN root, the
+                // placement the player's handler device-proves.
                 .transition(.opacity)
                 .zIndex(2)
             }
@@ -174,14 +195,15 @@ struct JoeRootView: View {
                     JoeTheme.background
                     JoeTorrentDetail(route: route)
                 }
-                .onExitCommand { nav.tor = nil }
+                // Same move as the movie layer above: the
+                // handler lives on JoeTorrentDetail's own root.
                 .transition(.opacity)
                 .zIndex(3)
             }
         }
-        .onChange(of: section) { _, _ in
-            // S1.1: see the note at `section`'s declaration —
-            // search must not outlive the Phim section.
+        .onChange(of: nav.section) { _, _ in
+            // S1.1: see the note above `body` — search must
+            // not outlive the Phim section.
             if nav.searchOpen { nav.searchOpen = false }
         }
         .environmentObject(nav)
@@ -201,11 +223,11 @@ struct JoeRootView: View {
     private var topBar: some View {
         HStack(alignment: .center, spacing: 20) {
             wordmark
-            ForEach(Section.allCases, id: \.self) { s in
+            ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.9.1")
+            Text("Joe TV v1.9.2")
                 .font(.system(size: 23))
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
@@ -255,11 +277,11 @@ struct JoeRootView: View {
     /// focus effect is disabled on the Button itself —
     /// unconditionally, as a plain modifier, never as a
     /// structure switch.
-    private func sectionPill(_ s: Section) -> some View {
+    private func sectionPill(_ s: JoeNavigator.Section) -> some View {
         Button {
-            section = s
+            nav.section = s
         } label: {
-            PillLabel(title: s.title, icon: s.icon, selected: section == s)
+            PillLabel(title: s.title, icon: s.icon, selected: nav.section == s)
         }
         .buttonStyle(.card)
         .focusEffectDisabled(true)
@@ -267,7 +289,7 @@ struct JoeRootView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch section {
+        switch nav.section {
         case .tv:
             JoeTVSection()
         case .phim:

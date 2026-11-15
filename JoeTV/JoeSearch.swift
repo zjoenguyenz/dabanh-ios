@@ -51,7 +51,7 @@ struct JoeSearchView: View {
                                                         lineWidth: 4))
                         .scaleEffect(topFocus == .search ? 1.05 : 1.0)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($topFocus, equals: .search)
                 .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -70,7 +70,7 @@ struct JoeSearchView: View {
                                                         lineWidth: 4))
                         .scaleEffect(topFocus == .back ? 1.05 : 1.0)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.card)
                 .focusEffectDisabled(true)
                 .focused($topFocus, equals: .back)
             }
@@ -111,7 +111,7 @@ struct JoeSearchView: View {
                             .background(Capsule().fill(JoeTheme.accentViolet))
                             .overlay(JoeFocusRing(shape: Capsule()))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.card)
                     .focusEffectDisabled(true)
                     .focused($retryFocused)
                     .scaleEffect(retryFocused ? 1.05 : 1.0)
@@ -147,7 +147,7 @@ struct JoeSearchView: View {
                                 badge: Providers.badge(movie.provider),
                                 focused: focusedMovie == "search|" + movie.id)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.card)
                         .focusEffectDisabled(true)
                         .focused($focusedMovie, equals: "search|" + movie.id)
                         .onMoveCommand { direction in
@@ -166,10 +166,19 @@ struct JoeSearchView: View {
         // the detail's own handler is the nearer ancestor and
         // wins, preserving exactly-one-layer-per-press.
         .onExitCommand { nav.searchOpen = false }
-        // CONVERGENCE (spec item 3): the focus-hub consumer
-        // (onChange of nav.focusNonce → topFocus = .field) is
-        // REMOVED — DOWN from the pills lands on the query
-        // field geometrically.
+        // 1.9.2 (Team 9 item 8): the query field is the
+        // layer's declared initial focus — a static,
+        // appearance-time .defaultFocus, the same construction
+        // JoeMovieDetail's play button device-proves
+        // (JoeMovieDetail.swift). The convergence round removed
+        // the focus-hub consumer and assumed DOWN from the pills
+        // would land here geometrically; after the grid→search
+        // swap destroyed the tapped button's subtree, focus had
+        // NO declared landing inside this layer at all, and on
+        // device the owner could not get into search at all.
+        // D4-safe: the declaration installs nothing in response
+        // to focus state and no structure depends on it.
+        .defaultFocus($topFocus, .field)
     }
 
     /// Result-grid routing: the handler sits on each result, so

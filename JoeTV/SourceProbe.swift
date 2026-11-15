@@ -34,6 +34,56 @@ enum SourceProbe {
         return await [kk, f4k, vs, tp]
     }
 
+    /// 1.9.2 (Team 9 item 5): single-target KK reachability
+    /// for the Settings tunnel-status row, with a SHORT ~6 s
+    /// fuse. KkClient.newest's own list budget is 12 s — far
+    /// too long to leave a status row spinning — so the call
+    /// races a 6 s timer in the codebase's box pattern: the
+    /// first outcome wins, the loser is cancelled and never
+    /// awaited. The verdict is an INFERENCE by design (KK
+    /// answering ⇒ the Vietnam route is reachable ⇒ the
+    /// tunnel profile is likely on); the Settings copy says
+    /// exactly that and nothing stronger.
+    static func probeKK(timeout: TimeInterval = 6) async -> Result {
+        let start = Date()
+        let box = KKProbeBox()
+        let fetch = Task {
+            do {
+                let count = try await KkClient.newest(page: 1).count
+                box.complete(count)
+            } catch {
+                box.fail()
+            }
+        }
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            box.expire()
+        }
+        defer {
+            fetch.cancel()
+            timer.cancel()
+        }
+        while true {
+            if let outcome = box.outcome {
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                switch outcome {
+                case .count(let n):
+                    return Result(name: "KKPhim", ok: n > 0, millis: ms,
+                                  note: n > 0 ? "\(n) mục mới nhất" : "Trả về rỗng")
+                case .failed, .expired:
+                    return Result(name: "KKPhim", ok: false, millis: ms,
+                                  note: "Không trả lời")
+                }
+            }
+            if Task.isCancelled {
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                return Result(name: "KKPhim", ok: false, millis: ms,
+                                  note: "Đã huỷ")
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     private static func probe(name: String,
                               _ fetch: () async throws -> Int) async -> Result {
         let start = Date()
@@ -48,5 +98,44 @@ enum SourceProbe {
             return Result(name: name, ok: false, millis: ms,
                           note: error.localizedDescription)
         }
+    }
+}
+
+/// Lock-guarded outcome box for probeKK's fuse race (the
+/// findAlternatives pattern): the fetch task and the fuse
+/// timer publish here; the FIRST outcome wins and later
+/// publications are dropped.
+private final class KKProbeBox {
+    enum Outcome {
+        case count(Int)
+        case failed
+        case expired
+    }
+
+    private let lock = NSLock()
+    private var result: Outcome?
+
+    func complete(_ n: Int) {
+        lock.lock()
+        if result == nil { result = .count(n) }
+        lock.unlock()
+    }
+
+    func fail() {
+        lock.lock()
+        if result == nil { result = .failed }
+        lock.unlock()
+    }
+
+    func expire() {
+        lock.lock()
+        if result == nil { result = .expired }
+        lock.unlock()
+    }
+
+    var outcome: Outcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return result
     }
 }

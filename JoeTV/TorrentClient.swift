@@ -173,7 +173,14 @@ enum TorrentClient {
     /// it declares any, else Cinemeta's public top movie/series.
     static func discoverCatalogs(addonBase: String) async -> [TorCatalog] {
         var out: [TorCatalog] = []
-        if let root = try? await JoeHTTP.getJSON(addonBase + "/manifest.json") {
+        // 1.9.2 (Team 9 item 6): discovery-class calls carry
+        // an explicit 8 s budget — pre-fix they rode JoeHTTP's
+        // 25 s default, and the torrent home's sequential
+        // catalogue walk stacked those into a ~100 s grind on
+        // a dead route. Streams (15 s, SourceHealth) and
+        // subtitles (18 s) keep their own tuned budgets.
+        if let root = try? await JoeHTTP.getJSON(addonBase + "/manifest.json",
+                                                 timeout: 8) {
             for c in JSON.arr(root, "catalogs") ?? [] {
                 let type = JSON.str(c, "type")
                 guard type == "movie" || type == "series" else { continue }
@@ -210,7 +217,8 @@ enum TorrentClient {
     // MARK: - Catalog / search / meta
 
     static func fetchCatalog(_ cat: TorCatalog) async throws -> [TorMeta] {
-        let root = try await JoeHTTP.getJSON(cat.base + "/catalog/\(cat.type)/\(cat.id).json")
+        let root = try await JoeHTTP.getJSON(
+            cat.base + "/catalog/\(cat.type)/\(cat.id).json", timeout: 8)
         return parseMetas(JSON.arr(root, "metas"))
     }
 
@@ -225,20 +233,23 @@ enum TorrentClient {
     /// "Science+Fiction" URL, which the session follows).
     static func fetchGenreCatalog(type: String, genre: String) async throws -> [TorMeta] {
         let root = try await JoeHTTP.getJSON(
-            TorrentSettings.cinemeta + "/catalog/\(type)/top/genre=\(JoeHTTP.qenc(genre)).json")
+            TorrentSettings.cinemeta + "/catalog/\(type)/top/genre=\(JoeHTTP.qenc(genre)).json",
+            timeout: 8)
         return parseMetas(JSON.arr(root, "metas"))
     }
 
     static func search(_ cat: TorCatalog, keyword: String) async throws -> [TorMeta] {
         let q = JoeHTTP.qenc(keyword)
         let root = try await JoeHTTP.getJSON(
-            cat.base + "/catalog/\(cat.type)/\(cat.id)/search=\(q).json")
+            cat.base + "/catalog/\(cat.type)/\(cat.id)/search=\(q).json",
+            timeout: 8)
         return parseMetas(JSON.arr(root, "metas"))
     }
 
     /// Series episodes from the meta endpoint (Cinemeta-shaped).
     static func fetchVideos(metaBase: String, type: String, id: String) async throws -> [TorVideo] {
-        let root = try await JoeHTTP.getJSON(metaBase + "/meta/\(type)/\(id).json")
+        let root = try await JoeHTTP.getJSON(
+            metaBase + "/meta/\(type)/\(id).json", timeout: 8)
         guard let meta = JSON.obj(root, "meta") else { return [] }
         return (JSON.arr(meta, "videos") ?? []).compactMap { v in
             var video = TorVideo()

@@ -188,6 +188,17 @@ by the app in exactly one way per component class.
   shows a system-drawn artifact on any Button-based control class,
   that class converts to the F2 focusable-view pattern before the
   next build. No third attempt with modifiers alone.
+  **DEVIATION RECORDED 2026-11-15 (1.9.2; leader ruling, Team 4
+  re-gate accepted):** F9's literal F2 conversion was NOT followed.
+  On device evidence the artifact class (`.plain` Buttons) was
+  instead converted to real Buttons with `.buttonStyle(.card)` —
+  the construction the shipped 1.9.1's pills and Đá Banh TV prove
+  clean on the owner's box — keeping per-view
+  `.focusEffectDisabled(true)` and the app-drawn F3 treatments. No
+  Button became a focusable view. F9's operative intent (change the
+  construction, never permute modifiers on a proven-bad one) is
+  honoured; the full record is in APPLE-CONFORMANCE.md, P-B B-2
+  amendment 2026-11-15 #2.
 
 ## 6. Type scale
 

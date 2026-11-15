@@ -37,6 +37,12 @@ enum KkClient {
     ]
     private static let cdnDefault = "https://phimimg.com"
     /// Per-request budget for catalogue (list/search) calls.
+    /// Since 1.9.2 (Team 9 item 2) this is the CAP handed to
+    /// SourceHealth's list stage: every list/search call below
+    /// races its hosts through fetchJSON's health path, so a
+    /// host that black-holes list calls tightens its fuse and
+    /// latches instead of re-burning 12 s per rail job on
+    /// every load.
     private static let listTimeout: TimeInterval = 12
     /// Tuned detail cap (LATENCY-AUDIT §6): 25 s → 10 s
     /// (healthy detail max 0.91 on host A). Applied PER HOST
@@ -169,7 +175,7 @@ enum KkClient {
                      : "/v1/api/danh-sach/phim-moi-cap-nhat?page=\(page)"
             },
             shape: { itemsArray($0) != nil },
-            timeout: listTimeout)
+            health: (Providers.KK, .list, listTimeout))
     }
 
     static func newest(page: Int) async throws -> [Movie] {
@@ -184,7 +190,7 @@ enum KkClient {
                      : "/v1/api/danh-sach/\(type)?page=\(page)"
             },
             shape: { itemsArray($0) != nil },
-            timeout: listTimeout)
+            health: (Providers.KK, .list, listTimeout))
     }
 
     static func listByType(_ type: String, page: Int) async throws -> [Movie] {
@@ -198,7 +204,7 @@ enum KkClient {
                      : "/v1/api/the-loai/\(slug)?page=\(page)"
             },
             shape: { itemsArray($0) != nil },
-            timeout: listTimeout)
+            health: (Providers.KK, .list, listTimeout))
     }
 
     static func listByGenre(_ slug: String, page: Int) async throws -> [Movie] {
@@ -214,7 +220,7 @@ enum KkClient {
                      : "/v1/api/quoc-gia/\(slug)?page=\(page)\(lim)"
             },
             shape: { itemsArray($0) != nil },
-            timeout: listTimeout)
+            health: (Providers.KK, .list, listTimeout))
     }
 
     static func listByCountry(_ slug: String, page: Int) async throws -> [Movie] {
@@ -235,7 +241,7 @@ enum KkClient {
                 bare ? "/tim-kiem?keyword=\(q)" : "/v1/api/tim-kiem?keyword=\(q)"
             },
             shape: { itemsArray($0) != nil },
-            timeout: listTimeout)
+            health: (Providers.KK, .list, listTimeout))
         return parseItems(root)
     }
 

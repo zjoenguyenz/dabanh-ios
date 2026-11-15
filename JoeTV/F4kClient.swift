@@ -51,8 +51,7 @@ enum F4kClient {
     // MARK: - Endpoints
 
     static func newestRaw(page: Int) async throws -> [String: Any] {
-        try await JoeHTTP.getJSON(base + "/api/home?page=\(page)",
-                                  timeout: listTimeout)
+        try await listJSON(base + "/api/home?page=\(page)")
     }
 
     /// Parse a /api/home?page= body (the "list" section) — also
@@ -71,11 +70,9 @@ enum F4kClient {
         switch type {
         case "phim-le", "phim-bo":
             if page <= 1 {
-                return try await JoeHTTP.getJSON(base + "/api/home",
-                                                 timeout: listTimeout)
+                return try await listJSON(base + "/api/home")
             }
-            return try await JoeHTTP.getJSON(base + "/api/home?page=\(page)",
-                                             timeout: listTimeout)
+            return try await listJSON(base + "/api/home?page=\(page)")
         default:
             // No Film4K equivalent — no request is made at all.
             return [:]
@@ -112,10 +109,23 @@ enum F4kClient {
     /// /api/search answers 404). Items are light — slug, titles,
     /// poster, mediaType, year — which parseMovie tolerates.
     static func search(_ keyword: String) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(
-            base + "/api/search/suggest?q=\(JoeHTTP.qenc(keyword))",
-            timeout: listTimeout)
+        let root = try await listJSON(
+            base + "/api/search/suggest?q=\(JoeHTTP.qenc(keyword))")
         return parseItems(JSON.arr(root, "list") ?? [])
+    }
+
+    /// 1.9.2 (Team 9 item 2): every catalogue (list/search)
+    /// fetch rides SourceHealth's list stage — the dynamic
+    /// fuse tightens within the 12 s cap and the latch stops
+    /// a dead host's list calls from re-burning full caps on
+    /// every load. Pre-fix, list calls consulted no health
+    /// memory at all.
+    private static func listJSON(_ url: String) async throws -> [String: Any] {
+        try await SourceHealth.run(
+            provider: Providers.F4K, stage: .list, url: url, cap: listTimeout
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
     }
 
     static func detail(_ slug: String) async throws -> Detail {
