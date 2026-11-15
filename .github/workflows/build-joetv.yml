@@ -40,6 +40,12 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Inject TMDB key
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          printf 'enum TMDBBundledKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTV/TMDBKey.swift
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -57,7 +63,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="" \
-            build
+
           test -d "$PWD/build/app-joetv/JoeTV.app"
           ls -la "$PWD/build/app-joetv/JoeTV.app"
 
