@@ -24,8 +24,10 @@ struct JoeSettingsView: View {
     @State private var savedTick = false
     @State private var probeResults: [SourceProbe.Result] = []
     @State private var probing = false
-    /// Per-field empty-pasteboard hints (1.9.2, item 7).
-    @State private var pasteHints: [String: String] = [:]
+    /// Per-field guidance hints shown under a credential
+    /// field after its "Nhập từ iPhone" button is pressed
+    /// (1.9.2, item 7).
+    @State private var inputHints: [String: String] = [:]
     /// KK route status for the tunnel-status row (item 5).
     @State private var kkStatus: KKRouteStatus = .idle
     @FocusState private var focusedField: String?
@@ -160,7 +162,7 @@ struct JoeSettingsView: View {
                 .focusEffectDisabled(true)
                 .onSubmit { save() }
                 if allowsPaste {
-                    pasteButton(text: text, id: id)
+                    iphoneInputButton(id: id)
                 }
             }
             .frame(maxWidth: 1250, alignment: .leading)
@@ -168,8 +170,8 @@ struct JoeSettingsView: View {
                 .font(.system(size: 25))
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(maxWidth: 1250, alignment: .leading)
-            if let pasteHint = pasteHints[id] {
-                Text(pasteHint)
+            if let inputHint = inputHints[id] {
+                Text(inputHint)
                     .font(.system(size: 25))
                     .foregroundStyle(.orange)
                     .frame(maxWidth: 1250, alignment: .leading)
@@ -177,31 +179,28 @@ struct JoeSettingsView: View {
         }
     }
 
-    /// The paste path for a credential field (1.9.2, Team 9
-    /// item 7). The owner's flow: copy the code on his iPhone
-    /// (same Apple ID — Universal Clipboard carries it to the
-    /// Apple TV), then press "Dán" here; typing a long token
-    /// with the remote was the dead end that left torrent
-    /// unconfigured on this device. A non-empty pasteboard is
-    /// trimmed, assigned and saved through the fields'
-    /// existing auto-save (the onChange handlers on the view).
-    /// An empty pasteboard shows the hint under the field and
-    /// focuses the field itself, where the system input UI
-    /// offers the iPhone Remote keyboard — which carries its
-    /// own paste.
-    private func pasteButton(text: Binding<String>, id: String) -> some View {
+    /// The credential-entry helper for a field (1.9.2, Team 9
+    /// item 7, rewritten by TEAM 10-FIXUP-2). tvOS has NO
+    /// pasteboard API — the pasteboard class is marked
+    /// API_UNAVAILABLE on tvOS and build #16 failed
+    /// compiling it — so the app
+    /// cannot read the clipboard itself. The route tvOS does
+    /// support is the iPhone keyboard: while a field is
+    /// focused, the owner's iPhone offers the Apple TV
+    /// keyboard (a notification appears on the iPhone), where
+    /// he pastes the code he copied and the text lands in the
+    /// field directly, saved by the fields' existing
+    /// auto-save. This button therefore only focuses the
+    /// field and shows the guidance hint under it — it does
+    /// not, and must not claim to, paste anything itself.
+    /// Typing a long token with the remote was the dead end
+    /// that left torrent unconfigured on this device.
+    private func iphoneInputButton(id: String) -> some View {
         Button {
-            let raw = UIPasteboard.general.string ?? ""
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                pasteHints[id] = "Chưa có gì trong bộ nhớ tạm — copy mã trên iPhone trước (cùng Apple ID, để gần Apple TV)"
-                focusedField = id
-            } else {
-                pasteHints[id] = nil
-                text.wrappedValue = trimmed
-            }
+            inputHints[id] = "Đã chọn ô nhập — mở bàn phím Apple TV trên iPhone của anh (thông báo hiện trên iPhone khi ô đang được chọn), dán mã vào đó, chữ sẽ tự vào ô này."
+            focusedField = id
         } label: {
-            Text("Dán")
+            Text("Nhập từ iPhone")
                 .font(.system(size: 29, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 30)
