@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// Joe TV's visual language — the same family as the Android app:
-/// deep indigo → violet gradient, red accent, thick VIOLET focus
-/// outline (the TV360 language with the owner's override: white
-/// focus styling is banned as unprofessional) plus a slight
-/// scale-up on the element's own dark surface. It shares the TV
-/// app's gradient DNA (the
-/// two are sister apps) but the chrome is its own — a four-section
-/// left rail and a "Joe TV" wordmark — and it is deliberately
-/// UNLIKE Đá Banh tvOS (emerald, top pill tabs, crest hero) so the
+/// Joe TV's visual language (v1.9 rework): PURE BLACK background
+/// (no gradient, no hue — see `background` below), violet accent,
+/// red accent, thick VIOLET focus outline drawn by the app itself
+/// on the focused element's own shape (the TV360 language with
+/// the owner's override: white/pale focus styling is banned, and
+/// the system focus effect is disabled on every focusable). The
+/// chrome is a top bar — the real "Joe TV" wordmark plus four
+/// section pills — over full-bleed section content, and it is
+/// deliberately UNLIKE Đá Banh tvOS (emerald, crest hero) so the
 /// owner can never open the wrong app by silhouette.
 
 /// The app's own focus ring, drawn over a button's label. The
@@ -21,7 +21,7 @@ import SwiftUI
 struct JoeFocusRing<S: InsettableShape>: View {
     @Environment(\.isFocused) private var isFocused
     let shape: S
-    var lineWidth: CGFloat = 3
+    var lineWidth: CGFloat = 4
 
     var body: some View {
         shape.strokeBorder(isFocused ? JoeTheme.focusViolet : Color.clear,
@@ -34,20 +34,30 @@ enum JoeTheme {
     static let accentViolet = Color(red: 0.62, green: 0.45, blue: 1.0)
     /// The one focus-outline colour app-wide (lighter violet).
     static let focusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
+    /// §3 token `surface`: the sanctioned fill for cards, tiles,
+    /// fields and primary-action chrome at REST (unfocused,
+    /// unselected) — white @ 0.07 over the black background.
+    /// Translucent accent fills at rest (the old accentViolet
+    /// at 45% opacity) are banned by the spec.
+    static let surface = Color.white.opacity(0.07)
+    /// §3 token `okGreen` (#30D158): positive-status colour —
+    /// diagnostics pass dots, "configured / saved" status text,
+    /// the playable-stream tag. (Spec §3 named it for the
+    /// diagnostics dot; Team 4's pre-build gate extended it to
+    /// every positive-status use so no raw `.green` remains.)
+    static let okGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
 
-    /// v1.8: glossy Apple black — pure neutral greys, ZERO blue
-    /// tint. The v1.4–v1.7 indigo gradient read as bright BLUE
-    /// on the owner's TV (his photo + verdict, 2026-11-14); the
-    /// black family matches the Android theme he picked there
-    /// ("Đen bóng đêm (Apple)": #000000 / #0B0B0D / #1B1B20)
-    /// and the design render he approved before this build.
+    /// v1.9: SOLID PURE BLACK — no gradient, no stops. The v1.8
+    /// "Apple black" gradient still carried a hue: its stops
+    /// (#0B0B0D / #1B1B20 family) have blue ≈ 1.18× red/green,
+    /// and the owner's panel amplified that single hue until
+    /// the whole screen photographed bright BLUE, brightest
+    /// exactly where the gradient peaked (his photo,
+    /// 2026-11-14). Pure black has no hue for any display
+    /// chain to amplify — the worst it can render is grey.
+    /// Never reintroduce unequal-channel "blacks" here.
     static var background: some View {
-        LinearGradient(
-            colors: [Color(red: 0.0, green: 0.0, blue: 0.0),
-                     Color(red: 0.043, green: 0.043, blue: 0.051),
-                     Color(red: 0.106, green: 0.106, blue: 0.125)],
-            startPoint: .topLeading, endPoint: .bottomTrailing)
-            .ignoresSafeArea()
+        Color.black.ignoresSafeArea()
     }
 
     /// Poster card used by every Phim/Torrent rail: 2:3 art, title
@@ -61,7 +71,7 @@ enum JoeTheme {
         var progress: Double? = nil
         var subline: String? = nil
         let focused: Bool
-        var width: CGFloat = 218
+        var width: CGFloat = 240
 
         var body: some View {
             VStack(alignment: .leading, spacing: 9) {
@@ -86,12 +96,12 @@ enum JoeTheme {
                 .overlay(alignment: .topLeading) {
                     if let badge {
                         Text(badge)
-                            .font(.system(size: 16, weight: .heavy))
+                            .font(.system(size: 23, weight: .heavy))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Color.black.opacity(0.62)))
-                            .padding(9)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.65)))
+                            .padding(10)
                     }
                 }
                 .overlay(alignment: .bottom) {
@@ -107,40 +117,41 @@ enum JoeTheme {
                     }
                 }
                 Text(title)
-                    .font(.system(size: 21, weight: focused ? .semibold : .medium))
-                    .foregroundStyle(focused ? JoeTheme.accentViolet : .white)
+                    .font(.system(size: 25, weight: focused ? .semibold : .medium))
+                    .foregroundStyle(focused ? JoeTheme.focusViolet : .white)
                     .lineLimit(1)
                     .frame(width: width, alignment: .leading)
                 if let subline {
                     Text(subline)
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 23))
+                        .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)
                         .frame(width: width, alignment: .leading)
                 } else if !meta.isEmpty {
                     Text(meta)
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 23))
+                        .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)
                         .frame(width: width, alignment: .leading)
                 }
             }
-            .padding(10)
+            .padding(12)
+            // F3: focus treatment is outline + scale ONLY — the
+            // old focus drop shadow is removed (spec §5 F3 and
+            // acceptance item 12: no focus-only shadow anywhere).
             .background(
                 RoundedRectangle(cornerRadius: 16)
                     .fill(Color.white.opacity(0.07))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
                             .strokeBorder(focused ? JoeTheme.focusViolet : Color.white.opacity(0.10),
-                                          lineWidth: focused ? 3.5 : 1.2))
-                    .shadow(color: .black.opacity(focused ? 0.55 : 0),
-                            radius: focused ? 20 : 0, x: 0, y: focused ? 10 : 0))
+                                          lineWidth: focused ? 4 : 2)))
             .scaleEffect(focused ? 1.05 : 1.0)
         }
 
         private var placeholder: some View {
             Text(title)
-                .font(.system(size: 22, weight: .semibold))
+                .font(.system(size: 23, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.8))
                 .multilineTextAlignment(.center)
                 .lineLimit(4)
@@ -154,16 +165,16 @@ enum JoeTheme {
         @ViewBuilder let content: () -> Content
 
         var body: some View {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 Text(title)
-                    .font(.system(size: 30, weight: .bold))
+                    .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 24) {
+                    LazyHStack(alignment: .top, spacing: 28) {
                         content()
                     }
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 16)
                     .padding(.horizontal, 4)
                 }
             }

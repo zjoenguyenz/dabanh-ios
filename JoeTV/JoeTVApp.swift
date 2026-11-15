@@ -86,11 +86,14 @@ final class JoeNavigator: ObservableObject {
 /// the TV section's channels or the Settings fields at all, and
 /// the system focus effect washed a pale halo over focused rail
 /// rows despite .buttonStyle(.plain)+.focusEffectDisabled().
-/// v1.5: pills use .buttonStyle(.plain) and draw focus themselves
-/// (violet fill + lighter-violet outline + scale) — .card's pale
-/// focus card washed titles out in the owner's v1.4 videos and is
-/// banned. Focus routing between pills and sections is explicit
-/// through the JoeNavigator focus hub, never left to geometry.
+/// v1.5: pills draw focus themselves (violet fill +
+/// lighter-violet outline + scale) — .card's pale focus card
+/// washed titles out in the owner's v1.4 videos and is banned.
+/// v1.9: the pills are .focusable() views, not Buttons (the
+/// system focus effect survived root-level disabling on the
+/// owner's tvOS — see sectionPill). Focus routing between pills
+/// and sections is explicit through the JoeNavigator focus hub,
+/// never left to geometry.
 struct JoeRootView: View {
     enum Section: String, CaseIterable {
         case tv, phim, torrent, settings
@@ -117,10 +120,24 @@ struct JoeRootView: View {
     @FocusState private var focusedSection: Section?
     @StateObject private var nav = JoeNavigator()
 
+    /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
+    /// Phim section's view. If the owner opened search, escaped
+    /// UP to the pills and selected another section, searchOpen
+    /// stayed true while no search was on screen — and the exit
+    /// trap below stayed armed, so the next Menu press was eaten
+    /// closing an invisible "layer" instead of exiting the app.
+    /// Leaving the Phim section now always closes search, so
+    /// searchOpen == true implies the search is actually visible.
+
     var body: some View {
         ZStack {
             JoeTheme.background
-            VStack(spacing: 24) {
+            // §4 (DESIGN-SPEC-V19): the tvOS safe area IS the
+            // HIG inset (80 pt sides, 60 pt top/bottom) — the
+            // content container respects it and adds NO further
+            // padding, so the total inset is exactly 80/60 and
+            // never stacks (the old manual 56/34/24 did stack).
+            VStack(spacing: 32) {
                 topBar
                     .modifier(JoeMoveTrap(enabled: focusedSection != nil) { direction in
                         pillMove(direction)
@@ -128,9 +145,6 @@ struct JoeRootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 56)
-            .padding(.top, 34)
-            .padding(.bottom, 24)
             .disabled(nav.movie != nil || nav.tor != nil)
             if let route = nav.movie {
                 ZStack {
@@ -149,13 +163,19 @@ struct JoeRootView: View {
                 .zIndex(3)
             }
         }
+        .onChange(of: section) { _, _ in
+            // S1.1: see the note at `section`'s declaration —
+            // search must not outlive the Phim section.
+            if nav.searchOpen { nav.searchOpen = false }
+        }
         .environmentObject(nav)
-        // v1.8: the "no system focus effect" law was previously
-        // only a comment — .focusEffectDisabled was never actually
-        // applied anywhere, so on the owner's Apple TV the system
-        // washed a huge pale card over the focused pill (his photo,
-        // 2026-11-14). Applied ONCE here, it covers the whole
-        // hierarchy: pills, sections, search and both detail layers.
+        // "No system focus effect" law: this root application is
+        // the BACKSTOP only. The v1.8 build had exactly this and
+        // the owner's tvOS still washed a pale blob over the
+        // focused pill (his photo, 2026-11-14) — so since v1.9
+        // EVERY focusable control also carries
+        // .focusEffectDisabled(true) on itself, and the top-bar
+        // pills are not Buttons at all (see sectionPill).
         .focusEffectDisabled(true)
         .onChange(of: nav.focusNonce) { _, _ in
             // Hub consumer (shell side): a section escaping upward
@@ -176,18 +196,19 @@ struct JoeRootView: View {
     // every pill label is .lineLimit(1) + .fixedSize so it can
     // never be squeezed.
     private var topBar: some View {
-        HStack(alignment: .center, spacing: 28) {
+        HStack(alignment: .center, spacing: 20) {
             wordmark
             ForEach(Section.allCases, id: \.self) { s in
                 sectionPill(s)
             }
             Spacer()
-            Text("Joe TV v1.8")
-                .font(.footnote)
+            Text("Joe TV v1.9")
+                .font(.system(size: 23))
                 .foregroundStyle(.white.opacity(0.4))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
         }
+        .frame(height: 76)
     }
 
     /// v1.8: the real Joe TV wordmark (the approved master, the
@@ -216,38 +237,44 @@ struct JoeRootView: View {
         }
     }
 
+    /// v1.9: the pills are NOT Buttons any more. On the owner's
+    /// tvOS (Liquid Glass) the system focus effect drew a pale
+    /// blob over the focused Button pill despite the root-level
+    /// .focusEffectDisabled (v1.7 AND v1.8 photos) — so the pill
+    /// is now a plain .focusable() view whose focus rendering is
+    /// 100% app-drawn (violet fill + lighter-violet outline +
+    /// scale on its own capsule), with the system effect disabled
+    /// on the view itself as well. Hub integration is unchanged:
+    /// the pill still binds the same @FocusState
+    /// (.focused($focusedSection, equals:)), the topBar move trap
+    /// still routes LEFT/RIGHT/DOWN arithmetically (pillMove),
+    /// and select arrives as a tap on the focused view, which is
+    /// what changes the section (select-press only, as before).
     private func sectionPill(_ s: Section) -> some View {
         let selected = section == s
         let focused = focusedSection == s
-        return Button {
-            section = s
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: s.icon)
-                    .font(.system(size: 24, weight: .medium))
-                Text(s.title)
-                    .font(.system(size: 24, weight: selected ? .bold : .medium))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .foregroundStyle((selected || focused) ? .white : .white.opacity(0.85))
-            .padding(.horizontal, 26)
-            .padding(.vertical, 12)
-            // v1.5 style law: .plain draws NO system focus effect,
-            // so focus is drawn here and only here — the violet
-            // fill on the pill's own dark capsule keeps the white
-            // text readable; a focused pill adds the lighter-violet
-            // outline and a slight scale. No pale card, no white
-            // ring (both banned after the v1.4 videos).
-            .background(Capsule().fill(selected ? JoeTheme.accentViolet
-                                       : (focused ? JoeTheme.accentViolet
-                                                  : Color.white.opacity(0.08))))
-            .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                            lineWidth: 2.5))
-            .scaleEffect(focused ? 1.06 : 1.0)
+        return HStack(spacing: 10) {
+            Image(systemName: s.icon)
+                .font(.system(size: 26, weight: .medium))
+            Text(s.title)
+                .font(.system(size: 29, weight: (selected || focused) ? .semibold : .medium))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
-        .buttonStyle(.plain)
+        .foregroundStyle((selected || focused) ? .white : .white.opacity(0.85))
+        .padding(.horizontal, 28)
+        .padding(.vertical, 14)
+        .background(Capsule().fill(selected ? JoeTheme.accentViolet
+                                   : (focused ? JoeTheme.accentViolet
+                                              : Color.white.opacity(0.07))))
+        .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
+                                        lineWidth: 4))
+        .scaleEffect(focused ? 1.06 : 1.0)
+        .contentShape(Capsule())
+        .focusable()
         .focused($focusedSection, equals: s)
+        .focusEffectDisabled(true)
+        .onTapGesture { section = s }
     }
 
     /// Guaranteed pill-row routing (v1.5 hub): the topBar move
@@ -292,9 +319,14 @@ struct JoeRootView: View {
 }
 
 /// Installs the root Menu handler ONLY while a layer is open.
-/// With no handler installed, Menu at the section roots keeps
-/// its system behaviour (exit the app) — the trap must never
-/// swallow that press.
+/// PROOF (S1.1, Team 4 gate G-EXIT): with `enabled == false` the
+/// modifier returns the content untouched — there is NO
+/// .onExitCommand anywhere in the tree, so a Menu press at root
+/// state has no app consumer and travels the full responder
+/// chain to UIApplication: the app exits immediately, first
+/// press. With a layer open, exactly one press closes exactly
+/// one layer (JoeNavigator.closeTop), and the NEXT press is a
+/// root press again. The trap must never be made unconditional.
 private struct JoeExitTrap: ViewModifier {
     let enabled: Bool
     let action: () -> Void

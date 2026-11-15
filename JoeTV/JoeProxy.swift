@@ -20,6 +20,11 @@ import Network
 /// EXT-X-MEDIA / EXT-X-KEY / EXT-X-MAP URI attributes) to
 /// itself, then fetches each resource with the same headers and
 /// strips the disguise prefix before AVPlayer sees a byte.
+/// Playlists are fetched whole (they must be rewritten);
+/// segments STREAM — the prefix is stripped on the fly and
+/// bytes flow to AVPlayer as they arrive (latency round:
+/// store-and-forwarding an 11–66 MB Film4K segment before
+/// byte one was the largest tvOS start cost in the audit).
 /// Clean resources pass through untouched (the strip only fires
 /// on a PNG signature). Loopback HTTP is ATS-exempt, and nothing
 /// here ever leaves the device.
@@ -34,13 +39,36 @@ final class JoeProxy {
 
     private var listener: NWListener?
     private var port: UInt16 = 0
-    private let readySem = DispatchSemaphore(value: 0)
     private var routes: [String: Route] = [:]
+    /// Route-table bound (C-16): pre-v1.9 routes were never
+    /// evicted — an unbounded slow leak over a long session.
+    /// Oldest registrations are evicted past the cap.
+    private static let maxRoutes = 512
+    private var routeOrder: [String] = []
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "joe.proxy", attributes: .concurrent)
     private let session = URLSession(configuration: .default)
+    /// Streaming session for segment routes (latency round):
+    /// a delegate session on its own serial queue, so segment
+    /// bytes can be forwarded as they arrive instead of
+    /// store-and-forwarded whole (see serve()). The session
+    /// retains its delegate; the delegate's proxy reference
+    /// is weak, and the proxy is a process-lifetime singleton,
+    /// so the session is deliberately never invalidated.
+    private let streamDelegate = StreamDelegate()
+    private let streamQueue: OperationQueue
+    private let streamSession: URLSession
 
-    private init() {}
+    private init() {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1
+        q.name = "joe.proxy.stream"
+        streamQueue = q
+        streamSession = URLSession(configuration: .default,
+                                   delegate: streamDelegate,
+                                   delegateQueue: q)
+        streamDelegate.proxy = self
+    }
 
     // MARK: - Lifecycle
 
@@ -50,19 +78,25 @@ final class JoeProxy {
         lock.lock()
         defer { lock.unlock() }
         guard listener == nil else { return }
-        guard let l = try? NWListener(using: .tcp, on: .any) else { return }
+        // Conformance (Team 4): LOOPBACK ONLY. The pre-v1.9
+        // listener accepted connections on every interface — an
+        // unauthenticated relay reachable by the whole LAN. This
+        // proxy exists solely for this device's own AVPlayer.
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
+        guard let l = try? NWListener(using: params, on: .any) else { return }
         listener = l
         l.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                self.lock.lock()
                 if let p = l.port { self.port = p.rawValue }
-                self.readySem.signal()
+                self.lock.unlock()
             case .failed, .cancelled:
                 self.lock.lock()
                 if self.listener === l { self.listener = nil }
                 self.lock.unlock()
-                self.readySem.signal()
             default:
                 break
             }
@@ -78,12 +112,22 @@ final class JoeProxy {
     /// Register an upstream playlist and return the loopback URL
     /// AVPlayer should open, or nil when the proxy is not up
     /// (the caller then falls back to the direct URL).
+    ///
+    /// This function NEVER waits (hard gate G-EXIT-4): it is
+    /// called from play-tap handlers that can run on the main
+    /// thread, and the pre-v1.9 version blocked on a semaphore
+    /// for up to 3 s waiting for the listener — on the owner's
+    /// TV that class of main-thread block froze the whole
+    /// device (his report, 2026-11-15). The app root warms
+    /// start() at launch, so the port is normally ready; when
+    /// it is not, nil + the direct-URL fallback is always the
+    /// right trade.
     func playlistURL(for upstream: String, headers: [String: String]) -> URL? {
         start()
-        if port == 0 {
-            _ = readySem.wait(timeout: .now() + 3)
-        }
-        guard port != 0 else { return nil }
+        lock.lock()
+        let p = port
+        lock.unlock()
+        guard p != 0 else { return nil }
         let local = register(upstream, headers: headers, isPlaylist: true)
         return URL(string: local)
     }
@@ -93,8 +137,13 @@ final class JoeProxy {
         let token = UUID().uuidString
         lock.lock()
         routes[token] = Route(url: upstream, headers: headers, isPlaylist: isPlaylist)
+        routeOrder.append(token)
+        while routeOrder.count > Self.maxRoutes {
+            routes[routeOrder.removeFirst()] = nil
+        }
+        let p = port
         lock.unlock()
-        return "http://127.0.0.1:\(port)/\(isPlaylist ? "p" : "s")/\(token)"
+        return "http://127.0.0.1:\(p)/\(isPlaylist ? "p" : "s")/\(token)"
     }
 
     // MARK: - Connection handling
@@ -132,42 +181,327 @@ final class JoeProxy {
             respond(conn, status: 400, type: "text/plain", body: Data())
             return
         }
+        // Playlists are small and must be rewritten whole
+        // before AVPlayer sees them — they keep the bounded
+        // store-and-forward path. SEGMENTS stream (below):
+        // Film4K's are 11–66 MB each, and store-and-forward
+        // made AVPlayer wait for a whole segment before byte
+        // one (audit §1.3: tvOS ≈11.5 s median start vs
+        // ≈5.1 s direct — the single largest tvOS start cost).
+        if route.isPlaylist {
+            servePlaylist(conn, route: route, url: url)
+        } else {
+            startStream(conn, route: route, url: url)
+        }
+    }
+
+    private func servePlaylist(_ conn: NWConnection, route: Route, url: URL) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         for (k, v) in route.headers { request.setValue(v, forHTTPHeaderField: k) }
         if route.headers["User-Agent"] == nil {
             request.setValue(JoeHTTP.userAgent, forHTTPHeaderField: "User-Agent")
         }
+        let startedAt = Date()
         let sem = DispatchSemaphore(value: 0)
         var payload = Data()
-        var contentType = "application/octet-stream"
         var ok = false
-        let task = session.dataTask(with: request) { [weak self] data, response, _ in
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
             defer { sem.signal() }
             guard let self, let data,
                   let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else { return }
-            if route.isPlaylist {
-                guard let text = String(data: data, encoding: .utf8) else { return }
-                let base = http.url ?? url
-                let rewritten = self.rewritePlaylist(text, base: base,
-                                                     headers: route.headers)
-                payload = Data(rewritten.utf8)
-                contentType = "application/vnd.apple.mpegurl"
-            } else {
-                payload = Self.stripDisguise(data)
-                contentType = http.mimeType
-                    ?? Self.guessType(route.url)
+                  (200..<300).contains(http.statusCode) else {
+                self?.recordProxySample(
+                    url: route.url, stage: .playlist,
+                    seconds: Date().timeIntervalSince(startedAt),
+                    outcome: (error as? URLError)?.code == .timedOut
+                        ? .timeout : .instantFail)
+                return
             }
+            guard let text = String(data: data, encoding: .utf8) else { return }
+            let base = http.url ?? url
+            let rewritten = self.rewritePlaylist(text, base: base,
+                                                 headers: route.headers)
+            payload = Data(rewritten.utf8)
             ok = true
+            self.recordProxySample(
+                url: route.url, stage: .playlist,
+                seconds: Date().timeIntervalSince(startedAt),
+                outcome: .success)
         }
         task.resume()
-        _ = sem.wait(timeout: .now() + 35)
+        // This wait is confined to the proxy's own concurrent
+        // queue (connections are started and handled there) —
+        // it can never run on the main thread or the MainActor,
+        // which is the path G-EXIT-4 governs. It exists only to
+        // give the synchronous respond-after-fetch shape a bound.
+        // Serve-wait 35 s → 90 s (LATENCY-AUDIT §6 stopgap —
+        // the real fix for segments is the streaming path;
+        // this bound now only guards playlists).
+        _ = sem.wait(timeout: .now() + 90)
         if ok {
-            respond(conn, status: 200, type: contentType, body: payload)
+            respond(conn, status: 200, type: "application/vnd.apple.mpegurl",
+                    body: payload)
         } else {
             respond(conn, status: 502, type: "text/plain", body: Data())
         }
+    }
+
+    // MARK: - Segment streaming
+
+    /// State of one in-flight streamed segment fetch. All
+    /// mutation happens on the stream session's serial
+    /// delegate queue (registration included — see
+    /// startStream), so no lock is needed.
+    private final class StreamState {
+        let conn: NWConnection
+        let url: URL
+        let startedAt = Date()
+        var buffer = Data()
+        var offset: Int?
+        var headSent = false
+        var closed = false
+        init(conn: NWConnection, url: URL) {
+            self.conn = conn
+            self.url = url
+        }
+    }
+
+    /// The streaming session's delegate: a pure forwarder —
+    /// state lives in StreamState, logic in the proxy's
+    /// stream* methods.
+    private final class StreamDelegate: NSObject, URLSessionDataDelegate {
+        weak var proxy: JoeProxy?
+        var states: [Int: StreamState] = [:]
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            guard let st = states[dataTask.taskIdentifier] else {
+                completionHandler(.cancel)
+                return
+            }
+            if let http = response as? HTTPURLResponse,
+               !(200..<300).contains(http.statusCode) {
+                proxy?.streamRefused(st)
+                completionHandler(.cancel)
+                return
+            }
+            completionHandler(.allow)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive data: Data) {
+            guard let st = states[dataTask.taskIdentifier] else { return }
+            proxy?.streamAppend(st, data: data)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didCompleteWithError error: Error?) {
+            guard let st = states.removeValue(forKey: task.taskIdentifier)
+            else { return }
+            proxy?.streamComplete(st, error: error)
+        }
+    }
+
+    private func startStream(_ conn: NWConnection, route: Route, url: URL) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        for (k, v) in route.headers { request.setValue(v, forHTTPHeaderField: k) }
+        if route.headers["User-Agent"] == nil {
+            request.setValue(JoeHTTP.userAgent, forHTTPHeaderField: "User-Agent")
+        }
+        let st = StreamState(conn: conn, url: url)
+        let task = streamSession.dataTask(with: request)
+        // Registration is enqueued on the same serial queue
+        // the delegate callbacks arrive on, BEFORE resume() —
+        // so no callback for this task can be processed ahead
+        // of its state existing.
+        streamQueue.addOperation { [weak self] in
+            self?.streamDelegate.states[task.taskIdentifier] = st
+        }
+        task.resume()
+    }
+
+    /// Upstream refused (non-2xx) before a single byte was
+    /// forwarded: answer 502 exactly like the old path did.
+    fileprivate func streamRefused(_ st: StreamState) {
+        guard !st.closed else { return }
+        st.closed = true
+        recordProxySample(url: st.url.absoluteString, stage: .segment,
+                          seconds: Date().timeIntervalSince(st.startedAt),
+                          outcome: .instantFail)
+        respond(st.conn, status: 502, type: "text/plain", body: Data())
+    }
+
+    fileprivate func streamAppend(_ st: StreamState, data: Data) {
+        guard !st.closed else { return }
+        if st.headSent {
+            st.conn.send(content: data, completion: .contentProcessed { _ in })
+            return
+        }
+        st.buffer.append(data)
+        streamDecide(st)
+    }
+
+    /// Once the payload offset is provable (streamOffset) AND
+    /// enough stripped bytes are in hand to type the payload,
+    /// send the head and everything buffered past the prefix;
+    /// later chunks flow straight through. The response is
+    /// close-delimited (no Content-Length — the length is
+    /// unknowable while streaming; Connection: close + the
+    /// final isComplete send frame the body).
+    private func streamDecide(_ st: StreamState) {
+        if st.offset == nil {
+            guard let off = Self.streamOffset(forHead: st.buffer) else { return }
+            st.offset = off
+        }
+        guard let off = st.offset else { return }
+        // detectContentType reads up to byte 188 of the
+        // payload (its TS sync check) — hold the head until
+        // that much stripped data exists. A body that ends
+        // sooner is finished whole by streamComplete instead.
+        guard st.buffer.count >= off + 189 else { return }
+        let head = Data(st.buffer.dropFirst(off).prefix(512))
+        // Conformance (Team 4), unchanged: the Content-Type
+        // comes from the DETECTED payload, never the upstream
+        // response — disguised segments arrive typed
+        // image/png, and serving that to AVPlayer is a
+        // guaranteed failure.
+        let type = Self.detectContentType(head, url: st.url.absoluteString)
+        var responseHead = "HTTP/1.1 200 OK\r\n"
+        responseHead += "Content-Type: \(type)\r\n"
+        responseHead += "Connection: close\r\n\r\n"
+        st.conn.send(content: Data(responseHead.utf8),
+                     completion: .contentProcessed { _ in })
+        let body = Data(st.buffer.dropFirst(off))
+        st.buffer = Data()
+        st.headSent = true
+        if !body.isEmpty {
+            st.conn.send(content: body, completion: .contentProcessed { _ in })
+        }
+        // The segment stage's health sample is its time to
+        // first byte — the quantity the audit's envelopes are
+        // built from — taken at the moment AVPlayer gets it.
+        recordProxySample(url: st.url.absoluteString, stage: .segment,
+                          seconds: Date().timeIntervalSince(st.startedAt),
+                          outcome: .success)
+    }
+
+    fileprivate func streamComplete(_ st: StreamState, error: Error?) {
+        guard !st.closed else { return }
+        st.closed = true
+        if let error {
+            if st.headSent {
+                // Bytes already flowed and the first-byte
+                // sample stands (the host DID answer). Close;
+                // AVPlayer treats the truncated segment as a
+                // failure and the director's ladder owns what
+                // happens next.
+                st.conn.cancel()
+            } else {
+                recordProxySample(
+                    url: st.url.absoluteString, stage: .segment,
+                    seconds: Date().timeIntervalSince(st.startedAt),
+                    outcome: (error as? URLError)?.code == .timedOut
+                        ? .timeout : .instantFail)
+                respond(st.conn, status: 502, type: "text/plain", body: Data())
+            }
+            return
+        }
+        if st.headSent {
+            st.conn.send(content: nil, contentContext: .defaultMessage,
+                         isComplete: true,
+                         completion: .contentProcessed { _ in st.conn.cancel() })
+            return
+        }
+        // The whole body arrived before the streaming
+        // decision could fire (a small resource: a subtitle,
+        // a key, a tiny segment) — answer through the classic
+        // whole-body path, byte-identical to the
+        // pre-streaming proxy.
+        let payload = Self.stripDisguise(st.buffer)
+        let type = Self.detectContentType(payload, url: st.url.absoluteString)
+        recordProxySample(url: st.url.absoluteString, stage: .segment,
+                          seconds: Date().timeIntervalSince(st.startedAt),
+                          outcome: .success)
+        respond(st.conn, status: 200, type: type, body: payload)
+    }
+
+    /// The streaming twin of stripDisguise: given the bytes
+    /// buffered so far, return the payload offset when it is
+    /// PROVABLY the offset stripDisguise would choose for the
+    /// finished body — or nil when more bytes must arrive
+    /// before that is decidable.
+    ///
+    /// Equivalence: stripDisguise (1) passes non-PNG bodies
+    /// through untouched — decidable from the first 8 bytes;
+    /// (2) for PNG bodies scans the first 16 KB for an
+    /// MPEG-TS sync triple and returns the FIRST — a triple
+    /// at offset i is confirmable the moment bytes i…i+376
+    /// are in hand, and every earlier offset has by then been
+    /// scanned and rejected, so the first confirmable triple
+    /// is final; (3) only when NO triple exists in the window
+    /// does it fall to the ftyp / WebVTT searches — those
+    /// verdicts are deferred here until the whole window has
+    /// arrived, exactly so the precedence can never flip.
+    private static func streamOffset(forHead buffer: Data) -> Int? {
+        let pngSig: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        guard buffer.count >= pngSig.count else { return nil }
+        let bytes = [UInt8](buffer)
+        guard bytes.prefix(pngSig.count).elementsEqual(pngSig) else { return 0 }
+        let limit = min(bytes.count, 16384)
+        if bytes.count > 376 {
+            var i = 0
+            while i + 376 < limit {
+                if bytes[i] == 0x47 && bytes[i + 188] == 0x47
+                    && bytes[i + 376] == 0x47 {
+                    return i
+                }
+                i += 1
+            }
+        }
+        guard bytes.count >= 16384 else { return nil }
+        if let idx = find([0x66, 0x74, 0x79, 0x70], in: bytes, limit: limit),
+           idx >= 4 {
+            return idx - 4
+        }
+        if let idx = find([0x57, 0x45, 0x42, 0x56, 0x54, 0x54],
+                          in: bytes, limit: limit) {
+            return idx
+        }
+        return 0
+    }
+
+    // MARK: - SourceHealth attribution
+
+    /// The provider family a proxied URL belongs to, read off
+    /// its host — the route table carries no provider field.
+    /// Only hosts that really flow through this proxy are
+    /// attributed (audit §5.1); anything else (an RD CDN
+    /// host, say) is not recorded. KK never appears here:
+    /// its candidates play direct, unproxied.
+    private static func healthProvider(for urlString: String) -> String? {
+        guard let host = URL(string: urlString)?.host?.lowercased()
+        else { return nil }
+        if host == "streamvsmov.com" || host.hasSuffix(".streamvsmov.com") {
+            return Providers.VS
+        }
+        if host.hasSuffix("blogcdn.site") || host.hasSuffix("cachevideo.com") {
+            return Providers.TP
+        }
+        if host.hasSuffix("tiktokcdn.com") || host.hasSuffix("film4k.net") {
+            return Providers.F4K
+        }
+        return nil
+    }
+
+    fileprivate func recordProxySample(url: String, stage: SourceHealth.Stage,
+                                       seconds: Double,
+                                       outcome: SourceHealth.Outcome) {
+        guard let provider = Self.healthProvider(for: url) else { return }
+        SourceHealth.record(provider: provider, stage: stage, url: url,
+                            seconds: seconds, outcome: outcome)
     }
 
     private func respond(_ conn: NWConnection, status: Int, type: String, body: Data) {
@@ -272,6 +606,28 @@ final class JoeProxy {
             }
         }
         return nil
+    }
+
+    /// Content-Type from the payload's OWN signature (Team 4
+    /// conformance). Runs on the STRIPPED bytes, so it sees the
+    /// real payload start: MPEG-TS sync, an fMP4 "ftyp" box, a
+    /// WebVTT header, or a playlist. Falls back to the URL
+    /// extension guess — never to the upstream response's type.
+    static func detectContentType(_ data: Data, url: String) -> String {
+        if data.starts(with: [0x23, 0x45, 0x58, 0x54, 0x4D, 0x33, 0x55]) {
+            return "application/vnd.apple.mpegurl"  // "#EXTM3U"
+        }
+        if data.count > 188, data[0] == 0x47, data[188] == 0x47 {
+            return "video/mp2t"
+        }
+        if data.count > 8,
+           data[4] == 0x66, data[5] == 0x74, data[6] == 0x79, data[7] == 0x70 {
+            return "video/mp4"  // "ftyp" at box offset 4
+        }
+        if data.starts(with: [0x57, 0x45, 0x42, 0x56, 0x54, 0x54]) {
+            return "text/vtt"  // "WEBVTT"
+        }
+        return guessType(url)
     }
 
     private static func guessType(_ url: String) -> String {

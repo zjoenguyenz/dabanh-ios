@@ -21,21 +21,24 @@ struct JoeSettingsView: View {
         ? TorrentSettings.opensubtitlesDefault : TorrentSettings.subAddonURL
     @State private var tmdbKey: String = UserDefaults.standard.string(forKey: "tmdb_api_key") ?? ""
     @State private var savedTick = false
+    @State private var probeResults: [SourceProbe.Result] = []
+    @State private var probing = false
     @FocusState private var focusedField: String?
+    @FocusState private var probeFocused: Bool
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 30) {
+            VStack(alignment: .leading, spacing: 40) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Cài đặt")
-                        .font(.system(size: 44, weight: .heavy))
+                        .font(.system(size: 56, weight: .heavy))
                         .foregroundStyle(.white)
                     Text(TorrentSettings.isConfigured
                          ? "Nguồn Torrent: đã cấu hình ✓"
                          : "Nguồn Torrent: chưa cấu hình — mục Phim Torrent cần ít nhất một mục dưới đây")
-                        .font(.system(size: 21))
+                        .font(.system(size: 25))
                         .foregroundStyle(TorrentSettings.isConfigured
-                                         ? .green : .orange)
+                                         ? JoeTheme.okGreen : .orange)
                 }
 
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
@@ -51,25 +54,43 @@ struct JoeSettingsView: View {
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
                 field(title: "TMDB API Key",
-                      hint: "Tuỳ chọn — bật ảnh nền + diễn viên TMDB",
+                      hint: "Chỉ nhập khi anh muốn dùng key TMDB riêng thay cho key tích hợp sẵn trong app.",
                       text: $tmdbKey, id: "tmdb", secure: true)
+                // C-13 / §7.8: the field starts empty on a fresh
+                // install even though TMDB is already active via
+                // the bundled key — v1.8's "Tuỳ chọn" hint made it
+                // read as "not set up". Say which key is live.
+                if !TMDBClient.apiKey.isEmpty {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(JoeTheme.okGreen)
+                            .frame(width: 12, height: 12)
+                        Text(tmdbKey.trimmingCharacters(in: .whitespaces).isEmpty
+                             ? "TMDB: đang dùng key tích hợp sẵn ✓"
+                             : "TMDB: đang dùng key anh nhập ✓")
+                            .font(.system(size: 25))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
 
                 HStack(spacing: 14) {
                     if savedTick {
                         Text("Đã lưu ✓")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.green)
+                            .font(.system(size: 25))
+                            .foregroundStyle(JoeTheme.okGreen)
                     } else {
                         Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
-                            .font(.system(size: 20))
-                            .foregroundStyle(.white.opacity(0.45))
+                            .font(.system(size: 25))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
 
                 Text("Trên Apple TV không có công tắc hầm trong app: đường truyền Việt Nam do profile Sing-box của hệ thống đảm nhiệm. Token chỉ lưu trong app này trên Apple TV của anh, không gửi đi đâu ngoài dịch vụ tương ứng.")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .font(.system(size: 25))
+                    .foregroundStyle(.white.opacity(0.7))
                     .frame(maxWidth: 1200, alignment: .leading)
+
+                diagnosticsBlock
             }
         }
         .modifier(JoeSettingsMoveTrap(enabled: focusedField == "addon") { direction in
@@ -94,7 +115,7 @@ struct JoeSettingsView: View {
                        text: Binding<String>, id: String, secure: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.system(size: 26, weight: .bold))
+                .font(.system(size: 29, weight: .bold))
                 .foregroundStyle(.white)
             Group {
                 if secure {
@@ -104,22 +125,94 @@ struct JoeSettingsView: View {
                 }
             }
             .textFieldStyle(.plain)
-            .font(.system(size: 24))
+            .font(.system(size: 29))
             .foregroundStyle(.white)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 15)
-            .background(RoundedRectangle(cornerRadius: 13)
-                .fill(Color.white.opacity(0.10)))
-            .overlay(RoundedRectangle(cornerRadius: 13)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .background(RoundedRectangle(cornerRadius: 14)
+                .fill(Color.white.opacity(0.07)))
+            .overlay(RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(focusedField == id ? joeFocusViolet : Color.clear,
-                              lineWidth: 2.5))
+                              lineWidth: 4))
             .frame(maxWidth: 1250)
             .focused($focusedField, equals: id)
+            .focusEffectDisabled(true)
             .onSubmit { save() }
             Text(hint)
-                .font(.system(size: 19))
-                .foregroundStyle(.white.opacity(0.45))
+                .font(.system(size: 25))
+                .foregroundStyle(.white.opacity(0.7))
                 .frame(maxWidth: 1250, alignment: .leading)
+        }
+    }
+
+    /// Source diagnostics (§7.9, board contract): one lightweight
+    /// probe per provider, run ON THIS device, results rendered
+    /// in place — the block exists so a dead route shows a named
+    /// verdict on the TV instead of a silent spinner elsewhere.
+    /// Focus stays on the button; result rows are not focusable.
+    @ViewBuilder
+    private var diagnosticsBlock: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Kiểm tra nguồn phim")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(.white)
+            Text("Đo từng nguồn phim ngay trên máy này.")
+                .font(.system(size: 25))
+                .foregroundStyle(.white.opacity(0.7))
+            if probing {
+                HStack(spacing: 14) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("Đang kiểm tra…")
+                        .font(.system(size: 29))
+                        .foregroundStyle(.white)
+                }
+            } else if !probeResults.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(probeResults.enumerated()), id: \.offset) { _, result in
+                        HStack(spacing: 12) {
+                            Circle()
+                                .fill(result.ok
+                                      ? JoeTheme.okGreen
+                                      : JoeTheme.accentRed)
+                                .frame(width: 16, height: 16)
+                            Text(result.name)
+                                .font(.system(size: 29))
+                                .foregroundStyle(.white)
+                            Spacer()
+                            Text("\(result.millis) ms")
+                                .font(.system(size: 25))
+                                .foregroundStyle(.white.opacity(0.7))
+                            Text(result.note)
+                                .font(.system(size: 25))
+                                .foregroundStyle(result.ok ? .white.opacity(0.7) : .orange)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .frame(height: 60)
+                    }
+                }
+            }
+            Button {
+                probing = true
+                Task {
+                    probeResults = await SourceProbe.run()
+                    probing = false
+                }
+            } label: {
+                Text("Kiểm tra ngay")
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 36)
+                    .padding(.vertical, 16)
+                    .background(Capsule().fill(JoeTheme.accentViolet))
+                    .overlay(JoeFocusRing(shape: Capsule()))
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled(true)
+            .focused($probeFocused)
+            .scaleEffect(probeFocused ? 1.05 : 1.0)
+            .disabled(probing)
         }
     }
 

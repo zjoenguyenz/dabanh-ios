@@ -1,56 +1,133 @@
 import Foundation
 
 /// KKPhim public API client — port of the Android KkApi, host
-/// failover included. Three hosts serve the identical KKPhim-format
-/// catalogue and are tried in order until one answers with VALID
-/// catalogue JSON:
+/// failover included. Two hosts serve the identical KKPhim-format
+/// catalogue; every call RACES them in parallel and the first
+/// SHAPE-VALID answer wins (the losers are cancelled):
 ///   (a) https://phimapi.com               — "/v1/api/..." flavour
 ///   (b) https://free.cryboiz.workers.dev  — bare-path flavour
-///   (c) https://free2.phim4k.dev/api      — bare-path flavour
-/// The first host returning valid JSON wins for the session and is
-/// tried first on later calls; every call still falls through the
-/// remaining hosts. "Valid" is strict: the body must parse AND carry
-/// the expected container (items array for lists/search, a movie
-/// object for detail) — a {"status":false} stub does not count.
+/// "Valid" is strict: the body must parse AND carry the expected
+/// container (items array for lists/search, a movie object for
+/// detail) — a {"status":false} stub does not count.
+///
+/// The pre-v1.9 SEQUENTIAL failover (try in order, 25 s each) is
+/// gone: on a hanging route one call could burn 75 s, and with
+/// 17 KK jobs at launch that was the endless-spinner machine.
+///
+/// Host (c) https://free2.phim4k.dev was REMOVED in v1.9 —
+/// measured 2026-11-15 from the VM with the app's User-Agent:
+/// every list AND detail path variant tried (/api/danh-sach/…,
+/// bare /danh-sach/…, /api/v1/api/…, /v1/api/…, /api/phim/{slug},
+/// /phim/{slug}) returns the {"status":false} 404 stub. It could
+/// only ever add a wasted attempt. (An earlier version of this
+/// comment claimed all three hosts were verified; that claim was
+/// stale and is corrected here.)
 ///
 /// Envelopes absorbed (measured live on Android, 2026-11-13):
 ///   (a) lists: {data:{items:[…], APP_DOMAIN_CDN_IMAGE}}
 ///       (newest: {items:[…]} at root, absolute posters)
-///   (b/c) lists: {status, items:[…]} at root
+///   (b) lists: {status, items:[…]} at root
 ///   (a) detail: {data:{item:{…, episodes:[…]}}}
-///   (b/c) detail: {movie:{…}, episodes:[…]} — episodes may carry
+///   (b) detail: {movie:{…}, episodes:[…]} — episodes may carry
 ///       the stream in a "link" field instead of "link_m3u8".
 enum KkClient {
     private static let hosts = [
         "https://phimapi.com",
         "https://free.cryboiz.workers.dev",
-        "https://free2.phim4k.dev/api",
     ]
     private static let cdnDefault = "https://phimimg.com"
-    /// Session winner; -1 = unprobed. A fresh app start re-probes.
-    private static var activeHost = -1
+    /// Per-request budget for catalogue (list/search) calls.
+    private static let listTimeout: TimeInterval = 12
+    /// Tuned detail cap (LATENCY-AUDIT §6): 25 s → 10 s
+    /// (healthy detail max 0.91 on host A). Applied PER HOST
+    /// inside the race via SourceHealth — each host carries
+    /// its own stats key and its own dynamic fuse.
+    private static let detailCap: TimeInterval = 10
 
-    // MARK: - Host-failover fetch
+    /// Session winner of the most recent race; -1 = none yet.
+    /// Diagnostics only — every call races all hosts, so no call
+    /// depends on this value. Lock-guarded (C-15): races finish
+    /// concurrently and the pre-v1.9 plain static var was
+    /// unsynchronised shared mutable state.
+    private static let hostLock = NSLock()
+    private static var _activeHost = -1
+    static var activeHost: Int {
+        hostLock.lock()
+        defer { hostLock.unlock() }
+        return _activeHost
+    }
+    private static func setActiveHost(_ h: Int) {
+        hostLock.lock()
+        _activeHost = h
+        hostLock.unlock()
+    }
 
+    // MARK: - Host-race fetch
+
+    /// Race every host in parallel; the first shape-valid body
+    /// wins and the losers are cancelled. A fast-but-invalid
+    /// answer (the {"status":false} stub class) never wins — it
+    /// is recorded as an error and the race runs on. When every
+    /// host fails, the last error received is thrown.
     private static func fetchJSON(path: (Bool) -> String,
-                                  shape: ([String: Any]) -> Bool) async throws -> [String: Any] {
-        var order: [Int] = []
-        if activeHost >= 0 { order.append(activeHost) }
-        for h in hosts.indices where h != activeHost { order.append(h) }
-        var lastError: Error = URLError(.cannotConnectToHost)
-        for h in order {
-            do {
-                let root = try await JoeHTTP.getJSON(hosts[h] + path(h != 0))
-                if shape(root) {
-                    activeHost = h
-                    return root
+                                  shape: ([String: Any]) -> Bool,
+                                  timeout: TimeInterval = 25,
+                                  health: (provider: String,
+                                           stage: SourceHealth.Stage,
+                                           cap: TimeInterval)? = nil)
+        async throws -> [String: Any] {
+        let outcome: (root: [String: Any]?, error: Error?) = await withTaskGroup(
+            of: (Int, [String: Any]?, Error?).self
+        ) { group in
+            for h in hosts.indices {
+                group.addTask {
+                    let url = hosts[h] + path(h != 0)
+                    do {
+                        if let health {
+                            // Predictor-wired leg (detail):
+                            // each host races under its OWN
+                            // SourceHealth fuse and records its
+                            // own sample. The shape check sits
+                            // inside the measured closure, so a
+                            // fast-but-invalid stub answer
+                            // records as an instant-fail, never
+                            // as a healthy call. A cancelled
+                            // race loser records nothing.
+                            let root = try await SourceHealth.run(
+                                provider: health.provider, stage: health.stage,
+                                url: url, cap: health.cap
+                            ) { budget in
+                                let r = try await JoeHTTP.getJSON(url, timeout: budget)
+                                guard shape(r) else {
+                                    throw URLError(.badServerResponse)
+                                }
+                                return r
+                            }
+                            return (h, root, nil)
+                        }
+                        let root = try await JoeHTTP.getJSON(url, timeout: timeout)
+                        return shape(root)
+                            ? (h, root, nil)
+                            : (h, nil, URLError(.badServerResponse))
+                    } catch {
+                        return (h, nil, error)
+                    }
                 }
-                lastError = URLError(.badServerResponse)
-            } catch {
-                lastError = error
             }
+            var winner: [String: Any]? = nil
+            var lastError: Error = URLError(.cannotConnectToHost)
+            for await (h, root, error) in group {
+                if let error { lastError = error }
+                if let root, winner == nil {
+                    winner = root
+                    setActiveHost(h)
+                    group.cancelAll()
+                }
+            }
+            return (winner, lastError)
         }
-        throw lastError
+        if let root = outcome.root { return root }
+        throw outcome.error ?? URLError(.cannotConnectToHost)
     }
 
     private static func itemsArray(_ root: [String: Any]) -> [[String: Any]]? {
@@ -65,55 +142,81 @@ enum KkClient {
 
     // MARK: - Endpoints
 
+    // List endpoints come in raw + parse pairs: the raw half
+    // returns the winning host's response body (PhimStore caches
+    // it verbatim and re-parses it on the next launch), the
+    // composed half is the pre-v1.9 API. Every list endpoint now
+    // honours the bare flag for BOTH hosts — pre-v1.9 newest()
+    // silently ignored it and sent the bare path to the
+    // /v1/api host too (it happened to work; measured 2026-11-15
+    // both flavours answer on phimapi.com, but consistency is
+    // what keeps a host's retirement of one flavour from
+    // silently breaking a rail).
+
+    static func newestRaw(page: Int) async throws -> [String: Any] {
+        try await fetchJSON(
+            path: { bare in
+                bare ? "/danh-sach/phim-moi-cap-nhat?page=\(page)"
+                     : "/v1/api/danh-sach/phim-moi-cap-nhat?page=\(page)"
+            },
+            shape: { itemsArray($0) != nil },
+            timeout: listTimeout)
+    }
+
     static func newest(page: Int) async throws -> [Movie] {
-        let root = try await fetchJSON(
-            path: { _ in "/danh-sach/phim-moi-cap-nhat?page=\(page)" },
-            shape: { itemsArray($0) != nil })
-        return parseItems(root)
+        parseItems(try await newestRaw(page: page))
     }
 
     /// Typed list rails: phim-bo, phim-le, hoat-hinh, tv-shows…
-    static func listByType(_ type: String, page: Int) async throws -> [Movie] {
-        let root = try await fetchJSON(
+    static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
+        try await fetchJSON(
             path: { bare in
                 bare ? "/danh-sach/\(type)?page=\(page)"
                      : "/v1/api/danh-sach/\(type)?page=\(page)"
             },
-            shape: { itemsArray($0) != nil })
-        return parseItems(root)
+            shape: { itemsArray($0) != nil },
+            timeout: listTimeout)
     }
 
-    static func listByGenre(_ slug: String, page: Int) async throws -> [Movie] {
-        let root = try await fetchJSON(
+    static func listByType(_ type: String, page: Int) async throws -> [Movie] {
+        parseItems(try await listByTypeRaw(type, page: page))
+    }
+
+    static func listByGenreRaw(_ slug: String, page: Int) async throws -> [String: Any] {
+        try await fetchJSON(
             path: { bare in
                 bare ? "/the-loai/\(slug)?page=\(page)"
                      : "/v1/api/the-loai/\(slug)?page=\(page)"
             },
-            shape: { itemsArray($0) != nil })
-        return parseItems(root)
+            shape: { itemsArray($0) != nil },
+            timeout: listTimeout)
+    }
+
+    static func listByGenre(_ slug: String, page: Int) async throws -> [Movie] {
+        parseItems(try await listByGenreRaw(slug, page: page))
+    }
+
+    static func listByCountryRaw(_ slug: String, page: Int,
+                                 limit: Int? = nil) async throws -> [String: Any] {
+        let lim = limit.map { "&limit=\($0)" } ?? ""
+        return try await fetchJSON(
+            path: { bare in
+                bare ? "/quoc-gia/\(slug)?page=\(page)\(lim)"
+                     : "/v1/api/quoc-gia/\(slug)?page=\(page)\(lim)"
+            },
+            shape: { itemsArray($0) != nil },
+            timeout: listTimeout)
     }
 
     static func listByCountry(_ slug: String, page: Int) async throws -> [Movie] {
-        let root = try await fetchJSON(
-            path: { bare in
-                bare ? "/quoc-gia/\(slug)?page=\(page)"
-                     : "/v1/api/quoc-gia/\(slug)?page=\(page)"
-            },
-            shape: { itemsArray($0) != nil })
-        return parseItems(root)
+        parseItems(try await listByCountryRaw(slug, page: page))
     }
 
     /// Country listing with an explicit page size — the dedicated
     /// Vietnam block pulls 48 in one call so it can split series /
     /// single rails client-side from the items' `type` field.
     static func listByCountry(_ slug: String, page: Int, limit: Int) async throws -> [Movie] {
-        let root = try await fetchJSON(
-            path: { bare in
-                bare ? "/quoc-gia/\(slug)?page=\(page)&limit=\(limit)"
-                     : "/v1/api/quoc-gia/\(slug)?page=\(page)&limit=\(limit)"
-            },
-            shape: { itemsArray($0) != nil })
-        return parseItems(root)
+        parseItems(try await listByCountryRaw(slug, page: page, limit: limit))
     }
 
     static func search(_ keyword: String) async throws -> [Movie] {
@@ -122,14 +225,16 @@ enum KkClient {
             path: { bare in
                 bare ? "/tim-kiem?keyword=\(q)" : "/v1/api/tim-kiem?keyword=\(q)"
             },
-            shape: { itemsArray($0) != nil })
+            shape: { itemsArray($0) != nil },
+            timeout: listTimeout)
         return parseItems(root)
     }
 
     static func detail(_ slug: String) async throws -> Detail {
         let root = try await fetchJSON(
             path: { bare in bare ? "/phim/\(slug)" : "/v1/api/phim/\(slug)" },
-            shape: { detailItem($0) != nil })
+            shape: { detailItem($0) != nil },
+            health: (Providers.KK, .detail, detailCap))
         var d = Detail()
         guard let item = detailItem(root) else { return d }
         let cdn = JSON.obj(root, "data").flatMap { JSON.str($0, "APP_DOMAIN_CDN_IMAGE") }
@@ -168,7 +273,9 @@ enum KkClient {
 
     // MARK: - Parsing
 
-    private static func parseItems(_ root: [String: Any]) -> [Movie] {
+    /// Internal (not private) so Providers.parseList can re-parse
+    /// a cached raw response without a network call.
+    static func parseItems(_ root: [String: Any]) -> [Movie] {
         let cdnRaw = JSON.obj(root, "data").flatMap { JSON.str($0, "APP_DOMAIN_CDN_IMAGE") }
         let cdn = (cdnRaw?.isEmpty == false) ? cdnRaw : nil
         return (itemsArray(root) ?? []).compactMap { o in

@@ -1,16 +1,18 @@
 import SwiftUI
 
-/// Merged search across KKPhim + Film4K + VSMOV: all providers
-/// answer, results are listed together with provider badges (the
-/// Android behaviour — a film carried by several shows once per
-/// source, so the owner picks the source himself).
+/// Merged search across KKPhim + Film4K + VSMOV + Tủ Phim: all
+/// providers answer, results are listed together with provider
+/// badges (the Android behaviour — a film carried by several
+/// shows once per source, so the owner picks the source himself).
 struct JoeSearchView: View {
     @EnvironmentObject private var nav: JoeNavigator
     @State private var query = ""
     @State private var results: [Movie] = []
     @State private var searching = false
     @State private var searched = false
+    @State private var searchFailed = false
     @FocusState private var focusedMovie: Movie.ID?
+    @FocusState private var retryFocused: Bool
 
     /// The top row's three focusable elements, in visual order —
     /// the conditional move trap routes among them explicitly.
@@ -22,71 +24,110 @@ struct JoeSearchView: View {
             HStack(spacing: 18) {
                 TextField("Tên phim…", text: $query)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 28))
+                    .font(.system(size: 29))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
                     .background(RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.white.opacity(0.10)))
+                        .fill(Color.white.opacity(0.07)))
                     .overlay(RoundedRectangle(cornerRadius: 14)
                         .strokeBorder(topFocus == .field ? joeFocusViolet : Color.clear,
-                                      lineWidth: 2.5))
+                                      lineWidth: 4))
                     .frame(width: 900)
                     .focused($topFocus, equals: .field)
+                    .focusEffectDisabled(true)
                     .onSubmit { runSearch() }
                 Button {
                     runSearch()
                 } label: {
                     Text(searching ? "Đang tìm…" : "Tìm")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: 29, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
                         .background(Capsule().fill(topFocus == .search
                                                    ? JoeTheme.accentViolet
-                                                   : JoeTheme.accentViolet.opacity(0.45)))
+                                                   : JoeTheme.surface))
                         .overlay(Capsule().strokeBorder(topFocus == .search ? joeFocusViolet : Color.clear,
-                                                        lineWidth: 2.5))
-                        .scaleEffect(topFocus == .search ? 1.06 : 1.0)
+                                                        lineWidth: 4))
+                        .scaleEffect(topFocus == .search ? 1.05 : 1.0)
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled(true)
                 .focused($topFocus, equals: .search)
                 .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button {
                     nav.searchOpen = false
                 } label: {
                     Text("⟵ Quay lại")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: 29, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 16)
                         .background(Capsule().fill(topFocus == .back
                                                    ? JoeTheme.accentViolet
-                                                   : JoeTheme.accentViolet.opacity(0.45)))
+                                                   : JoeTheme.surface))
                         .overlay(Capsule().strokeBorder(topFocus == .back ? joeFocusViolet : Color.clear,
-                                                        lineWidth: 2.5))
-                        .scaleEffect(topFocus == .back ? 1.06 : 1.0)
+                                                        lineWidth: 4))
+                        .scaleEffect(topFocus == .back ? 1.05 : 1.0)
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled(true)
                 .focused($topFocus, equals: .back)
             }
             .modifier(JoeSearchMoveTrap(enabled: topFocus != nil) { direction in
                 topMove(direction)
             })
-            if searched && results.isEmpty && !searching {
-                Text("Không thấy phim nào với từ khoá này.")
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.6))
+            // §8: searching, failure and no-results are three
+            // DIFFERENT surfaces. v1.8 merged the last two into
+            // one line, so a dead network read as "no such film".
+            if searching {
+                ProgressView("Đang tìm…")
+                    .font(.system(size: 29))
+                    .foregroundStyle(.white)
+                    .tint(.white)
+            } else if searchFailed && results.isEmpty {
+                VStack(alignment: .leading, spacing: 16) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.orange)
+                    Text("Không tải được kết quả tìm kiếm.")
+                        .font(.system(size: 29, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Các nguồn phim đều lỗi. Kiểm tra mạng rồi thử lại.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(.white.opacity(0.7))
+                    Button { runSearch() } label: {
+                        Text("Thử lại")
+                            .font(.system(size: 29, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 36)
+                            .padding(.vertical, 16)
+                            .background(Capsule().fill(JoeTheme.accentViolet))
+                            .overlay(JoeFocusRing(shape: Capsule()))
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled(true)
+                    .focused($retryFocused)
+                    .scaleEffect(retryFocused ? 1.05 : 1.0)
+                    .modifier(JoeSearchMoveTrap(enabled: retryFocused) { direction in
+                        if direction == .up { topFocus = .field }
+                    })
+                }
+            } else if searched && results.isEmpty {
+                Text("Không tìm thấy phim nào.")
+                    .font(.system(size: 29))
+                    .foregroundStyle(.white.opacity(0.7))
             }
             ScrollView(.vertical, showsIndicators: false) {
                 // Fixed 6 columns (was .adaptive(minimum: 240),
                 // whose column count the code cannot enumerate) so
                 // result focus routing is exact arithmetic — see
-                // resultMove. PosterCard is a fixed 218 wide, so
-                // the flexible columns render as before.
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 26),
+                // resultMove. PosterCard art is 240 wide (§7.2),
+                // so the flexible columns render as before.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28),
                                          count: 6),
-                          alignment: .leading, spacing: 30) {
+                          alignment: .leading, spacing: 40) {
                     ForEach(results) { movie in
                         Button { nav.movie = MovieRoute(
                             provider: movie.provider, slug: movie.slug,
@@ -97,10 +138,11 @@ struct JoeSearchView: View {
                                 posterURL: movie.posterURL,
                                 meta: movie.cardMeta,
                                 badge: Providers.badge(movie.provider),
-                                focused: focusedMovie == movie.id)
+                                focused: focusedMovie == "search|" + movie.id)
                         }
                         .buttonStyle(.plain)
-                        .focused($focusedMovie, equals: movie.id)
+                        .focusEffectDisabled(true)
+                        .focused($focusedMovie, equals: "search|" + movie.id)
                         .onMoveCommand { direction in
                             resultMove(direction, from: movie)
                         }
@@ -138,7 +180,11 @@ struct JoeSearchView: View {
         case .up:
             nav.requestFocus(.pills)
         case .down:
-            if let first = results.first { focusedMovie = first.id }
+            if let first = results.first {
+                focusedMovie = "search|" + first.id
+            } else if searchFailed {
+                retryFocused = true
+            }
         case .left:
             switch topFocus {
             case .search: topFocus = .field
@@ -167,20 +213,20 @@ struct JoeSearchView: View {
         let columns = 6
         switch direction {
         case .left:
-            if idx % columns > 0 { focusedMovie = results[idx - 1].id }
+            if idx % columns > 0 { focusedMovie = "search|" + results[idx - 1].id }
         case .right:
             if idx + 1 < results.count, idx % columns < columns - 1 {
-                focusedMovie = results[idx + 1].id
+                focusedMovie = "search|" + results[idx + 1].id
             }
         case .up:
             if idx >= columns {
-                focusedMovie = results[idx - columns].id
+                focusedMovie = "search|" + results[idx - columns].id
             } else {
                 topFocus = .field
             }
         case .down:
             if idx + columns < results.count {
-                focusedMovie = results[idx + columns].id
+                focusedMovie = "search|" + results[idx + columns].id
             }
         @unknown default:
             break
@@ -191,6 +237,7 @@ struct JoeSearchView: View {
         let kw = query.trimmingCharacters(in: .whitespaces)
         guard !kw.isEmpty, !searching else { return }
         searching = true
+        searchFailed = false
         Task {
             async let kk = try? Providers.search(Providers.KK, keyword: kw)
             async let f4k = try? Providers.search(Providers.F4K, keyword: kw)
@@ -198,6 +245,9 @@ struct JoeSearchView: View {
             async let tp = try? Providers.search(Providers.TP, keyword: kw)
             let (a, b, c, d) = await (kk, f4k, vs, tp)
             results = (a ?? []) + (b ?? []) + (c ?? []) + (d ?? [])
+            // Failure means every provider threw; a provider
+            // that answered empty is a (partial) success.
+            searchFailed = a == nil && b == nil && c == nil && d == nil
             searched = true
             searching = false
         }

@@ -17,9 +17,15 @@ struct JoeMovieDetail: View {
     @State private var loadFailed = false
     @State private var playerHolder: DirectorHolder?
     @State private var switching = false
+    /// C-9: the last provider/slug whose detail actually loaded.
+    /// A failed switch reverts to these (see load()).
+    @State private var lastGoodProvider: String
+    @State private var lastGoodSlug: String
+    @State private var switchNotice: String?
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
     @FocusState private var focusedAlt: String?
+    @FocusState private var focusedRetry: Bool
 
     struct DirectorHolder: Identifiable {
         let id = UUID()
@@ -30,6 +36,8 @@ struct JoeMovieDetail: View {
         self.route = route
         _provider = State(initialValue: route.provider)
         _slug = State(initialValue: route.slug)
+        _lastGoodProvider = State(initialValue: route.provider)
+        _lastGoodSlug = State(initialValue: route.slug)
     }
 
     private var favKey: String { WatchStore.movieFavKey(provider: provider, slug: slug) }
@@ -37,37 +45,66 @@ struct JoeMovieDetail: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 30) {
+            VStack(alignment: .leading, spacing: 32) {
                 if let detail {
+                    if let switchNotice {
+                        // C-9: a failed provider switch reverted —
+                        // say so, naming both providers (§8).
+                        Text(switchNotice)
+                            .font(.system(size: 25))
+                            .foregroundStyle(.orange)
+                    }
                     backdropStrip(detail)
                     header(detail)
                     if let tmdb, !tmdb.cast.isEmpty { castRow(tmdb.cast) }
                     if !alternatives.isEmpty || switching { altChips }
                     servers(detail)
                 } else if loadFailed {
-                    Text("Không tải được thông tin phim. Kiểm tra mạng rồi quay lại.")
-                        .font(.title3)
-                        .foregroundStyle(.orange)
-                        .padding(.top, 60)
+                    // §8: the G3 error shape + Retry.
+                    VStack(alignment: .leading, spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.orange)
+                        Text("Không tải được thông tin phim.")
+                            .font(.system(size: 29, weight: .semibold))
+                            .foregroundStyle(.white)
+                        Text("Kiểm tra mạng rồi thử lại.")
+                            .font(.system(size: 25))
+                            .foregroundStyle(.white.opacity(0.7))
+                        Button { Task { await load() } } label: {
+                            Text("Thử lại")
+                                .font(.system(size: 29, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 36)
+                                .padding(.vertical, 16)
+                                .background(Capsule().fill(JoeTheme.accentViolet))
+                                .overlay(JoeFocusRing(shape: Capsule()))
+                        }
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled(true)
+                        .focused($focusedRetry)
+                        .scaleEffect(focusedRetry ? 1.05 : 1.0)
+                    }
+                    .padding(.top, 60)
                 } else {
                     placeholderHeader
                     ProgressView("Đang tải danh sách tập…")
-                        .font(.title3)
+                        .font(.system(size: 29))
                         .foregroundStyle(.white)
                         .tint(.white)
                 }
             }
-            .padding(.leading, 44)
-            .padding(.trailing, 52)
-            .padding(.top, 36)
-            .padding(.bottom, 40)
+            // No manual padding: the layer sits inside the root
+            // safe area, which IS the §4 inset (80/60).
         }
         .task(id: slug + "|" + provider) { await load() }
         .task(id: detail?.movie.id ?? "") {
             // TMDB enrichment (v1.6), fail-soft: only when the
-            // loaded detail carries a TMDB id AND the owner has
-            // saved a TMDB API key in Settings. Any failure leaves
-            // tmdb nil and the screen is the provider-only one.
+            // loaded detail carries a TMDB id AND a TMDB API key
+            // is available — the bundled key injected at build
+            // time, or one the owner saved in Settings (the saved
+            // key wins). Any failure leaves tmdb nil and the
+            // screen is the provider-only one.
             guard let detail, !detail.movie.tmdbId.isEmpty,
                   !TMDBClient.apiKey.isEmpty else {
                 tmdb = nil
@@ -97,16 +134,16 @@ struct JoeMovieDetail: View {
             posterArt(m)
             VStack(alignment: .leading, spacing: 16) {
                 Text(route.name)
-                    .font(.system(size: 50, weight: .heavy))
+                    .font(.system(size: 64, weight: .heavy))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                 if !route.year.isEmpty {
                     Text(route.year)
-                        .font(.system(size: 23))
+                        .font(.system(size: 29))
                         .foregroundStyle(.white.opacity(0.75))
                 }
                 Text(Providers.displayName(provider))
-                    .font(.system(size: 21, weight: .semibold))
+                    .font(.system(size: 25, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
@@ -123,30 +160,30 @@ struct JoeMovieDetail: View {
             posterArt(d.movie)
             VStack(alignment: .leading, spacing: 16) {
                 Text(d.movie.name)
-                    .font(.system(size: 50, weight: .heavy))
+                    .font(.system(size: 64, weight: .heavy))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                 if !d.movie.originName.isEmpty {
                     Text(d.movie.originName)
-                        .font(.system(size: 26))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .font(.system(size: 29))
+                        .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)
                 }
                 if !d.metaLine.isEmpty {
                     Text(d.metaLine)
-                        .font(.system(size: 23))
+                        .font(.system(size: 29))
                         .foregroundStyle(.white.opacity(0.75))
                 }
                 if !d.categories.isEmpty {
                     Text(d.categories)
-                        .font(.system(size: 22))
+                        .font(.system(size: 25))
                         .foregroundStyle(JoeTheme.accentViolet)
                 }
                 HStack(spacing: 16) {
                     playButton(d)
                     favButton(d)
                     Text(Providers.displayName(provider))
-                        .font(.system(size: 21, weight: .semibold))
+                        .font(.system(size: 25, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
@@ -155,9 +192,10 @@ struct JoeMovieDetail: View {
                 if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
                     Text((tmdb?.overview.isEmpty ?? true)
                          ? d.content : (tmdb?.overview ?? ""))
-                        .font(.system(size: 22))
+                        .font(.system(size: 29))
                         .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(6)
+                        .lineSpacing(8)
+                        .lineLimit(5)
                         .frame(maxWidth: 1050, alignment: .leading)
                 }
             }
@@ -184,10 +222,10 @@ struct JoeMovieDetail: View {
                 }
             }
         }
-        .frame(width: 300, height: 450)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18)
-            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+        .frame(width: 240, height: 360)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16)
+            .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
     }
 
     /// Full-width backdrop strip (v1.7, Android parity): a wide
@@ -226,13 +264,15 @@ struct JoeMovieDetail: View {
                             Color.clear
                         }
                     }
+                    .transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity)
             .frame(height: 540)
             .clipShape(RoundedRectangle(cornerRadius: 18))
             .overlay(RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+            .animation(.easeIn(duration: 0.3), value: tmdbURL != nil)
         }
     }
 
@@ -246,7 +286,7 @@ struct JoeMovieDetail: View {
     private func castRow(_ cast: [TMDBCastMember]) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Diễn viên")
-                .font(.system(size: 26, weight: .bold))
+                .font(.system(size: 34, weight: .bold))
                 .foregroundStyle(.white.opacity(0.9))
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 24) {
@@ -280,19 +320,19 @@ struct JoeMovieDetail: View {
             .overlay(Circle()
                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
             Text(member.name)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 23, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
             if !member.character.isEmpty {
                 Text(member.character)
-                    .font(.system(size: 17))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .font(.system(size: 23))
+                    .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
         }
-        .frame(width: 130)
+        .frame(width: 120)
     }
 
     private func castInitial(_ member: TMDBCastMember) -> some View {
@@ -332,14 +372,15 @@ struct JoeMovieDetail: View {
                 Image(systemName: "play.fill")
                 Text(isResume ? "Xem tiếp" : "Xem ngay")
             }
-            .font(.system(size: 25, weight: .bold))
+            .font(.system(size: 29, weight: .bold))
             .foregroundStyle(.white)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 13)
+            .padding(.horizontal, 36)
+            .padding(.vertical, 16)
             .background(Capsule().fill(JoeTheme.accentViolet))
-            .overlay(JoeFocusRing(shape: Capsule(), lineWidth: 3.5))
+            .overlay(JoeFocusRing(shape: Capsule()))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled(true)
         .focused($focusedPlay)
         .scaleEffect(focusedPlay ? 1.05 : 1.0)
         .disabled(startEpisode(d) == nil || switching)
@@ -359,15 +400,15 @@ struct JoeMovieDetail: View {
             watch.toggleFavorite(e)
         } label: {
             Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
-                .font(.system(size: 23, weight: .medium))
+                .font(.system(size: 29, weight: .medium))
                 .foregroundStyle(isFav ? JoeTheme.accentRed : .white)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 11)
-                .background(Capsule().fill(Color.white.opacity(0.10)))
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                .padding(.horizontal, 36)
+                .padding(.vertical, 16)
+                .background(Capsule().fill(Color.white.opacity(0.07)))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled(true)
     }
 
     // MARK: - "Nguồn khác:" chips
@@ -378,24 +419,26 @@ struct JoeMovieDetail: View {
                 ProgressView().tint(.white)
             }
             Text("Nguồn khác:")
-                .font(.system(size: 23, weight: .medium))
-                .foregroundStyle(.white.opacity(0.65))
+                .font(.system(size: 25, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
             ForEach(alternatives, id: \.code) { alt in
                 Button {
+                    switchNotice = nil
                     provider = alt.code
                     slug = alt.slug
                 } label: {
                     Text(Providers.displayName(alt.code))
-                        .font(.system(size: 23, weight: .semibold))
+                        .font(.system(size: 25, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 12)
                         .background(Capsule().fill(focusedAlt == alt.code
                                                    ? JoeTheme.accentViolet
                                                    : JoeTheme.accentViolet.opacity(0.35)))
                         .overlay(JoeFocusRing(shape: Capsule()))
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled(true)
                 .focused($focusedAlt, equals: alt.code)
                 .scaleEffect(focusedAlt == alt.code ? 1.05 : 1.0)
             }
@@ -406,17 +449,17 @@ struct JoeMovieDetail: View {
 
     private func servers(_ d: Detail) -> some View {
         VStack(alignment: .leading, spacing: 34) {
-            ForEach(Array(d.servers.enumerated()), id: \.offset) { _, server in
+            ForEach(Array(d.servers.enumerated()), id: \.offset) { serverIndex, server in
                 VStack(alignment: .leading, spacing: 14) {
                     if d.servers.count > 1 || !server.name.isEmpty {
                         Text(server.name)
-                            .font(.system(size: 26, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.9))
+                            .font(.system(size: 25, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 178), spacing: 16)],
                               alignment: .leading, spacing: 16) {
                         ForEach(Array(server.episodes.enumerated()), id: \.offset) { _, ep in
-                            epChip(d, ep: ep)
+                            epChip(d, ep: ep, focusKey: "\(serverIndex)|\(ep.name)")
                         }
                     }
                 }
@@ -424,22 +467,25 @@ struct JoeMovieDetail: View {
         }
     }
 
-    private func epChip(_ d: Detail, ep: Episode) -> some View {
+    private func epChip(_ d: Detail, ep: Episode, focusKey: String) -> some View {
         let playable = Providers.isPlayable(code: provider, episode: ep)
         let storedEp = watch.progress().first(where: {
             $0.slug == slug && $0.source == provider })?.ep
         let preselected = ep.name == (!route.preselectEp.isEmpty
                                       ? route.preselectEp : storedEp)
-        let focused = focusedEp == ep.name
+        // F4: focus identity is "<serverIndex>|<episodeName>" —
+        // every server has its own "Tập 1", and keying by name
+        // alone lit up one chip per server at once (C-3).
+        let focused = focusedEp == focusKey
         return Button {
             play(d, epName: ep.name)
         } label: {
             Text(ep.name)
-                .font(.system(size: 22, weight: preselected ? .bold : .medium))
+                .font(.system(size: 25, weight: preselected ? .bold : .medium))
                 .foregroundStyle(playable ? .white : .white.opacity(0.35))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 13)
+                .padding(.vertical, 12)
                 .background(RoundedRectangle(cornerRadius: 12)
                     .fill(preselected ? JoeTheme.accentViolet.opacity(0.30)
                           : Color.white.opacity(0.08)))
@@ -449,7 +495,8 @@ struct JoeMovieDetail: View {
                                   lineWidth: focused ? 3 : 2))
         }
         .buttonStyle(.plain)
-        .focused($focusedEp, equals: ep.name)
+        .focusEffectDisabled(true)
+        .focused($focusedEp, equals: focusKey)
         .scaleEffect(focused ? 1.05 : 1.0)
         .disabled(!playable || switching)
     }
@@ -462,18 +509,38 @@ struct JoeMovieDetail: View {
         // until the new one lands — v1.1 blanked the page back
         // to a spinner, which read as "another sources page".
         let hadDetail = detail != nil
+        let attemptedProvider = provider
+        let attemptedSlug = slug
         if !hadDetail { loadFailed = false }
         switching = hadDetail
         do {
             let d = try await Providers.detail(provider, slug: slug)
             detail = d
             switching = false
+            lastGoodProvider = provider
+            lastGoodSlug = slug
             alternatives = await Providers.findAlternatives(
                 fromCode: provider, name: d.movie.name,
                 origin: d.movie.originName, year: d.movie.year)
         } catch {
             switching = false
-            if !hadDetail { loadFailed = true }
+            if !hadDetail {
+                loadFailed = true
+                focusedRetry = true
+            } else if attemptedProvider != lastGoodProvider
+                        || attemptedSlug != lastGoodSlug {
+                // C-9: the switch failed — REVERT to the provider
+                // whose detail is actually on screen and say so.
+                // (v1.8 left provider/slug pointing at the new
+                // source over the old source's data: a silent
+                // hybrid page whose favourite key and playability
+                // checks belonged to a different film.) The
+                // revert re-fires this task for the good provider;
+                // its success path leaves switchNotice standing.
+                provider = lastGoodProvider
+                slug = lastGoodSlug
+                switchNotice = "Không tải được nguồn \(Providers.displayName(attemptedProvider)) — vẫn dùng nguồn \(Providers.displayName(lastGoodProvider))"
+            }
         }
     }
 
@@ -558,6 +625,101 @@ struct JoeMovieDetail: View {
                 e2.slug = alt.slug
                 e2.source = alt.code
                 return PlayIdentity(entry: e2)
+            },
+            fallbackCandidates: { identity in
+                await JoeMovieDetail.torrentFallbackCandidates(
+                    identity: identity, originDetail: detail,
+                    originProvider: provider)
             })
+    }
+
+    /// The substitution rung's candidate hunt (owner law,
+    /// v1.9): every Phim source for this title is dead, so find
+    /// the SAME title on the torrent side and offer its streams
+    /// as the replacement — the director plays them under the
+    /// CURRENT identity, so resume and Continue Watching stay
+    /// on the Phim entry (one CW row per title, as the owner
+    /// expects). Identity is by ID only, never by title text:
+    /// the detail's own IMDB id when a provider carried one
+    /// (Tủ Phim does), else its TMDB id → TMDB external_ids →
+    /// IMDB id, with the TMDB id hunted through the KK
+    /// alternative when this provider's detail lacks one (the
+    /// hop's own findAlternatives call — KK is the provider
+    /// whose details carry TMDB ids). Series episodes address
+    /// Torrentio as imdbId:season:episode. Fail-soft end to
+    /// end: any gap returns [] and the director shows its
+    /// exhausted slate — the honest end state.
+    private static func torrentFallbackCandidates(
+        identity: PlayIdentity, originDetail: Detail,
+        originProvider: String) async -> [PlayCandidate] {
+        guard let base = TorrentSettings.effectiveBase else { return [] }
+
+        // After a hop the session lives on another provider:
+        // read THAT detail (fresh, like the ladder and hop do);
+        // the origin detail otherwise, and as the fallback if
+        // the fresh fetch fails.
+        var d = originDetail
+        if identity.entry.source != originProvider
+            || identity.entry.slug != originDetail.movie.slug,
+           let fresh = try? await Providers.detail(
+               identity.entry.source, slug: identity.entry.slug) {
+            d = fresh
+        }
+
+        var imdbId = d.movie.imdbId
+        var tmdbType = d.movie.tmdbType
+        var tmdbSeason = d.movie.tmdbSeason
+        if imdbId.isEmpty {
+            var tmdbId = d.movie.tmdbId
+            if tmdbId.isEmpty {
+                let alts = await Providers.findAlternatives(
+                    fromCode: identity.entry.source,
+                    name: d.movie.name, origin: d.movie.originName,
+                    year: d.movie.year)
+                if let kk = alts.first(where: { $0.code == Providers.KK }),
+                   let kd = try? await Providers.detail(kk.code, slug: kk.slug) {
+                    tmdbId = kd.movie.tmdbId
+                    imdbId = kd.movie.imdbId
+                    if tmdbType.isEmpty { tmdbType = kd.movie.tmdbType }
+                    if tmdbSeason <= 0 { tmdbSeason = kd.movie.tmdbSeason }
+                }
+            }
+            if imdbId.isEmpty, !tmdbId.isEmpty {
+                imdbId = await TMDBClient.imdbId(
+                    tmdbId: tmdbId, type: tmdbType) ?? ""
+            }
+        }
+        guard !imdbId.isEmpty else { return [] }
+
+        // Movie vs series for the Torrentio address: the TMDB
+        // type when known; with no type on record, a numbered
+        // episode inside a multi-episode detail reads as a
+        // series (a movie's "Full" never numbers).
+        let epNum = Providers.episodeNumber(identity.entry.ep)
+        let episodeCount = d.servers.reduce(0) { $0 + $1.episodes.count }
+        let isSeries = tmdbType == "tv"
+            || (tmdbType.isEmpty && epNum >= 1 && episodeCount > 1)
+        let streamId: String
+        if isSeries {
+            // Season: an explicit marker in the episode name
+            // wins; else the detail's TMDB season (the house
+            // rule — TpClient addresses CacheVideo the same
+            // way); else 1.
+            let season = Providers.seasonNumber(identity.entry.ep)
+                ?? (tmdbSeason > 0 ? tmdbSeason : 1)
+            streamId = "\(imdbId):\(season):\(max(epNum, 1))"
+        } else {
+            streamId = imdbId
+        }
+        guard let streams = try? await TorrentClient.fetchStreams(
+            addonBase: base, type: isSeries ? "series" : "movie",
+            id: streamId), !streams.isEmpty else { return [] }
+        // The shared builder: Torrentio's own top-ranked stream
+        // leads (and earns the one RD resolution if it is a
+        // bare hash), the B-5 container rule filters, and the
+        // "Torrent" prefix tells the owner which source family
+        // is playing in the player's status capsule.
+        return await TorrentClient.playCandidates(
+            streams: streams, preferred: nil, labelPrefix: "Torrent")
     }
 }

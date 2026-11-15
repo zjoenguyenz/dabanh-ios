@@ -106,7 +106,50 @@ struct TorStream: Identifiable {
     var infoHash = ""
     var fileIdx = -1
     var proxyHeaders: [String: String] = [:]
-    var playable: Bool { !url.isEmpty }
+    var playable: Bool { !url.isEmpty && containerPlayable }
+
+    /// Containers AVPlayer opens natively.
+    static let avPlayerContainers: Set<String> = ["mp4", "m4v", "mov"]
+    /// Containers AVPlayer cannot open at all (B-5, Team 4
+    /// conformance).
+    static let nonAVPlayerContainers: Set<String> =
+        ["mkv", "avi", "wmv", "flv", "webm", "ts", "mpg", "mpeg", "rm", "rmvb"]
+
+    /// B-5: whether this stream's container is one AVPlayer can
+    /// play. Read from the stream URL's extension when it has
+    /// one, else from the release name carried in the title/name
+    /// text (Torrentio titles carry it). Unknown containers stay
+    /// playable — the rule only excludes containers that are
+    /// KNOWN-bad, so unlabelled streams are never punished.
+    /// `playable` folds this in, and `playable` is what the
+    /// view's auto-pick walk and "PHÁT NGAY" badge key on — a
+    /// known-bad container is excluded at selection time
+    /// instead of being discovered by AVPlayer after the tap.
+    var containerPlayable: Bool {
+        if let ext = URL(string: url)?.pathExtension.lowercased(),
+           !ext.isEmpty {
+            if Self.avPlayerContainers.contains(ext) { return true }
+            if Self.nonAVPlayerContainers.contains(ext) { return false }
+        }
+        let text = (name + " " + title).lowercased()
+        for ext in Self.nonAVPlayerContainers {
+            // The extension must end at a non-alphanumeric
+            // boundary, so "The.Tsars.2024" does not false-fire
+            // on ".ts" while "Movie.2024.mkv" and
+            // "Movie.MKV.1080p" both count.
+            let needle = "." + ext
+            var searchRange = text.startIndex..<text.endIndex
+            while let range = text.range(of: needle, range: searchRange) {
+                let after = range.upperBound
+                if after == text.endIndex
+                    || (!text[after].isLetter && !text[after].isNumber) {
+                    return false
+                }
+                searchRange = after..<text.endIndex
+            }
+        }
+        return true
+    }
     /// The row's two lines, Stremio-style: addon/quality name on
     /// top, release title below.
     var label: String { name.isEmpty ? title : name }
@@ -174,12 +217,15 @@ enum TorrentClient {
     /// Genre rail from Cinemeta's top catalog. Endpoint pattern
     /// built from the existing catalog URL construction above
     /// (`/catalog/{type}/{id}.json`, here id "top" plus the
-    /// Stremio `genre=` extra); not verified live from this VM.
-    /// Genre strings are passed through verbatim (e.g.
-    /// "Science Fiction").
+    /// Stremio `genre=` extra). The genre is URL-encoded (C-7):
+    /// verbatim, "Science Fiction" put a literal space in the
+    /// URL, which is not a valid URL at all — the rail could
+    /// never load. Verified live 2026-11-15: the %20-encoded
+    /// form answers (a 307 to Cinemeta's canonical
+    /// "Science+Fiction" URL, which the session follows).
     static func fetchGenreCatalog(type: String, genre: String) async throws -> [TorMeta] {
         let root = try await JoeHTTP.getJSON(
-            TorrentSettings.cinemeta + "/catalog/\(type)/top/genre=\(genre).json")
+            TorrentSettings.cinemeta + "/catalog/\(type)/top/genre=\(JoeHTTP.qenc(genre)).json")
         return parseMetas(JSON.arr(root, "metas"))
     }
 
@@ -227,8 +273,22 @@ enum TorrentClient {
 
     // MARK: - Streams
 
+    /// Tuned Torrentio list cap (LATENCY-AUDIT §6): 35 s →
+    /// 15 s (healthy max 1.17; a public service with load
+    /// spikes keeps a generous ≈13× median headroom).
+    /// SourceHealth's dynamic fuse tightens within it. This
+    /// one call serves both the torrent section's own play
+    /// path and the Phim substitution rung.
+    private static let streamsCap: TimeInterval = 15
+
     static func fetchStreams(addonBase: String, type: String, id: String) async throws -> [TorStream] {
-        let root = try await JoeHTTP.getJSON(addonBase + "/stream/\(type)/\(id).json", timeout: 35)
+        let url = addonBase + "/stream/\(type)/\(id).json"
+        let root = try await SourceHealth.run(
+            provider: SourceHealth.torrentProvider, stage: .resolve,
+            url: url, cap: streamsCap
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
         return (JSON.arr(root, "streams") ?? []).map { o in
             var s = TorStream()
             s.name = JSON.str(o, "name")
@@ -245,6 +305,62 @@ enum TorrentClient {
             }
             return s
         }
+    }
+
+    // MARK: - Play candidates (shared conversion)
+
+    /// Direct URL, or a hash resolved through the owner's own
+    /// Real-Debrid account. Fail-soft to nil. (Moved here from
+    /// JoeTorrentDetail: both play paths below share it, so the
+    /// RD behaviour can never drift between them.)
+    static func resolvePlayable(_ s: TorStream) async -> URL? {
+        if s.playable { return URL(string: s.url) }
+        guard !s.infoHash.isEmpty else { return nil }
+        let token = TorrentSettings.rdToken
+        guard !token.isEmpty else { return nil }
+        if let r = try? await RdClient.resolve(
+            token: token, infoHash: s.infoHash, fileIdx: s.fileIdx) {
+            return URL(string: r.url)
+        }
+        return nil
+    }
+
+    /// Streams → player candidates: THE conversion both torrent
+    /// play paths use — the torrent section's own player and
+    /// the Phim section's substitution rung (JoeMovieDetail) —
+    /// so filtering, RD behaviour and ordering are one
+    /// implementation, not two copies. The `preferred` stream
+    /// (the one the owner tapped; for the rung, the list's own
+    /// first entry — Torrentio's top-ranked) leads the list and
+    /// alone earns a Real-Debrid resolution when it carries no
+    /// direct URL: resolving every hash in the list would spam
+    /// the owner's account, so other hash entries are never
+    /// auto-resolved. Every remaining candidate is a direct-URL
+    /// stream passing TorStream.playable (the B-5 container
+    /// rule included), in list order. `labelPrefix` marks the
+    /// source for the player's status capsule ("" keeps the
+    /// stream's own label, exactly what the torrent section
+    /// has always shown).
+    static func playCandidates(streams: [TorStream], preferred: TorStream?,
+                               labelPrefix: String = "") async -> [PlayCandidate] {
+        func label(_ s: TorStream) -> String {
+            labelPrefix.isEmpty ? s.label : "\(labelPrefix) · \(s.label)"
+        }
+        var out: [PlayCandidate] = []
+        let lead = preferred ?? streams.first
+        if let lead,
+           let match = streams.first(where: {
+               $0.name == lead.name && $0.title == lead.title }),
+           let url = await resolvePlayable(match) {
+            out.append(PlayCandidate(url: url, label: label(match)))
+        }
+        for s in streams where s.playable {
+            if let lead, s.name == lead.name && s.title == lead.title { continue }
+            if let url = URL(string: s.url) {
+                out.append(PlayCandidate(url: url, label: label(s)))
+            }
+        }
+        return out
     }
 
     // MARK: - Subtitles (addon protocol)
@@ -303,14 +419,28 @@ enum RdClient {
         guard !files.isEmpty else { throw URLError(.badServerResponse) }
         var bestSize: Int64 = -1
         var bestId = -1
+        var bestPlayableSize: Int64 = -1
+        var bestPlayableId = -1
         var idxId = -1
         for (i, f) in files.enumerated() {
             let fid = JSON.int(f, "id", -1)
             let size = Int64(JSON.double(f, "bytes"))
             if i == fileIdx { idxId = fid }
             if size > bestSize { bestSize = size; bestId = fid }
+            // B-5: the size fallback prefers the largest file
+            // whose container AVPlayer can actually play (the
+            // .mp4 in a release pack over an .mkv, say). The
+            // addon's fileIdx, when present, is still honoured
+            // exactly — it is the addon's own choice.
+            let ext = (JSON.str(f, "path") as NSString).pathExtension.lowercased()
+            if TorStream.avPlayerContainers.contains(ext),
+               size > bestPlayableSize {
+                bestPlayableSize = size
+                bestPlayableId = fid
+            }
         }
-        let pick = idxId >= 0 ? idxId : bestId
+        let pick = idxId >= 0 ? idxId
+            : (bestPlayableId >= 0 ? bestPlayableId : bestId)
         guard pick >= 0 else { throw URLError(.badServerResponse) }
 
         _ = try await request(token: trimmed, method: "POST",

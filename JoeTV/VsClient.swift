@@ -15,13 +15,34 @@ import Foundation
 /// exist only behind the embed page (see resolveStream).
 enum VsClient {
     static let base = "https://vsmov.com"
+    /// Per-request budget for catalogue (list/search) calls.
+    private static let listTimeout: TimeInterval = 12
+    /// Tuned stage caps (LATENCY-AUDIT §6): detail 25 s →
+    /// 10 s (healthy max 1.87), resolve 25 s → 8 s (healthy
+    /// embed max 1.26; the v1/v6 black-hole class now declares
+    /// in 8 s instead of 25). Both are CAPS — SourceHealth's
+    /// dynamic fuse may only tighten within them.
+    private static let detailCap: TimeInterval = 10
+    private static let resolveCap: TimeInterval = 8
+
+    static func newestRaw(page: Int) async throws -> [String: Any] {
+        try await JoeHTTP.getJSON(
+            base + "/api/danh-sach/phim-moi-cap-nhat?page=\(page)",
+            timeout: listTimeout)
+    }
 
     static func newest(page: Int) async throws -> [Movie] {
-        try await listPath("/api/danh-sach/phim-moi-cap-nhat?page=\(page)")
+        parseList(try await newestRaw(page: page))
+    }
+
+    static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
+        try await JoeHTTP.getJSON(
+            base + "/api/danh-sach/\(type)?page=\(page)",
+            timeout: listTimeout)
     }
 
     static func listByType(_ type: String, page: Int) async throws -> [Movie] {
-        try await listPath("/api/danh-sach/\(type)?page=\(page)")
+        parseList(try await listByTypeRaw(type, page: page))
     }
 
     static func search(_ keyword: String) async throws -> [Movie] {
@@ -29,7 +50,13 @@ enum VsClient {
     }
 
     private static func listPath(_ path: String) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(base + path)
+        let root = try await JoeHTTP.getJSON(base + path, timeout: listTimeout)
+        return parseList(root)
+    }
+
+    /// Parse a list response body — also used by
+    /// Providers.parseList to re-parse a cached raw response.
+    static func parseList(_ root: [String: Any]) -> [Movie] {
         let items = JSON.arr(root, "items")
             ?? JSON.arr(JSON.obj(root, "data"), "items") ?? []
         return items.compactMap { o in
@@ -39,7 +66,12 @@ enum VsClient {
     }
 
     static func detail(_ slug: String) async throws -> Detail {
-        let root = try await JoeHTTP.getJSON(base + "/api/phim/\(slug)")
+        let url = base + "/api/phim/\(slug)"
+        let root = try await SourceHealth.run(
+            provider: Providers.VS, stage: .detail, url: url, cap: detailCap
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
         var d = Detail()
         var item = JSON.obj(root, "movie")
         if item == nil { item = JSON.obj(JSON.obj(root, "data"), "item") }
@@ -81,13 +113,21 @@ enum VsClient {
     /// answered 200). Resolved FRESH at every play tap — nothing is
     /// cached: stream URLs are plumbing, never stored.
     static func resolveStream(embedURL: String) async throws -> String {
-        let html = try await JoeHTTP.getText(embedURL)
-        guard let base = capture(#"baseUrl\s*=\s*"([^"]+)""#, in: html),
-              let hash = capture(#"videoHash\s*=\s*"([^"]+)""#, in: html) else {
-            throw URLError(.cannotParseResponse)
+        // The parse lives INSIDE the measured closure: an
+        // answering-but-useless embed page (the 200 error-page
+        // class, audit §3.1) records as an instant-fail sample,
+        // not as a healthy fast call.
+        try await SourceHealth.run(
+            provider: Providers.VS, stage: .resolve, url: embedURL, cap: resolveCap
+        ) { budget in
+            let html = try await JoeHTTP.getText(embedURL, timeout: budget)
+            guard let base = capture(#"baseUrl\s*=\s*"([^"]+)""#, in: html),
+                  let hash = capture(#"videoHash\s*=\s*"([^"]+)""#, in: html) else {
+                throw URLError(.cannotParseResponse)
+            }
+            let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
+            return trimmed + "/stream/" + hash + "/master.m3u8"
         }
-        let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
-        return trimmed + "/stream/" + hash + "/master.m3u8"
     }
 
     private static func capture(_ pattern: String, in text: String) -> String? {

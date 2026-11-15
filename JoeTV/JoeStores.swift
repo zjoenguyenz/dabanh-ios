@@ -35,9 +35,21 @@ final class PhimStore: ObservableObject {
     var vietnamSeries: [Movie] { vietnamAll.filter { $0.type == "series" } }
     var vietnamSingle: [Movie] { vietnamAll.filter { $0.type == "single" } }
     @Published var loading = false
+    /// Board contract (rework v1.9): true once a load has run
+    /// 20 s with hasData still false, so the view can show its
+    /// error+retry surface while slow jobs are still in flight.
+    /// Cleared when a load starts and when data lands.
+    @Published var loadTimedOut = false
+    /// Last error per provider code (kk / f4k / vsmov / tp) from
+    /// the most recent load — the diagnostics surface. An entry
+    /// clears when one of that provider's rails lands. Pre-v1.9
+    /// every error was discarded by try?, so no on-device
+    /// failure could ever be diagnosed.
+    @Published var providerErrors: [String: String] = [:]
 
     private var loadedAt: Date?
     private var loadTask: Task<Void, Never>?
+    private var loadGeneration = 0
 
     var hasData: Bool { !merged.isEmpty || !kkNew.isEmpty }
 
@@ -48,52 +60,127 @@ final class PhimStore: ObservableObject {
         loadTask = Task { await load() }
     }
 
-    /// v1.8: PROGRESSIVE per-rail publish. v1.7 awaited all 12
-    /// rails (plus 12 more sequential fetches) before assigning
-    /// ANYTHING, so one stalled provider froze the whole home on
-    /// the spinner — the owner's "load đứng luôn screen". Now
-    /// every fetch streams its result back and the rail appears
-    /// the moment IT lands; a failed fetch keeps previous data.
+    /// One rail job: a stable cache key, the provider it belongs
+    /// to (for error attribution), and the request to fetch.
+    private struct Job {
+        let key: String
+        let provider: String
+        let request: Providers.ListRequest
+    }
+
+    /// Launch order IS priority order: the four "newest" rails
+    /// and the Vietnam block first (they head the home), the
+    /// rest behind them under the concurrency gate.
+    private static var jobs: [Job] {
+        var list: [Job] = [
+            Job(key: "kkNew", provider: Providers.KK, request: .newest(page: 1)),
+            Job(key: "f4kNew", provider: Providers.F4K, request: .newest(page: 1)),
+            Job(key: "vsNew", provider: Providers.VS, request: .newest(page: 1)),
+            Job(key: "tpNew", provider: Providers.TP, request: .newest(page: 1)),
+            Job(key: "vietnam", provider: Providers.KK,
+                request: .country(slug: "viet-nam", page: 1, limit: 48)),
+            Job(key: "kkSeries", provider: Providers.KK, request: .byType(type: "phim-bo", page: 1)),
+            Job(key: "kkMovies", provider: Providers.KK, request: .byType(type: "phim-le", page: 1)),
+            Job(key: "kkAnime", provider: Providers.KK, request: .byType(type: "hoat-hinh", page: 1)),
+            Job(key: "f4kMovies", provider: Providers.F4K, request: .byType(type: "phim-le", page: 1)),
+            Job(key: "vsSeries", provider: Providers.VS, request: .byType(type: "phim-bo", page: 1)),
+            Job(key: "tpMovies", provider: Providers.TP, request: .byType(type: "phim-le", page: 1)),
+            Job(key: "tpSeries", provider: Providers.TP, request: .byType(type: "phim-bo", page: 1)),
+            Job(key: "chieuRap", provider: Providers.KK, request: .byType(type: "phim-chieu-rap", page: 1)),
+        ]
+        for spec in genreSpec {
+            list.append(Job(key: "genre:" + spec.slug, provider: Providers.KK,
+                            request: .genre(slug: spec.slug, page: 1)))
+        }
+        for spec in countrySpec {
+            list.append(Job(key: "country:" + spec.slug, provider: Providers.KK,
+                            request: .country(slug: spec.slug, page: 1, limit: nil)))
+        }
+        return list
+    }
+
+    /// v1.9 (rework): cache-first, deadline-bounded, storm-free.
+    /// v1.8 published progressively (kept) but fired all 24 jobs
+    /// at once — up to 58 requests with KK's sequential failover —
+    /// with NO deadline, no cache and every error discarded; on
+    /// the owner's TV that froze the whole device (his report:
+    /// many Menu presses to escape). Now:
+    ///   1. the disk cache renders first (decoded OFF-actor),
+    ///   2. a 20 s watchdog publishes loadTimedOut,
+    ///   3. the refresh runs under a 4-permit gate in priority
+    ///      order (≤ ~12 provider connections at once),
+    ///   4. fetch + cache-write + parse happen in the child
+    ///      tasks. The tasks inherit this actor's context, so
+    ///      what keeps the main actor responsive is that every
+    ///      wait (network, gate, file IO) suspends instead of
+    ///      blocking, and only small parsed rails cross back
+    ///      for this loop to publish.
     private func load() async {
         loading = true
+        loadTimedOut = false
+        loadGeneration += 1
+        let generation = loadGeneration
         defer { loading = false }
-        struct Job {
-            let key: String
-            let fetch: () async -> [Movie]?
+
+        let jobs = Self.jobs
+
+        // 1) Deadline watchdog (board contract), started before
+        // any work so the 20 s is measured from the load's start.
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard let self, !Task.isCancelled else { return }
+            if self.loadGeneration == generation && !self.hasData {
+                self.loadTimedOut = true
+            }
         }
-        var jobs: [Job] = [
-            Job(key: "kkNew") { try? await Providers.newest(Providers.KK, page: 1) },
-            Job(key: "f4kNew") { try? await Providers.newest(Providers.F4K, page: 1) },
-            Job(key: "vsNew") { try? await Providers.newest(Providers.VS, page: 1) },
-            Job(key: "tpNew") { try? await Providers.newest(Providers.TP, page: 1) },
-            Job(key: "kkSeries") { try? await Providers.listByType(Providers.KK, type: "phim-bo", page: 1) },
-            Job(key: "kkMovies") { try? await Providers.listByType(Providers.KK, type: "phim-le", page: 1) },
-            Job(key: "kkAnime") { try? await Providers.listByType(Providers.KK, type: "hoat-hinh", page: 1) },
-            Job(key: "f4kMovies") { try? await Providers.listByType(Providers.F4K, type: "phim-le", page: 1) },
-            Job(key: "vsSeries") { try? await Providers.listByType(Providers.VS, type: "phim-bo", page: 1) },
-            Job(key: "tpMovies") { try? await Providers.listByType(Providers.TP, type: "phim-le", page: 1) },
-            Job(key: "tpSeries") { try? await Providers.listByType(Providers.TP, type: "phim-bo", page: 1) },
-            Job(key: "chieuRap") { try? await Providers.listByType(Providers.KK, type: "phim-chieu-rap", page: 1) },
-            Job(key: "vietnam") { try? await Providers.kkCountry("viet-nam", page: 1, limit: 48) },
-        ]
-        for spec in Self.genreSpec {
-            jobs.append(Job(key: "genre:" + spec.slug) {
-                try? await Providers.kkGenre(spec.slug, page: 1) })
+        defer { watchdog.cancel() }
+
+        // 2) Cache first (the TVStore pattern). PhimRailCache is
+        // non-isolated, so awaiting it suspends this actor
+        // instead of blocking it; only parsed rails cross back.
+        let cached = await PhimRailCache.hydrate(
+            jobs.map { (key: $0.key, provider: $0.provider, request: $0.request) })
+        for (key, movies) in cached {
+            applyRail(key, movies)
         }
-        for spec in Self.countrySpec {
-            jobs.append(Job(key: "country:" + spec.slug) {
-                try? await Providers.kkCountry(spec.slug, page: 1) })
-        }
-        await withTaskGroup(of: (String, [Movie]?).self) { group in
+
+        // 3) Refresh behind the cache, gated.
+        let gate = AsyncGate(permits: 4)
+        await withTaskGroup(of: (String, String, [Movie]?, String?).self) { group in
             for job in jobs {
-                group.addTask { (job.key, await job.fetch()) }
+                group.addTask {
+                    await gate.acquire()
+                    let result: (String, String, [Movie]?, String?)
+                    do {
+                        let root = try await Providers.fetchListRaw(job.provider, job.request)
+                        PhimRailCache.save(key: job.key, root: root)
+                        result = (job.key, job.provider,
+                                  Providers.parseList(job.provider, job.request, root), nil)
+                    } catch {
+                        result = (job.key, job.provider, nil,
+                                  error.localizedDescription)
+                    }
+                    await gate.release()
+                    return result
+                }
             }
-            for await (key, movies) in group {
-                guard let movies else { continue }
-                applyRail(key, movies)
+            for await (key, provider, movies, error) in group {
+                if let movies {
+                    applyRail(key, movies)
+                    if !movies.isEmpty {
+                        // Partial-success semantics: ANY landed
+                        // rail stamps the load. (v1.8 stamped only
+                        // a hasData success, so a partial load
+                        // re-fired the whole storm on every visit.)
+                        loadedAt = Date()
+                        loadTimedOut = false
+                        providerErrors[provider] = nil
+                    }
+                } else if let error {
+                    providerErrors[provider] = error
+                }
             }
         }
-        if hasData { loadedAt = Date() }
     }
 
     private func applyRail(_ key: String, _ movies: [Movie]) {
@@ -129,6 +216,97 @@ final class PhimStore: ObservableObject {
     func retry() { loadIfNeeded() }
 }
 
+/// Counting semaphore bounding the Phim launch burst: at most
+/// `permits` provider jobs are in flight at once, so app start
+/// can never flood the network stack (owner device evidence:
+/// v1.8's unbounded 24-job burst froze the whole TV).
+/// Cancellation-safe: a waiter whose task is cancelled is
+/// removed and resumed, so a cancelled load can never wedge
+/// the gate (and with it the task group) shut.
+private actor AsyncGate {
+    private var permits: Int
+    private var waiters: [(UUID, CheckedContinuation<Void, Never>)] = []
+
+    init(permits: Int) { self.permits = permits }
+
+    func acquire() async {
+        if permits > 0 {
+            permits -= 1
+            return
+        }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                (cont: CheckedContinuation<Void, Never>) in
+                // Already cancelled before parking: never queue
+                // (the onCancel may already have run and found
+                // no waiter to remove).
+                if Task.isCancelled {
+                    cont.resume()
+                } else {
+                    waiters.append((id, cont))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        if let i = waiters.firstIndex(where: { $0.0 == id }) {
+            waiters.remove(at: i).1.resume()
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            permits += 1
+        } else {
+            waiters.removeFirst().1.resume()
+        }
+    }
+}
+
+/// Disk cache of the Phim rails' last-good RAW provider
+/// responses — the TVStore pattern (cache-first, refresh
+/// behind), one small file per rail job in the caches
+/// directory (~13–34 KB each, measured). Deliberately
+/// NON-isolated: hydrate's file IO and JSON decoding run on
+/// the generic executor and cross back across an await;
+/// save is reached from the load's child tasks and its
+/// payloads are small, so the load path never meaningfully
+/// blocks the main thread.
+private enum PhimRailCache {
+    static func fileURL(for key: String) -> URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let safe = key.replacingOccurrences(of: ":", with: "-")
+        return dir.appendingPathComponent("phim-rail-\(safe).json")
+    }
+
+    static func save(key: String, root: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: root)
+        else { return }
+        try? data.write(to: fileURL(for: key), options: .atomic)
+    }
+
+    /// Read + decode + parse every cached rail, in job order.
+    /// Rails whose cache is missing, corrupt or parses empty
+    /// are simply absent from the result.
+    static func hydrate(
+        _ jobs: [(key: String, provider: String, request: Providers.ListRequest)]
+    ) async -> [(String, [Movie])] {
+        var out: [(String, [Movie])] = []
+        for job in jobs {
+            guard let data = try? Data(contentsOf: fileURL(for: job.key)),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let movies = Providers.parseList(job.provider, job.request, root)
+            if !movies.isEmpty { out.append((job.key, movies)) }
+        }
+        return out
+    }
+}
+
 struct TorGenreRail {
     var type: String
     var genre: String
@@ -144,10 +322,29 @@ final class TorHomeStore: ObservableObject {
     @Published var rails: [String: [TorMeta]] = [:]
     @Published var genreRails: [TorGenreRail] = []
     @Published var loading = false
+    /// Board contract (rework v1.9, Team 4 BLOCK-1): true once
+    /// a load has run 20 s with NO rail landed, so the view can
+    /// show its error+retry surface while slow fetches are
+    /// still in flight. Cleared when a load starts and the
+    /// moment any rail lands. Keyed on rails, never hasData:
+    /// discoverCatalogs never returns empty (Cinemeta
+    /// fallbacks), so hasData is true even when every rail
+    /// fetch behind it is dead.
+    @Published var loadTimedOut = false
 
     private var loadedAt: Date?
+    private var loadGeneration = 0
 
     var hasData: Bool { !catalogs.isEmpty }
+
+    /// True once any rail with actual content has landed —
+    /// the honest "the home has something to show" signal.
+    /// (hasData only means catalogues were discovered, which
+    /// the Cinemeta fallbacks make unconditional.)
+    var hasAnyRail: Bool {
+        rails.values.contains { !$0.isEmpty }
+            || genreRails.contains { !$0.metas.isEmpty }
+    }
 
     func loadIfNeeded() {
         if loading { return }
@@ -156,27 +353,100 @@ final class TorHomeStore: ObservableObject {
         Task { await load() }
     }
 
+    /// Forced reload for the error surface's Retry: bypasses
+    /// the loadedAt freshness guard entirely — with the old
+    /// unconditional stamp (see load()), that guard no-opped
+    /// for 15 minutes after a dead-route load and Retry could
+    /// never recover. A load already in flight IS the fresh
+    /// attempt, so it is left to finish: it either lands a
+    /// rail (clearing the error state) or ends, freeing the
+    /// next Retry.
+    func reload() {
+        if loading { return }
+        Task { await load() }
+    }
+
     private func load() async {
         loading = true
+        loadTimedOut = false
+        loadGeneration += 1
+        let generation = loadGeneration
         defer { loading = false }
+
+        // Deadline watchdog (board contract, BLOCK-1), started
+        // before any work so the 20 s is measured from the
+        // load's start. Semantics mirror PhimStore's watchdog,
+        // except the trip condition is "no rail has landed" —
+        // Tor's hasData cannot be used here (see loadTimedOut).
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard let self, !Task.isCancelled else { return }
+            if self.loadGeneration == generation && !self.hasAnyRail {
+                self.loadTimedOut = true
+            }
+        }
+        defer { watchdog.cancel() }
+
         let base = TorrentSettings.effectiveBase ?? TorrentSettings.cinemeta
         let cats = await TorrentClient.discoverCatalogs(addonBase: base)
         if !cats.isEmpty { catalogs = cats }
         for cat in catalogs {
-            if let metas = try? await TorrentClient.fetchCatalog(cat) {
-                rails[cat.id + "|" + cat.type] = metas
-            }
-        }
-        // Genre rails: fail-soft per rail — a throw/empty just
-        // omits that rail; kept rails stay in spec order.
-        var fetchedRails: [TorGenreRail] = []
-        for spec in Self.genreSpec {
-            if let metas = try? await TorrentClient.fetchGenreCatalog(type: spec.type, genre: spec.genre),
+            // Preserve-on-empty (C-5 class, matching the
+            // genre path below): an empty-but-successful
+            // fetch must not overwrite a rail a previous
+            // load already landed — only a non-empty result
+            // replaces the rail (and stamps the load).
+            if let metas = try? await TorrentClient.fetchCatalog(cat),
                !metas.isEmpty {
-                fetchedRails.append(TorGenreRail(type: spec.type, genre: spec.genre, title: spec.title, metas: metas))
+                rails[cat.id + "|" + cat.type] = metas
+                // A rail actually landed: stamp the load
+                // and clear any deadline state at once.
+                loadedAt = Date()
+                loadTimedOut = false
             }
         }
-        genreRails = fetchedRails
-        if hasData { loadedAt = Date() }
+        // Genre rails (C-5): fetched CONCURRENTLY and published
+        // PER RAIL as each lands, merged over the previously
+        // good rails in spec order — a failed or empty fetch
+        // keeps the old rail. The pre-v1.9 code fetched
+        // sequentially into a local array, published once at the
+        // end, and overwrote genreRails unconditionally, so one
+        // network blip during a refresh wiped every genre rail
+        // the owner had, and the block could take 10 × 25 s of
+        // sequential timeouts to appear at all.
+        await withTaskGroup(of: TorGenreRail?.self) { group in
+            for spec in Self.genreSpec {
+                group.addTask {
+                    if let metas = try? await TorrentClient.fetchGenreCatalog(type: spec.type, genre: spec.genre),
+                       !metas.isEmpty {
+                        return TorGenreRail(type: spec.type, genre: spec.genre, title: spec.title, metas: metas)
+                    }
+                    return nil
+                }
+            }
+            for await rail in group {
+                guard let rail else { continue }
+                var byKey: [String: TorGenreRail] = [:]
+                for r in genreRails { byKey[r.type + "|" + r.genre] = r }
+                byKey[rail.type + "|" + rail.genre] = rail
+                genreRails = Self.genreSpec.compactMap {
+                    byKey[$0.type + "|" + $0.genre]
+                }
+                // Group children only return a rail for a
+                // non-empty fetch, so this IS a landed rail:
+                // stamp the load and clear deadline state.
+                loadedAt = Date()
+                loadTimedOut = false
+            }
+        }
+        // No closing stamp here (BLOCK-1): the pre-fix code
+        // stamped loadedAt whenever hasData — but the
+        // fallback catalogue list makes hasData true even
+        // when every rail fetch died, which then made
+        // loadIfNeeded no-op for 15 minutes and stranded the
+        // error surface's Retry. loadedAt is now stamped ONLY
+        // at the two landing sites above, so a load in which
+        // nothing landed leaves it nil and the next entry (or
+        // reload()) fetches again.
     }
 }

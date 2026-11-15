@@ -47,28 +47,50 @@ enum TpClient {
 
     // MARK: - Catalogue
 
+    /// Per-request budget for catalogue (list/search) calls
+    /// (was 20 s pre-v1.9).
+    private static let listTimeout: TimeInterval = 12
+    /// Tuned detail budgets (LATENCY-AUDIT §6): the old single
+    /// 20 s detail budget is SPLIT — the API call gets its own
+    /// 10 s cap (healthy max 1.54) and the CacheVideo probe
+    /// inside detail() gets its own separate 10 s cap (in
+    /// CacheVideo.resolveCap; healthy max 5.40). Neither draws
+    /// from the other. SourceHealth fuses tighten within both.
+    private static let detailCap: TimeInterval = 10
+    /// Tuned Gold embed cap (LATENCY-AUDIT §6): 20 s → 8 s
+    /// (healthy max 1.68).
+    private static let embedCap: TimeInterval = 8
+
+    static func newestRaw(page: Int) async throws -> [String: Any] {
+        try await JoeHTTP.getJSON(
+            base + "/movies?page=\(page)&limit=24", timeout: listTimeout)
+    }
+
     static func newest(page: Int) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(
-            base + "/movies?page=\(page)&limit=24", timeout: 20)
-        return parseItems(root)
+        parseItems(try await newestRaw(page: page))
+    }
+
+    static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
+        let t = type == "phim-bo" ? "series" : "single,movie"
+        return try await JoeHTTP.getJSON(
+            base + "/movies?page=\(page)&limit=24&type=\(t)", timeout: listTimeout)
     }
 
     /// type: "phim-le" → single,movie; "phim-bo" → series.
     static func listByType(_ type: String, page: Int) async throws -> [Movie] {
-        let t = type == "phim-bo" ? "series" : "single,movie"
-        let root = try await JoeHTTP.getJSON(
-            base + "/movies?page=\(page)&limit=24&type=\(t)", timeout: 20)
-        return parseItems(root)
+        parseItems(try await listByTypeRaw(type, page: page))
     }
 
     static func search(_ keyword: String) async throws -> [Movie] {
         let root = try await JoeHTTP.getJSON(
             base + "/movies?search=\(JoeHTTP.qenc(keyword))&page=1&limit=30",
-            timeout: 20)
+            timeout: listTimeout)
         return parseItems(root)
     }
 
-    private static func parseItems(_ root: [String: Any]) -> [Movie] {
+    /// Internal (not private) so Providers.parseList can re-parse
+    /// a cached raw response without a network call.
+    static func parseItems(_ root: [String: Any]) -> [Movie] {
         let items = JSON.arr(JSON.obj(root, "data"), "items") ?? []
         return items.compactMap { o in
             if JSON.bool(o, "vipOnly") { return nil }
@@ -98,7 +120,12 @@ enum TpClient {
     // MARK: - Detail
 
     static func detail(_ slug: String) async throws -> Detail {
-        let root = try await JoeHTTP.getJSON(base + "/movies/\(slug)", timeout: 20)
+        let url = base + "/movies/\(slug)"
+        let root = try await SourceHealth.run(
+            provider: Providers.TP, stage: .detail, url: url, cap: detailCap
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
         var d = Detail()
         guard let data = JSON.obj(root, "data"),
               let mo = JSON.obj(data, "movie") else { return d }
@@ -155,9 +182,14 @@ enum TpClient {
         let idx = JSON.int(gold, "sourceIndex", -1)
         var p = 2
         while p <= totalPages && out.count < total && p <= 20 && idx >= 0 {
-            let r = try await JoeHTTP.getJSON(
-                base + "/movies/\(slug)/episodes?sourceIndex=\(idx)&page=\(p)&limit=100",
-                timeout: 20)
+            // Gold episode paging is part of the detail's API
+            // work — same 10 s stage cap as the detail call.
+            let pageURL = base + "/movies/\(slug)/episodes?sourceIndex=\(idx)&page=\(p)&limit=100"
+            let r = try await SourceHealth.run(
+                provider: Providers.TP, stage: .detail, url: pageURL, cap: detailCap
+            ) { budget in
+                try await JoeHTTP.getJSON(pageURL, timeout: budget)
+            }
             appendEpisodes(&out, JSON.arr(JSON.obj(r, "data"), "episodes"))
             p += 1
         }
@@ -262,7 +294,19 @@ enum TpClient {
     /// pair; 3xx → the Location is a VSMOV video page (resolve
     /// via VsClient) or already a playlist.
     private static func resolveGold(hash: String) async throws -> String {
-        let raw = try await getNoRedirect(base + "/embed/\(hash)")
+        let embedURL = base + "/embed/\(hash)"
+        // The status check lives INSIDE the measured closure:
+        // a dead hash's 404 (audit §3.1: declares in ≈1.2 s)
+        // records as an instant-fail sample, not a success.
+        let raw = try await SourceHealth.run(
+            provider: Providers.TP, stage: .resolve, url: embedURL, cap: embedCap
+        ) { budget in
+            let r = try await getNoRedirect(embedURL, timeout: budget)
+            guard r.status == 200 || (300..<400).contains(r.status) else {
+                throw URLError(.badServerResponse)
+            }
+            return r
+        }
         if (300..<400).contains(raw.status) {
             guard let loc = raw.location, !loc.isEmpty else {
                 throw URLError(.badServerResponse)
@@ -326,10 +370,11 @@ enum TpClient {
     private static let noRedirectSession = URLSession(
         configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
 
-    private static func getNoRedirect(_ urlString: String) async throws -> RawResponse {
+    private static func getNoRedirect(_ urlString: String,
+                                      timeout: TimeInterval) async throws -> RawResponse {
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
+        request.timeoutInterval = timeout
         request.setValue(JoeHTTP.userAgent, forHTTPHeaderField: "User-Agent")
         let (data, response) = try await noRedirectSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {

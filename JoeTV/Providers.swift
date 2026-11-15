@@ -68,22 +68,71 @@ enum Providers {
 
     // MARK: - Catalogue dispatch
 
-    static func newest(_ code: String, page: Int) async throws -> [Movie] {
-        switch code {
-        case F4K: return try await F4kClient.newest(page: page)
-        case VS: return try await VsClient.newest(page: page)
-        case TP: return try await TpClient.newest(page: page)
-        default: return try await KkClient.newest(page: page)
+    /// One catalogue (list) request, provider-agnostic. Splitting
+    /// fetch from parse lets PhimStore cache the RAW response of
+    /// each rail job and re-parse it on the next launch with no
+    /// network (the TVStore cache-first pattern). Genre/country
+    /// requests exist only on KKPhim; the other providers are
+    /// never asked for them.
+    enum ListRequest {
+        case newest(page: Int)
+        case byType(type: String, page: Int)
+        case genre(slug: String, page: Int)
+        case country(slug: String, page: Int, limit: Int?)
+    }
+
+    static func fetchListRaw(_ code: String, _ req: ListRequest) async throws -> [String: Any] {
+        switch req {
+        case .genre(let slug, let page):
+            return try await KkClient.listByGenreRaw(slug, page: page)
+        case .country(let slug, let page, let limit):
+            return try await KkClient.listByCountryRaw(slug, page: page, limit: limit)
+        case .newest(let page):
+            switch code {
+            case F4K: return try await F4kClient.newestRaw(page: page)
+            case VS: return try await VsClient.newestRaw(page: page)
+            case TP: return try await TpClient.newestRaw(page: page)
+            default: return try await KkClient.newestRaw(page: page)
+            }
+        case .byType(let type, let page):
+            switch code {
+            case F4K: return try await F4kClient.listByTypeRaw(type, page: page)
+            case VS: return try await VsClient.listByTypeRaw(type, page: page)
+            case TP: return try await TpClient.listByTypeRaw(type, page: page)
+            default: return try await KkClient.listByTypeRaw(type, page: page)
+            }
         }
     }
 
-    static func listByType(_ code: String, type: String, page: Int) async throws -> [Movie] {
-        switch code {
-        case F4K: return try await F4kClient.listByType(type, page: page)
-        case VS: return try await VsClient.listByType(type, page: page)
-        case TP: return try await TpClient.listByType(type, page: page)
-        default: return try await KkClient.listByType(type, page: page)
+    static func parseList(_ code: String, _ req: ListRequest, _ root: [String: Any]) -> [Movie] {
+        switch req {
+        case .genre, .country:
+            return KkClient.parseItems(root)
+        case .newest:
+            switch code {
+            case F4K: return F4kClient.parseNewest(root)
+            case VS: return VsClient.parseList(root)
+            case TP: return TpClient.parseItems(root)
+            default: return KkClient.parseItems(root)
+            }
+        case .byType(let type, let page):
+            switch code {
+            case F4K: return F4kClient.parseListByType(root, type: type, page: page)
+            case VS: return VsClient.parseList(root)
+            case TP: return TpClient.parseItems(root)
+            default: return KkClient.parseItems(root)
+            }
         }
+    }
+
+    static func newest(_ code: String, page: Int) async throws -> [Movie] {
+        let req = ListRequest.newest(page: page)
+        return parseList(code, req, try await fetchListRaw(code, req))
+    }
+
+    static func listByType(_ code: String, type: String, page: Int) async throws -> [Movie] {
+        let req = ListRequest.byType(type: type, page: page)
+        return parseList(code, req, try await fetchListRaw(code, req))
     }
 
     static func kkGenre(_ slug: String, page: Int) async throws -> [Movie] { try await KkClient.listByGenre(slug, page: page) }
@@ -210,6 +259,39 @@ enum Providers {
         return last
     }
 
+    /// The SEASON number an episode name carries, when it
+    /// carries one: "S2 · Tập 3" / "S02E03" → 2, "Season 2" /
+    /// "Mùa 2" → 2. nil when the name is season-free — the KK
+    /// norm (bare "Tập N" under a per-season detail page, whose
+    /// Movie.tmdbSeason carries the season instead). Used by
+    /// the substitution rung to address Torrentio series
+    /// streams as imdbId:season:episode.
+    static func seasonNumber(_ epName: String) -> Int? {
+        let lower = epName.lowercased()
+        for marker in ["season ", "mùa "] {
+            if let r = lower.range(of: marker) {
+                let digits = String(lower[r.upperBound...].prefix { $0.isNumber })
+                if let v = Int(digits), v > 0 { return v }
+            }
+        }
+        // Sxx marker: an "s" at a word boundary followed by
+        // digits (S2, S02E03, "S2 · …"). The boundary check
+        // keeps ordinary words ("Season" itself has no digits
+        // after its s) from firing.
+        var idx = lower.startIndex
+        while idx < lower.endIndex {
+            if lower[idx] == "s",
+               idx == lower.startIndex
+                || !lower[lower.index(before: idx)].isLetter {
+                let after = lower.index(after: idx)
+                let digits = String(lower[after...].prefix { $0.isNumber })
+                if let v = Int(digits), v > 0 { return v }
+            }
+            idx = lower.index(after: idx)
+        }
+        return nil
+    }
+
     // MARK: - Play ladder (fresh resolution)
 
     /// One playable candidate: a freshly resolved URL plus how
@@ -255,7 +337,7 @@ enum Providers {
         }
         guard let target = byName ?? byNum else { return lad }
         lad.matchedEpName = target.name
-        for s in d.servers {
+        for s in orderServers(code: code, servers: d.servers) {
             var pick: Episode?
             for e in s.episodes
             where e.name.trimmingCharacters(in: .whitespaces).lowercased()
@@ -309,6 +391,75 @@ enum Providers {
         }
     }
 
+    // MARK: - Predictor-ordered servers (consumer b)
+
+    /// Predictor consumer (b) at ladder granularity: servers
+    /// whose resolution path is currently LATCHED (demoted by
+    /// SourceHealth) are resolved AFTER unlatched ones, so a
+    /// dead-mode host is tried last instead of first. Stable:
+    /// the provider's own server order stands inside each
+    /// group, and with nothing latched the order is untouched.
+    private static func orderServers(code: String, servers: [Server]) -> [Server] {
+        guard servers.count > 1 else { return servers }
+        let flagged = servers.map {
+            (server: $0, demoted: serverDemoted(code: code, server: $0))
+        }
+        guard flagged.contains(where: { $0.demoted }) else { return servers }
+        return flagged.filter { !$0.demoted }.map(\.server)
+            + flagged.filter { $0.demoted }.map(\.server)
+    }
+
+    /// Whether one server's resolution path is latched, read
+    /// from its first episode carrying resolution data (a
+    /// server's episodes share one host family, so the first
+    /// is representative). The latch keys are the SAME keys
+    /// the resolvers record under:
+    ///   VS embed        → (vsmov, resolve, embed host)
+    ///   TP "cv:" marker → (tp, resolve, CacheVideo resolver)
+    ///   TP "tpv:" page  → (vsmov, resolve, embed host) — it
+    ///                     resolves through VsClient
+    ///   TP "tp:" hash   → (tp, resolve, phimsrv) — only the
+    ///                     host of the probe URL is read
+    ///   direct m3u8     → (provider, playlist, playlist host)
+    private static func serverDemoted(code: String, server: Server) -> Bool {
+        for e in server.episodes {
+            if code == VS {
+                if !e.embed.isEmpty {
+                    return SourceHealth.isLatched(
+                        provider: Providers.VS, stage: .resolve, url: e.embed)
+                }
+                if !e.m3u8.isEmpty {
+                    return SourceHealth.isLatched(
+                        provider: Providers.VS, stage: .playlist, url: e.m3u8)
+                }
+            } else if code == TP {
+                if e.embed.hasPrefix("cv:") {
+                    return SourceHealth.isLatched(
+                        provider: Providers.TP, stage: .resolve,
+                        url: CacheVideo.resolver)
+                }
+                if e.embed.hasPrefix("tpv:") {
+                    return SourceHealth.isLatched(
+                        provider: Providers.VS, stage: .resolve,
+                        url: String(e.embed.dropFirst(4)))
+                }
+                if e.embed.hasPrefix("tp:") {
+                    return SourceHealth.isLatched(
+                        provider: Providers.TP, stage: .resolve,
+                        url: TpClient.base + "/embed/probe")
+                }
+                if !e.m3u8.isEmpty {
+                    return SourceHealth.isLatched(
+                        provider: Providers.TP, stage: .playlist, url: e.m3u8)
+                }
+            } else if !e.m3u8.isEmpty {
+                return SourceHealth.isLatched(
+                    provider: code, stage: .playlist, url: e.m3u8)
+            }
+        }
+        return false
+    }
+
     /// True when the episode can be played at all (drives chip
     /// greying): m3u8 present, or a resolvable embed/marker on
     /// VSMOV / Tủ Phim. Embed-only on any other provider → false.
@@ -323,26 +474,102 @@ enum Providers {
     /// absence means "searched, not carried". Session-scoped —
     /// slugs are catalogue identity, not stream URLs, so caching
     /// them does not violate the fresh-resolution rule.
+    /// Lock-guarded (C-15): findAlternatives runs from async
+    /// contexts that can overlap; the pre-v1.9 plain static var
+    /// was unsynchronised shared mutable state.
+    private static let altCacheLock = NSLock()
     private static var altCache: [String: [String: String]] = [:]
 
-    /// Find which OTHER providers carry the same film. Returns a
-    /// priority-ordered map providerCode → slug, possibly empty.
+    private static func altCacheGet(_ key: String) -> [String: String]? {
+        altCacheLock.lock()
+        defer { altCacheLock.unlock() }
+        return altCache[key]
+    }
+
+    private static func altCacheSet(_ key: String, _ value: [String: String]) {
+        altCacheLock.lock()
+        altCache[key] = value
+        altCacheLock.unlock()
+    }
+
+    /// Lock-guarded result box for the deadline-bounded
+    /// alternative search below: the search runs in an
+    /// unstructured task (so the deadline can abandon it
+    /// mid-flight) and publishes progress here.
+    private final class AltSearchBox {
+        private let lock = NSLock()
+        private var found: [String: String] = [:]
+        private var finished = false
+        func update(_ f: [String: String]) {
+            lock.lock(); found = f; lock.unlock()
+        }
+        func finish(_ f: [String: String]) {
+            lock.lock(); found = f; finished = true; lock.unlock()
+        }
+        var isFinished: Bool {
+            lock.lock(); defer { lock.unlock() }; return finished
+        }
+        func snapshot() -> [String: String] {
+            lock.lock(); defer { lock.unlock() }; return found
+        }
+    }
+
+    /// The alternative list in failover order: priority order,
+    /// except providers SourceHealth currently demotes (any
+    /// live latch) sort after the healthy ones — predictor
+    /// consumer (b) at hop granularity. Stable inside groups.
+    private static func orderedAlternatives(
+        found: [String: String], fromCode: String
+    ) -> [(code: String, slug: String)] {
+        let all = priority.filter { $0 != fromCode && found[$0] != nil }
+            .map { (code: $0, slug: found[$0]!) }
+        let healthy = all.filter { !SourceHealth.providerDemoted($0.code) }
+        let demoted = all.filter { SourceHealth.providerDemoted($0.code) }
+        return demoted.isEmpty ? all : healthy + demoted
+    }
+
+    /// Find which OTHER providers carry the same film. Returns
+    /// a failover-ordered list of providerCode → slug, possibly
+    /// empty.
+    ///
+    /// OVERALL DEADLINE 12 s (LATENCY-AUDIT §6): the searches
+    /// run sequentially (up to 2 per provider at a 12 s list
+    /// budget each — an unbounded worst case near 72 s), while
+    /// the measured typical is 2.7–5.7 s total. The search
+    /// therefore runs in a task the caller stops waiting on at
+    /// 12 s; whatever it found by then is returned (the hop
+    /// tries it), the task is cancelled, and a deadline-cut
+    /// result is NOT written to the session cache — providers
+    /// it never reached are "unsearched", not "not carried".
     static func findAlternatives(fromCode: String, name: String,
                                  origin: String, year: String) async -> [(code: String, slug: String)] {
         let key = filmKey(name: name, year: year) + "@" + fromCode
-        if let hit = altCache[key] {
-            return priority.filter { $0 != fromCode && hit[$0] != nil }
-                .map { (code: $0, slug: hit[$0]!) }
+        if let hit = altCacheGet(key) {
+            return orderedAlternatives(found: hit, fromCode: fromCode)
         }
-        var found: [String: String] = [:]
-        for code in priority where code != fromCode {
-            if let slug = await findSlug(code: code, name: name, origin: origin, year: year) {
-                found[code] = slug
+        let box = AltSearchBox()
+        let search = Task {
+            var found: [String: String] = [:]
+            for code in priority where code != fromCode {
+                if Task.isCancelled { return }
+                if let slug = await findSlug(code: code, name: name,
+                                             origin: origin, year: year) {
+                    found[code] = slug
+                    box.update(found)
+                }
             }
+            if !Task.isCancelled { box.finish(found) }
         }
-        altCache[key] = found
-        return priority.filter { $0 != fromCode && found[$0] != nil }
-            .map { (code: $0, slug: found[$0]!) }
+        let start = Date()
+        while !box.isFinished && !Task.isCancelled
+                && Date().timeIntervalSince(start) < 12 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let completed = box.isFinished
+        if !completed { search.cancel() }
+        let found = box.snapshot()
+        if completed { altCacheSet(key, found) }
+        return orderedAlternatives(found: found, fromCode: fromCode)
     }
 
     /// One provider's slug for a film, via its search API: search

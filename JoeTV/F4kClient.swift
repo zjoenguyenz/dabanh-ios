@@ -41,30 +41,58 @@ import Foundation
 /// UNVERIFIED-ON-DEVICE (flagged in the delivery report).
 enum F4kClient {
     static let base = "https://film4k.net"
+    /// Per-request budget for catalogue (list/search) calls.
+    private static let listTimeout: TimeInterval = 12
+    /// Tuned detail cap (LATENCY-AUDIT §6): 25 s → 10 s
+    /// (healthy detail max 1.41). SourceHealth's dynamic fuse
+    /// may only tighten within it.
+    private static let detailCap: TimeInterval = 10
 
     // MARK: - Endpoints
+
+    static func newestRaw(page: Int) async throws -> [String: Any] {
+        try await JoeHTTP.getJSON(base + "/api/home?page=\(page)",
+                                  timeout: listTimeout)
+    }
+
+    /// Parse a /api/home?page= body (the "list" section) — also
+    /// used by Providers.parseList on cached raw responses.
+    static func parseNewest(_ root: [String: Any]) -> [Movie] {
+        parseItems(JSON.arr(root, "list") ?? [])
+    }
 
     /// The home feed's paginated "list" — newest-updated titles,
     /// movies and series mixed.
     static func newest(page: Int) async throws -> [Movie] {
-        let root = try await JoeHTTP.getJSON(base + "/api/home?page=\(page)")
-        return parseItems(JSON.arr(root, "list") ?? [])
+        parseNewest(try await newestRaw(page: page))
     }
 
-    /// Typed rails from the home payload: page 1 uses the curated
+    static func listByTypeRaw(_ type: String, page: Int) async throws -> [String: Any] {
+        switch type {
+        case "phim-le", "phim-bo":
+            if page <= 1 {
+                return try await JoeHTTP.getJSON(base + "/api/home",
+                                                 timeout: listTimeout)
+            }
+            return try await JoeHTTP.getJSON(base + "/api/home?page=\(page)",
+                                             timeout: listTimeout)
+        default:
+            // No Film4K equivalent — no request is made at all.
+            return [:]
+        }
+    }
+
+    /// Parse a listByTypeRaw body: page 1 reads the curated
     /// newMovies / newSeries sections; deeper pages filter the
-    /// paginated mixed list by media type. Other KK-style types
-    /// have no Film4K equivalent and return empty (the rail then
-    /// simply does not render).
-    static func listByType(_ type: String, page: Int) async throws -> [Movie] {
+    /// paginated mixed list by media type.
+    static func parseListByType(_ root: [String: Any], type: String,
+                                page: Int) -> [Movie] {
         switch type {
         case "phim-le", "phim-bo":
             let wantMovie = type == "phim-le"
             if page <= 1 {
-                let root = try await JoeHTTP.getJSON(base + "/api/home")
                 return parseItems(JSON.arr(root, wantMovie ? "newMovies" : "newSeries") ?? [])
             }
-            let root = try await JoeHTTP.getJSON(base + "/api/home?page=\(page)")
             return parseItems(JSON.arr(root, "list") ?? [])
                 .filter { ($0.type == "single") == wantMovie }
         default:
@@ -72,17 +100,31 @@ enum F4kClient {
         }
     }
 
+    /// Typed rails from the home payload. Other KK-style types
+    /// have no Film4K equivalent and return empty (the rail then
+    /// simply does not render).
+    static func listByType(_ type: String, page: Int) async throws -> [Movie] {
+        parseListByType(try await listByTypeRaw(type, page: page),
+                        type: type, page: page)
+    }
+
     /// Suggest is the site's only search surface (measured:
     /// /api/search answers 404). Items are light — slug, titles,
     /// poster, mediaType, year — which parseMovie tolerates.
     static func search(_ keyword: String) async throws -> [Movie] {
         let root = try await JoeHTTP.getJSON(
-            base + "/api/search/suggest?q=\(JoeHTTP.qenc(keyword))")
+            base + "/api/search/suggest?q=\(JoeHTTP.qenc(keyword))",
+            timeout: listTimeout)
         return parseItems(JSON.arr(root, "list") ?? [])
     }
 
     static func detail(_ slug: String) async throws -> Detail {
-        let root = try await JoeHTTP.getJSON(base + "/api/title/\(slug)")
+        let url = base + "/api/title/\(slug)"
+        let root = try await SourceHealth.run(
+            provider: Providers.F4K, stage: .detail, url: url, cap: detailCap
+        ) { budget in
+            try await JoeHTTP.getJSON(url, timeout: budget)
+        }
         var d = Detail()
         guard let item = JSON.obj(root, "movie") else { return d }
         d.movie = parseMovie(item)

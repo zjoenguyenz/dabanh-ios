@@ -10,9 +10,11 @@ import Foundation
 ///   progress  KKPhim     "kk|<slug>|<episode name>"
 ///             Film4K.net "f4k|<slug>|<episode name>"
 ///             VSMOV      "vs|<slug>|<episode name>"
+///             Tủ Phim    "tp|<slug>|<episode name>"
 ///             Torrent "tor|<stream id>" (meta id for a movie,
 ///                     metaId:S:E per series episode)
 ///   favorite  "kk|<slug>" · "f4k|<slug>" · "vs|<slug>"
+///             "tp|<slug>"
 ///             Torrent "tor|<meta id>|<type>"
 ///
 /// ADDENDUM RULE: an entry stores provider + slug + episode name +
@@ -81,6 +83,10 @@ final class WatchStore: ObservableObject {
         switch provider {
         case Providers.F4K: return "f4k|\(slug)"
         case Providers.VS: return "vs|\(slug)"
+        // C-6: Tủ Phim has its OWN prefix — pre-v1.9 it fell into
+        // the kk| default, so a TP title and a KK title sharing a
+        // slug shared one favourite state.
+        case Providers.TP: return "tp|\(slug)"
         default: return "kk|\(slug)"
         }
     }

@@ -49,6 +49,16 @@ final class PlayDirector: ObservableObject {
     private let resolveLadder: (PlayIdentity) async -> [PlayCandidate]
     /// nil for sources with no cross-provider hop (torrent).
     private let hopIdentity: ((PlayIdentity) async -> PlayIdentity?)?
+    /// The substitution rung (owner law, v1.9): when the ladder
+    /// AND the hop are both exhausted, the director asks this
+    /// closure for replacement candidates for the SAME title
+    /// from another source family, still under the CURRENT
+    /// identity (resume/Continue Watching stay on the original
+    /// entry). The Phim detail wires it to the torrent side,
+    /// matched by TMDB/IMDB id. nil for sources with nothing
+    /// behind them (the torrent section's own sessions) — those
+    /// exhaust exactly as before.
+    private let fallbackCandidates: ((PlayIdentity) async -> [PlayCandidate])?
     /// Resume position read at session start (>20 s rule applied
     /// by the caller against the stored entry).
     private let resumeMs: Int64
@@ -57,6 +67,7 @@ final class PlayDirector: ObservableObject {
     private var candidateIndex = 0
     private var refreshed = false
     private var hopped = false
+    private var fallbackTried = false
     private var seekApplied = false
     private var lastPosMs: Int64 = 0
     private var lastDurMs: Int64 = 0
@@ -66,12 +77,14 @@ final class PlayDirector: ObservableObject {
          identity: PlayIdentity,
          resumeMs: Int64,
          resolveLadder: @escaping (PlayIdentity) async -> [PlayCandidate],
-         hopIdentity: ((PlayIdentity) async -> PlayIdentity?)?) {
+         hopIdentity: ((PlayIdentity) async -> PlayIdentity?)?,
+         fallbackCandidates: ((PlayIdentity) async -> [PlayCandidate])? = nil) {
         self.store = store
         self.identity = identity
         self.resumeMs = resumeMs
         self.resolveLadder = resolveLadder
         self.hopIdentity = hopIdentity
+        self.fallbackCandidates = fallbackCandidates
     }
 
     func start() {
@@ -115,8 +128,12 @@ final class PlayDirector: ObservableObject {
         }
     }
 
-    /// Refresh once → hop once → exhausted. Mirrors the Android
-    /// player exactly (PlayerActivity.beginFailoverStep).
+    /// Refresh once → hop once → substitution rung once →
+    /// exhausted. The first two steps mirror the Android player
+    /// exactly (PlayerActivity.beginFailoverStep); the rung is
+    /// the v1.9 owner-law extension behind them, reached from
+    /// every exhaustion path (an empty ladder, a failed item,
+    /// the stall watchdog advancing past the last candidate).
     private func failoverStep() async {
         if !refreshed {
             refreshed = true
@@ -134,7 +151,33 @@ final class PlayDirector: ObservableObject {
                 return
             }
         }
+        if !fallbackTried, let fallbackCandidates {
+            fallbackTried = true
+            notice = "Đang tìm nguồn thay thế…"
+            let extra = await fallbackCandidates(identity)
+            if !extra.isEmpty {
+                notice = "Nguồn thay thế: Torrent"
+                candidates = extra
+                candidateIndex = 0
+                beginCandidate()
+                return
+            }
+        }
         phase = .exhausted
+    }
+
+    /// Manual retry from the exhausted slate (§8): reset the
+    /// failover bookkeeping and run the whole ladder again —
+    /// sources that were down may have recovered, and the owner
+    /// must never be stranded on a dead slate with only Menu.
+    func retryFromExhausted() {
+        guard phase == .exhausted else { return }
+        refreshed = false
+        hopped = false
+        fallbackTried = false
+        seekApplied = false
+        notice = "Đang thử lại…"
+        Task { await loadLadder() }
     }
 
     /// Item is ready: apply the resume seek once (the view's
@@ -192,6 +235,9 @@ final class PlayDirector: ObservableObject {
 struct JoePlayerView: View {
     @StateObject private var director: PlayDirector
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var slateFocus: SlateButton?
+
+    private enum SlateButton: Hashable { case retry, back }
 
     init(director: PlayDirector) {
         _director = StateObject(wrappedValue: director)
@@ -202,10 +248,22 @@ struct JoePlayerView: View {
             Color.black.ignoresSafeArea()
             switch director.phase {
             case .resolving:
-                ProgressView("Đang tải…")
-                    .font(.title3)
-                    .foregroundStyle(.white)
-                    .tint(.white)
+                // §7.10 loading slate: black, white spinner, the
+                // label bottom-left (TV360 language).
+                VStack {
+                    Spacer()
+                    HStack(spacing: 14) {
+                        ProgressView()
+                            .tint(.white)
+                        Text("Đang tải…")
+                            .font(.system(size: 29))
+                            .foregroundStyle(.white)
+                        Spacer()
+                    }
+                    .padding(.leading, 48)
+                    .padding(.bottom, 36)
+                }
+                .ignoresSafeArea()
             case .playing:
                 if let candidate = director.candidate {
                     PlayerController(candidate: candidate,
@@ -215,20 +273,57 @@ struct JoePlayerView: View {
                 }
                 statusCapsule
             case .exhausted:
-                VStack(spacing: 18) {
-                    Text("NGUỒN ĐANG LỖI")
-                        .font(.system(size: 50, weight: .bold))
-                        .tracking(3)
+                // §8 error slate: message + cause + reachable
+                // buttons, focus on the first button. (v1.8's
+                // slate was text-only — the only way out was
+                // Menu, which read as part of the freeze.)
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Không phát được nguồn này.")
+                        .font(.system(size: 29, weight: .semibold))
                         .foregroundStyle(.white)
-                    Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được. Bấm Menu để quay lại.")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.65))
+                    Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(.white.opacity(0.7))
+                    HStack(spacing: 16) {
+                        slateButton("Thử lại", tag: .retry) {
+                            director.retryFromExhausted()
+                        }
+                        slateButton("Quay lại", tag: .back) {
+                            dismiss()
+                        }
+                    }
+                    .padding(.top, 8)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.leading, 48)
+                .padding(.bottom, 36)
             }
         }
         .onAppear { director.start() }
+        .onChange(of: director.phase) { _, phase in
+            // §8: when the error slate appears, focus lands on
+            // its first button.
+            if phase == .exhausted { slateFocus = .retry }
+        }
         .onDisappear { director.flush() }
         .onExitCommand { dismiss() }
+    }
+
+    private func slateButton(_ title: String, tag: SlateButton,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 29, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 36)
+                .padding(.vertical, 16)
+                .background(Capsule().fill(JoeTheme.accentViolet))
+                .overlay(JoeFocusRing(shape: Capsule()))
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled(true)
+        .focused($slateFocus, equals: tag)
+        .scaleEffect(slateFocus == tag ? 1.05 : 1.0)
     }
 
     private var statusCapsule: some View {
@@ -237,14 +332,14 @@ struct JoePlayerView: View {
             HStack {
                 if let notice = director.notice {
                     Text(notice)
-                        .font(.callout)
+                        .font(.system(size: 25))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 8)
                         .background(Capsule().fill(Color.black.opacity(0.6)))
                 } else if !director.currentLabel.isEmpty {
                     Text(director.currentLabel)
-                        .font(.callout)
+                        .font(.system(size: 25))
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(.horizontal, 18)
                         .padding(.vertical, 8)
@@ -309,6 +404,28 @@ private struct PlayerController: UIViewControllerRepresentable {
         private var timeToken: Any?
         private weak var player: AVPlayer?
         private var failed = false
+        /// U-1 stall watchdog: fires itemFailed() if the item
+        /// has neither readied nor failed 20 s after observe().
+        private var watchdog: DispatchWorkItem?
+        /// Mid-play freeze watchdog (latency round, audit
+        /// §3.2/§6): the U-1 watchdog is cancelled the moment
+        /// the item readies, and before this round NOTHING
+        /// bounded a silent mid-play stall on tvOS — a stream
+        /// could freeze forever without AVPlayer ever raising
+        /// an error. This 1 s ticker watches the playhead
+        /// after readyToPlay: 12 s without advance while the
+        /// player is meant to be playing routes through
+        /// fireFail(), the same failure path as an error, so
+        /// the director's ladder advances (refresh → hop →
+        /// torrent rung → exhausted). 12 s = two missed
+        /// segments at the 6 s cadence of VS/TP/CV (audit §6);
+        /// the value is CONSTANT this round — SourceHealth
+        /// does not move it.
+        private var freezeTimer: Timer?
+        private var freezeReady = false
+        private var freezeEnded = false
+        private var lastPositionSec = -1.0
+        private var lastAdvanceAt = Date()
 
         init(director: PlayDirector) {
             self.director = director
@@ -316,10 +433,41 @@ private struct PlayerController: UIViewControllerRepresentable {
 
         func observe(_ item: AVPlayerItem, player: AVPlayer) {
             self.player = player
+            // U-1: without this, an item whose status stays
+            // .unknown (a stream that accepts the connection and
+            // then never sends a byte) leaves the player on a
+            // silent black screen forever — AVPlayer raises no
+            // error for it. The watchdog feeds the stall into
+            // the director's normal failover path.
+            watchdog?.cancel()
+            let wd = DispatchWorkItem { [weak self] in self?.fireFail() }
+            watchdog = wd
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: wd)
+            // Mid-play freeze watchdog: armed now, but it only
+            // starts judging once the item readies — until
+            // then the pre-ready watchdog above owns the start
+            // phase and the two never overlap.
+            freezeTimer?.invalidate()
+            freezeReady = false
+            freezeEnded = false
+            lastPositionSec = -1
+            lastAdvanceAt = Date()
+            let ticker = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.checkFreeze()
+            }
+            RunLoop.main.add(ticker, forMode: .common)
+            freezeTimer = ticker
             statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 guard let self else { return }
                 switch item.status {
                 case .readyToPlay:
+                    self.watchdog?.cancel()
+                    self.freezeReady = true
+                    self.lastAdvanceAt = Date()
+                    if let p = self.player {
+                        let now = p.currentTime().seconds
+                        self.lastPositionSec = now.isFinite ? now : -1
+                    }
                     DispatchQueue.main.async { [weak self] in
                         guard let self, let player = self.player else { return }
                         self.director.itemReady(player: player)
@@ -338,6 +486,10 @@ private struct PlayerController: UIViewControllerRepresentable {
             endToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
             ) { [weak self] _ in
+                // The freeze watchdog stands down at the end:
+                // a finished item is the end-observer's
+                // transition, never a stall.
+                self?.freezeEnded = true
                 DispatchQueue.main.async { self?.director.itemEnded() }
             }
             timeToken = player.addPeriodicTimeObserver(
@@ -351,13 +503,65 @@ private struct PlayerController: UIViewControllerRepresentable {
             }
         }
 
+        /// One freeze-watchdog tick (1 s, main run loop).
+        /// Judgement is deliberately narrow — it fires ONLY
+        /// on a playhead that has not advanced for 12 s while
+        /// playback is supposed to be running:
+        ///   • not ready yet → the pre-ready watchdog owns
+        ///     the phase; stay out of its way;
+        ///   • user-paused (timeControlStatus == .paused,
+        ///     which is also where the controller sits during
+        ///     a scrub) → hold the clock open, so a resume
+        ///     always gets a fresh 12 s and a pause can never
+        ///     be misread as a stall;
+        ///   • ended / within a breath of the end → the
+        ///     end-observer owns the transition;
+        ///   • any playhead movement — including a seek jump
+        ///     in either direction — counts as alive.
+        private func checkFreeze() {
+            guard freezeReady, !freezeEnded, !failed,
+                  let player, let item = player.currentItem else { return }
+            if player.timeControlStatus == .paused {
+                lastAdvanceAt = Date()
+                let now = player.currentTime().seconds
+                if now.isFinite { lastPositionSec = now }
+                return
+            }
+            let pos = player.currentTime().seconds
+            guard pos.isFinite else { return }
+            let dur = item.duration.seconds
+            if dur.isFinite, dur > 0, pos >= dur - 1.5 {
+                lastAdvanceAt = Date()
+                lastPositionSec = pos
+                return
+            }
+            if lastPositionSec >= 0 {
+                if abs(pos - lastPositionSec) > 0.05 {
+                    lastAdvanceAt = Date()
+                }
+            } else {
+                lastAdvanceAt = Date()
+            }
+            lastPositionSec = pos
+            if Date().timeIntervalSince(lastAdvanceAt) >= 12 {
+                fireFail()
+            }
+        }
+
         private func fireFail() {
             guard !failed else { return }
             failed = true
+            watchdog?.cancel()
+            freezeTimer?.invalidate()
+            freezeTimer = nil
             DispatchQueue.main.async { [weak self] in self?.director.itemFailed() }
         }
 
         func invalidate() {
+            watchdog?.cancel()
+            watchdog = nil
+            freezeTimer?.invalidate()
+            freezeTimer = nil
             statusToken?.invalidate()
             statusToken = nil
             if let failToken { NotificationCenter.default.removeObserver(failToken) }

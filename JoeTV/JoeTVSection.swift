@@ -55,7 +55,7 @@ struct JoeTVSection: View {
             chipRow
             if let message = store.statusMessage {
                 Text(message)
-                    .font(.callout)
+                    .font(.system(size: 25))
                     .foregroundStyle(.orange)
             }
             gridSection
@@ -80,8 +80,19 @@ struct JoeTVSection: View {
             // Hub entry (v1.5): pill DOWN lands focus on the chips
             // (the effective group's chip); DOWN from a chip then
             // enters the grid — see moveChip.
+            // C-17: when there is no effective group yet (store
+            // still loading / zero groups), effectiveGroup is nil
+            // and the old code assigned nil — focus never landed
+            // in the section at all. Fall back to the first chip
+            // id that exists, then to the first grid channel.
             if nav.focusTarget == .sectionTop {
-                focusedChip = effectiveGroup
+                if let group = effectiveGroup {
+                    focusedChip = group
+                } else if let first = chipIDs.first {
+                    focusedChip = first
+                } else if let first = gridChannels.first {
+                    focusedChannel = first.id
+                }
             }
         }
     }
@@ -95,17 +106,17 @@ struct JoeTVSection: View {
                 heroArt(ch)
                 VStack(alignment: .leading, spacing: 14) {
                     Text(ch.group.uppercased())
-                        .font(.system(size: 21, weight: .semibold))
+                        .font(.system(size: 25, weight: .semibold))
                         .tracking(4)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)
                     Text(ch.title)
-                        .font(.system(size: 54, weight: .heavy))
+                        .font(.system(size: 56, weight: .heavy))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                     if fallbackCount(for: ch) > 0 {
                         Text("Nguồn dự phòng: \(fallbackCount(for: ch))")
-                            .font(.system(size: 21, weight: .medium))
+                            .font(.system(size: 25, weight: .medium))
                             .foregroundStyle(.white.opacity(0.8))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
@@ -119,12 +130,12 @@ struct JoeTVSection: View {
             HStack {
                 if store.isLoading {
                     ProgressView("Đang tải danh sách…")
-                        .font(.title3)
+                        .font(.system(size: 29))
                         .foregroundStyle(.white)
                         .tint(.white)
                 } else {
                     Text("Chưa có kênh nào.")
-                        .font(.title3)
+                        .font(.system(size: 29))
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 Spacer()
@@ -152,7 +163,7 @@ struct JoeTVSection: View {
         }
         .frame(width: 340, height: 204)
         .overlay(RoundedRectangle(cornerRadius: 22)
-            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+            .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
     }
 
     private func fallbackText(_ channel: Channel) -> some View {
@@ -176,7 +187,7 @@ struct JoeTVSection: View {
 
     private var chipRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 14) {
+            HStack(spacing: 16) {
                 ForEach(store.visibleGroups, id: \.self) { group in
                     chip(group)
                 }
@@ -200,27 +211,28 @@ struct JoeTVSection: View {
             selectedGroup = group
             store.noteSelectedGroup(group)
         } label: {
-            // Chip text is ALWAYS .white: selection is carried by
-            // the decisive red fill. Focus (v1.5 style law, drawn
-            // by hand under .plain — the system draws nothing) is
-            // a violet fill when the chip is not selected; on the
-            // selected chip it is the lighter-violet outline +
-            // scale over the red fill.
+            // Chip text is ALWAYS .white. Selection AND focus are
+            // carried by the violet family (DESIGN-SPEC §3.1
+            // reserves red for LIVE + watch progress only): the
+            // selected chip wears the accentViolet fill; a focused
+            // chip adds the 4pt lighter-violet outline + scale
+            // (F3), drawn by hand under .plain.
             Text(group)
-                .font(.system(size: 22, weight: selected ? .bold : .medium))
+                .font(.system(size: 29, weight: selected ? .bold : .medium))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Capsule().fill(selected ? JoeTheme.accentRed.opacity(0.85)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+                .background(Capsule().fill(selected ? JoeTheme.accentViolet
                                            : (focused ? JoeTheme.accentViolet
                                                       : Color.white.opacity(0.07))))
                 .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                                lineWidth: 2.5))
-                .scaleEffect(focused ? 1.06 : 1.0)
+                                                lineWidth: 4))
+                .scaleEffect(focused ? 1.05 : 1.0)
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled(true)
         .focused($focusedChip, equals: group)
         .onMoveCommand { direction in moveChip(direction, from: group) }
     }
@@ -229,19 +241,20 @@ struct JoeTVSection: View {
         let focused = focusedChip == id
         return Button(action: action) {
             Text(title)
-                .font(.system(size: 22, weight: .medium))
+                .font(.system(size: 29, weight: .medium))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
                 .background(Capsule().fill(focused ? JoeTheme.accentViolet
-                                           : Color.white.opacity(0.08)))
+                                           : Color.white.opacity(0.07)))
                 .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                                lineWidth: 2.5))
-                .scaleEffect(focused ? 1.06 : 1.0)
+                                                lineWidth: 4))
+                .scaleEffect(focused ? 1.05 : 1.0)
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled(true)
         .focused($focusedChip, equals: id)
         .onMoveCommand { direction in moveChip(direction, from: id) }
         .disabled(store.isLoading || store.isValidating)
@@ -280,7 +293,11 @@ struct JoeTVSection: View {
         case .up:
             nav.requestFocus(.pills)
         case .down:
-            focusedChannel = gridChannels.first?.id
+            // C-17: with an empty grid there is nowhere to land —
+            // hold focus on the chip instead of assigning nil.
+            if let first = gridChannels.first {
+                focusedChannel = first.id
+            }
         @unknown default:
             break
         }
@@ -295,7 +312,7 @@ struct JoeTVSection: View {
     /// inside the section's single vertical ScrollView, and every
     /// tile routes focus arithmetically (see moveInGrid).
 
-    private let gridColumns = Array(repeating: GridItem(.fixed(264), spacing: 22),
+    private let gridColumns = Array(repeating: GridItem(.fixed(273), spacing: 24),
                                     count: 6)
 
     /// The grid's data: the effective group's visible channels
@@ -313,12 +330,12 @@ struct JoeTVSection: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     Text(group)
-                        .font(.system(size: 29, weight: .bold))
+                        .font(.system(size: 34, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                     Text("\(gridChannels.count) kênh")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 25))
+                        .foregroundStyle(.white.opacity(0.7))
                 }
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
@@ -335,54 +352,70 @@ struct JoeTVSection: View {
         }
     }
 
-    /// One grid cell: the focusable surface is the ART ONLY; the
-    /// channel name is a sibling Text below the button, never
-    /// inside it, so focus styling can never wash the name out.
-    /// The name turns accentViolet + semibold while its tile is
-    /// focused. Focus itself is hand-drawn under .plain: scale
-    /// 1.06 + 3.5pt lighter-violet outline + soft shadow, and the
-    /// tile background stays dark.
+    /// One grid cell (DESIGN-SPEC §7.5): a single focusable
+    /// 273×150 surface — channel logo centred (max 180×90) with
+    /// the channel name (25pt) in the tile's lower band INSIDE
+    /// the tile. Focus is the F3 tile treatment, drawn by hand
+    /// under .plain: 4pt lighter-violet outline + scale 1.05 +
+    /// the name turns focusViolet. No shadow (F3). Tiles of a
+    /// LIVE group carry the LIVE badge (red dot + "LIVE") at
+    /// top-right — red is reserved for LIVE (§3.1).
     private func tile(_ channel: Channel) -> some View {
         let focused = focusedChannel == channel.id
-        return VStack(spacing: 8) {
-            Button {
-                play(channel)
-            } label: {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 18)
-                        .fill(Color.black.opacity(0.45))
-                    if let url = channel.logoURL {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().scaledToFit()
-                            default:
-                                fallbackText(channel)
+        let isLiveGroup = (effectiveGroup ?? "").uppercased().contains("LIVE")
+        return Button {
+            play(channel)
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.white.opacity(0.07))
+                VStack(spacing: 6) {
+                    ZStack {
+                        if let url = channel.logoURL {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image.resizable().scaledToFit()
+                                default:
+                                    fallbackText(channel)
+                                }
                             }
+                        } else {
+                            fallbackText(channel)
                         }
-                        .padding(20)
-                    } else {
-                        fallbackText(channel)
                     }
+                    .frame(maxWidth: 180, maxHeight: 90)
+                    Text(channel.title)
+                        .font(.system(size: 25, weight: focused ? .semibold : .medium))
+                        .foregroundStyle(focused ? joeFocusViolet : .white)
+                        .lineLimit(1)
                 }
-                .frame(width: 264, height: 150)
-                .overlay(RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(focused ? joeFocusViolet : Color.white.opacity(0.10),
-                                  lineWidth: focused ? 3.5 : 1.2))
-                .shadow(color: .black.opacity(focused ? 0.55 : 0),
-                        radius: focused ? 18 : 0, x: 0, y: focused ? 8 : 0)
-                .scaleEffect(focused ? 1.06 : 1.0)
+                .padding(.horizontal, 12)
+                if isLiveGroup {
+                    HStack(spacing: 6) {
+                        Circle().fill(JoeTheme.accentRed).frame(width: 12, height: 12)
+                        Text("LIVE")
+                            .font(.system(size: 23, weight: .heavy))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.black.opacity(0.65)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(8)
+                }
             }
-            .buttonStyle(.plain)
-            .focused($focusedChannel, equals: channel.id)
-            .onMoveCommand { direction in
-                moveInGrid(direction, from: channel)
-            }
-            Text(channel.title)
-                .font(.system(size: 20, weight: focused ? .semibold : .medium))
-                .foregroundStyle(focused ? JoeTheme.accentViolet : .white)
-                .lineLimit(1)
-                .frame(width: 264)
+            .frame(width: 273, height: 150)
+            .overlay(RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(focused ? joeFocusViolet : Color.white.opacity(0.10),
+                              lineWidth: focused ? 4 : 2))
+            .scaleEffect(focused ? 1.05 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled(true)
+        .focused($focusedChannel, equals: channel.id)
+        .onMoveCommand { direction in
+            moveInGrid(direction, from: channel)
         }
     }
 
@@ -422,14 +455,14 @@ struct JoeTVSection: View {
         HStack(spacing: 10) {
             if store.isValidating {
                 Text("Đang kiểm tra link…")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.45))
+                    .font(.system(size: 23))
+                    .foregroundStyle(.white.opacity(0.7))
             }
             Spacer()
             if !store.channels.isEmpty {
                 Text("\(store.channels.count) kênh")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.4))
+                    .font(.system(size: 23))
+                    .foregroundStyle(.white.opacity(0.7))
             }
         }
     }
