@@ -292,23 +292,28 @@ final class PlaylistStore: ObservableObject {
         return path.lowercased().hasSuffix(".flv")
     }
 
-    /// The player's fallback ladder for a tapped channel: every
-    /// displayable channel carrying the same match, tapped one first
-    /// (the tvOS UI builds the same ladder; the store owns it so the
-    /// iOS player gets it too).
+    /// The player's fallback ladder for a tapped channel: the
+    /// members of the tapped channel's fixture, tapped one first,
+    /// capped at 8. The fixture comes from FixtureGrouping — the
+    /// same grouping the cards on both platforms render — so the
+    /// ladder covers exactly the sources the card grouped, no more
+    /// (the old fixtureKey ladder also swept in same-teams listings
+    /// from other dates) and no less (reversed or filler-prefixed
+    /// listings of the same match are members now, not strangers).
     func sources(for ch: Channel) -> [Channel] {
         // EN backup channels are standalone 24/7 channels, not fixtures:
         // their ladder is the tapped channel alone. (fixtureKey drops
         // trailing numerals, which would otherwise pair ESPN with
         // ESPN 2 and FOX Sports with Fox Sports 1 as "fallbacks".)
         if LeagueClassifier.isEN(ch) { return [ch] }
-        let key = MatchTitle.fixtureKey(ch.title)
-        if key.isEmpty { return [ch] }
+        let groups = FixtureGrouping.group(channels + hotChannels)
+        guard let members = groups.first(where: { g in
+            g.members.contains { $0.url == ch.url }
+        })?.members else { return [ch] }
         var seen = Set<String>()
         var out: [Channel] = []
-        for candidate in [ch] + channels + hotChannels {
-            if MatchTitle.fixtureKey(candidate.title) == key,
-               seen.insert(candidate.url).inserted {
+        for candidate in [ch] + members {
+            if seen.insert(candidate.url).inserted {
                 out.append(candidate)
                 if out.count >= 8 { break }
             }

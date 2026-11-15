@@ -37,13 +37,15 @@ enum KickoffFormat {
 }
 
 /// One fixture as the UI presents it (redesign, 2026-11-14): every
-/// source carrying the same match — same fixture key, same kickoff —
-/// collapses into a single entry, so a match never appears as two or
-/// three near-identical rows again. The representative channel is the
-/// first one in the store's sorted order; tapping the entry hands it
-/// to PlaylistStore.sources(for:), which rebuilds the player's full
-/// fallback ladder across every list, exactly as before. Display-only:
-/// stored channels are never mutated.
+/// source carrying the same match collapses into a single entry, so
+/// a match never appears as two or three near-identical rows again.
+/// What "the same match" means is FixtureGrouping's pair-key
+/// identity (order-independent, filler-tolerant, stamp-jitter and
+/// live-merge aware — see Crests.swift), shared with the TV app and
+/// with PlaylistStore.sources(for:), so a card and the player's
+/// fallback ladder always cover exactly the same sources. The
+/// representative channel is the first one in the store's sorted
+/// order. Display-only: stored channels are never mutated.
 struct FixtureEntry: Identifiable {
     let channel: Channel
     let sourceCount: Int
@@ -67,32 +69,12 @@ struct FixtureEntry: Identifiable {
     }
 
     /// Group a sorted channel list into fixture entries, preserving
-    /// the incoming order (first occurrence wins the slot).
+    /// the incoming order (first occurrence wins the slot). The
+    /// identity itself lives in FixtureGrouping (Crests.swift).
     static func group(_ channels: [Channel]) -> [FixtureEntry] {
-        var order: [String] = []
-        var reps: [String: Channel] = [:]
-        var counts: [String: Int] = [:]
-        for ch in channels {
-            let key = groupKey(for: ch)
-            if reps[key] == nil {
-                reps[key] = ch
-                order.append(key)
-            }
-            counts[key, default: 0] += 1
+        FixtureGrouping.group(channels).map { g in
+            FixtureEntry(channel: g.members[0], sourceCount: g.members.count, id: g.id)
         }
-        return order.map {
-            FixtureEntry(channel: reps[$0]!, sourceCount: counts[$0] ?? 1, id: $0)
-        }
-    }
-
-    /// Fixture identity = the shared fixture key + the kickoff
-    /// instant. Channels whose title yields no fixture key (pure
-    /// channel names) fall back to their URL and never merge.
-    private static func groupKey(for ch: Channel) -> String {
-        let fk = MatchTitle.fixtureKey(ch.title)
-        if fk.isEmpty { return "url:" + ch.url }
-        let ko = ch.kickoff.map { String(Int($0.timeIntervalSince1970)) } ?? "none"
-        return "fx:" + fk + "|" + ko
     }
 }
 

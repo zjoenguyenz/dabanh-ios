@@ -256,3 +256,228 @@ enum MatchTitle {
         return keep.joined(separator: " ")
     }
 }
+
+/// Fixture identity, shared by the cards (FixtureEntry on iOS,
+/// TVFixtureEntry on tvOS) and by the player's source ladder
+/// (PlaylistStore.sources(for:)), so the two can never disagree
+/// about what "the same match" means.
+///
+/// The 2026-11-14 redesign grouped by MatchTitle.fixtureKey +
+/// exact kickoff instant, and the owner's live test that night
+/// showed one match split across cards whenever sources wrote it
+/// differently: reversed team order ("Latvia Vs Armenia" vs
+/// "Armenia vs Latvia"), filler prefixes ("Ca Banfield" vs
+/// "Banfield", "CD Tondela", "FK Chelyabinsk", "Queretaro FC"),
+/// punctuation drift ("Yokohama F. Marinos" vs "Yokohama F
+/// Marinos"), small stamp disagreements (the same match at 10:00
+/// and 10:10) — and one La Paz vs Piratas pair whose stamps
+/// disagreed by ~60 minutes while both listings were live. The
+/// identity below is the fix (iOS 1.13 / tvOS 1.3.1):
+///
+/// - Pair key: the two team names of the cleaned title, each
+///   normalised (Crests.norm, then standalone filler tokens
+///   dropped), then sorted — team order never matters.
+/// - Two stamped listings with the same pair key are one fixture
+///   when their stamps name the same calendar date (the dd/mm as
+///   written, read back from the parsed instant in ICT) and their
+///   kickoffs chain within 45 minutes of each other (sorted by
+///   kickoff, single-linkage from the earliest).
+/// - Live merge: clusters of the same pair + date whose earliest
+///   stamp is inside the live window right now merge into one
+///   fixture regardless of the stamp gap; the merged fixture's
+///   kickoff is its earliest stamp. (Every list the apps group is
+///   sorted bucket-then-kickoff by the store, so a live-merged
+///   fixture's representative — its first member in list order —
+///   is that earliest-stamp member, and the cards render its
+///   kickoff.)
+/// - Listings this identity does not cover — no recognisable
+///   pair, or no kickoff stamp — keep the previous identity
+///   verbatim (fixture key + exact kickoff instant, URL when the
+///   title yields no fixture key) and never merge into pair
+///   fixtures.
+enum FixtureGrouping {
+
+    /// One fixture group: a stable id plus its member channels in
+    /// the caller's list order (first member = representative).
+    struct Group {
+        let id: String
+        let members: [Channel]
+    }
+
+    /// Standalone tokens dropped from team names for the pair key.
+    private static let fillerTokens: Set<String> = [
+        "fc", "cf", "sc", "afc", "ca", "cd", "fk", "sk",
+        "club", "ac", "as", "sd", "us", "ec",
+    ]
+
+    /// How far apart two stamps of one pair + date may chain and
+    /// still be read as the same fixture.
+    private static let chainWindow: TimeInterval = 45 * 60
+
+    /// Normalise one team name for the pair key: lowercase,
+    /// diacritics stripped, punctuation removed, spaces collapsed
+    /// (all of that is Crests.norm), then standalone filler tokens
+    /// dropped — "Ca Banfield" and "Banfield" both become
+    /// "banfield", "CD Tondela" becomes "tondela".
+    static func normalizedTeam(_ name: String) -> String {
+        Crests.norm(name)
+            .split(separator: " ")
+            .filter { token in
+                let t = String(token)
+                // Filler words, plus standalone all-numeric tokens
+                // ("Sydney United 58 FC" vs "Sydney United" — the old
+                // fixtureKey dropped numeric tokens too; amendment
+                // 2026-11-14 after Team Swift's live-playlist sweep).
+                return !fillerTokens.contains(t)
+                    && !t.allSatisfy({ $0.isNumber })
+            }
+            .joined(separator: " ")
+    }
+
+    /// Order-independent pair key for a channel, or nil when its
+    /// cleaned title has no recognisable "A vs B" pair, or a side
+    /// normalises away to nothing.
+    static func pairKey(of channel: Channel) -> String? {
+        guard let (a, b) = Crests.teams(ofCleanTitle: MatchTitle.clean(channel.title))
+        else { return nil }
+        let na = normalizedTeam(a)
+        let nb = normalizedTeam(b)
+        guard !na.isEmpty, !nb.isEmpty else { return nil }
+        return [na, nb].sorted().joined(separator: " vs ")
+    }
+
+    /// The calendar date a kickoff stamp names (the dd/mm as
+    /// written), recovered by reading the parsed instant back in
+    /// ICT — the parser built it from exactly those components.
+    static func stampDateKey(of kickoff: Date) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+        let c = cal.dateComponents([.year, .month, .day], from: kickoff)
+        return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 0)"
+    }
+
+    /// Inside the live window (−10 … +125 minutes around kickoff) —
+    /// the same bounds as LeagueClassifier bucket 0.
+    private static func isLive(kickoff: Date, now: Date) -> Bool {
+        let since = now.timeIntervalSince(kickoff)
+        return since >= -10 * 60 && since <= 125 * 60
+    }
+
+    /// The pre-1.13 identity, kept verbatim for every listing the
+    /// pair identity does not cover: fixture key + exact kickoff
+    /// instant, URL when the title yields no fixture key.
+    private static func legacyGroupKey(for ch: Channel) -> String {
+        let fk = MatchTitle.fixtureKey(ch.title)
+        if fk.isEmpty { return "url:" + ch.url }
+        let ko = ch.kickoff.map { String(Int($0.timeIntervalSince1970)) } ?? "none"
+        return "fx:" + fk + "|" + ko
+    }
+
+    /// Group a channel list into fixtures, preserving the incoming
+    /// order: a group's slot, its representative and its member
+    /// order all follow the first occurrence in the list.
+    static func group(_ channels: [Channel], now: Date = Date()) -> [Group] {
+        var clusterOf: [Int: Int] = [:]        // channel index → cluster
+        var clusterIDs: [String] = []          // cluster → group id
+        func register(_ id: String, _ members: [Int]) {
+            let serial = clusterIDs.count
+            clusterIDs.append(id)
+            for i in members { clusterOf[i] = serial }
+        }
+
+        // — Pair identity: stamped listings with a recognisable pair,
+        // bucketed by pair key + stamp date.
+        struct Bucket {
+            let pairKey: String
+            let dateKey: String
+            var idxs: [Int] = []
+        }
+        var buckets: [Bucket] = []
+        var bucketPos: [String: Int] = [:]
+        for (i, ch) in channels.enumerated() {
+            guard let kickoff = ch.kickoff, let pk = pairKey(of: ch) else { continue }
+            let dk = stampDateKey(of: kickoff)
+            let bkey = pk + "|" + dk
+            if let pos = bucketPos[bkey] {
+                buckets[pos].idxs.append(i)
+            } else {
+                bucketPos[bkey] = buckets.count
+                buckets.append(Bucket(pairKey: pk, dateKey: dk, idxs: [i]))
+            }
+        }
+        for bucket in buckets {
+            func earliest(of cluster: [Int]) -> Date {
+                cluster.map { channels[$0].kickoff! }.min()!
+            }
+            // Chain from the earliest: sorted by kickoff, a listing
+            // joins the running cluster when its stamp is within
+            // 45 minutes of the cluster's latest stamp so far.
+            let byKickoff = bucket.idxs.sorted {
+                channels[$0].kickoff! < channels[$1].kickoff!
+            }
+            var clusters: [[Int]] = []
+            for i in byKickoff {
+                let ko = channels[i].kickoff!
+                if let last = clusters.last,
+                   let latest = last.map({ channels[$0].kickoff! }).max(),
+                   ko.timeIntervalSince(latest) <= chainWindow {
+                    clusters[clusters.count - 1].append(i)
+                } else {
+                    clusters.append([i])
+                }
+            }
+            // Live merge: clusters of this pair + date whose earliest
+            // stamp is live right now collapse into one fixture,
+            // however far apart their stamps are.
+            let liveIdx = Set(clusters.indices.filter {
+                isLive(kickoff: earliest(of: clusters[$0]), now: now)
+            })
+            if liveIdx.count > 1 {
+                let merged = clusters.indices
+                    .filter { liveIdx.contains($0) }
+                    .flatMap { clusters[$0] }
+                clusters = clusters.indices
+                    .filter { !liveIdx.contains($0) }
+                    .map { clusters[$0] } + [merged]
+            }
+            for cluster in clusters {
+                let id = "fx2:" + bucket.pairKey + "|" + bucket.dateKey + "|"
+                    + String(Int(earliest(of: cluster).timeIntervalSince1970))
+                register(id, cluster)
+            }
+        }
+
+        // — Everything the pair identity does not cover keeps the
+        // previous identity verbatim and never merges into a pair
+        // fixture.
+        var legacy: [String: [Int]] = [:]
+        var legacyKeys: [String] = []
+        for (i, ch) in channels.enumerated() where clusterOf[i] == nil {
+            let key = legacyGroupKey(for: ch)
+            if legacy[key] == nil { legacyKeys.append(key) }
+            legacy[key, default: []].append(i)
+        }
+        for key in legacyKeys {
+            register(key, legacy[key]!)
+        }
+
+        // — Emit in first-occurrence order, members in list order.
+        var membersOf: [[Int]] = Array(repeating: [], count: clusterIDs.count)
+        for i in channels.indices {
+            if let serial = clusterOf[i] {
+                membersOf[serial].append(i)
+            }
+        }
+        var emitted = Set<Int>()
+        var out: [Group] = []
+        for i in channels.indices {
+            guard let serial = clusterOf[i], emitted.insert(serial).inserted
+            else { continue }
+            out.append(Group(
+                id: clusterIDs[serial],
+                members: membersOf[serial].map { channels[$0] }
+            ))
+        }
+        return out
+    }
+}
