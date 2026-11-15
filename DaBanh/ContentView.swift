@@ -1,40 +1,35 @@
 import SwiftUI
 
-/// Accent green used across the redesigned UI.
-private let accentGreen = Color(red: 0.13, green: 0.77, blue: 0.37)
-
-/// Root screen, styled like a TV/streaming app: dark gradient, a header
-/// with the live count, a featured rail of live matches, league chips
-/// instead of a tab bar, and match cards grouped by bucket (Đang đá /
-/// Sắp đá / Khác). All data wiring is unchanged from the previous design:
-/// PlaylistStore drives everything, the league order and the first-load
-/// tab pick live in the store/classifier, and tapping any card or row
-/// presents PlayerView full-screen.
+/// Root screen, styled like a TV/streaming app: dark gradient, a
+/// header with the live count, a swipeable featured rail of live
+/// fixtures, league chips instead of a tab bar, and fixture cards
+/// grouped by bucket (Đang đá / Sắp đá / Khác).
+///
+/// Redesign (2026-11-14, owner-approved spec): the bars and colours
+/// are the ones he already knows — same header, same chips, same
+/// near-black + green + red palette — and everything below them is
+/// new. One card per fixture (sources grouped inside, see
+/// FixtureEntry), no raw playlist titles anywhere, no search (he
+/// never used it). All data wiring is unchanged: PlaylistStore
+/// drives everything, and tapping any card presents PlayerView
+/// full-screen with the store's source ladder.
 struct ContentView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedChannel: Channel?
-    @State private var searchText = ""
 
     private var liveChannels: [Channel] {
         store.channels.filter { LeagueClassifier.isLive($0) }
     }
 
-    private var isSearching: Bool { !searchText.isEmpty }
-
-    var body: some View {
-        // NavigationStack is the host .searchable needs to actually show
-        // its field; the bar itself carries no title and stays transparent
-        // so the custom header below remains the visual header.
-        NavigationStack {
-            rootContent
-                .navigationTitle("")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(.hidden, for: .navigationBar)
-        }
+    /// Featured rail entries: live fixtures across every list (the
+    /// store's live view already merges the leagues and the Hot
+    /// group), one entry per fixture.
+    private var featuredEntries: [FixtureEntry] {
+        Array(FixtureEntry.group(store.liveChannels).prefix(12))
     }
 
-    private var rootContent: some View {
+    var body: some View {
         ZStack {
             LinearGradient(
                 colors: [Color(red: 0.04, green: 0.06, blue: 0.08),
@@ -52,15 +47,11 @@ struct ContentView: View {
                         .padding(.horizontal)
                         .padding(.bottom, 4)
                 }
-                if isSearching {
-                    searchList
-                } else {
-                    if !liveChannels.isEmpty {
-                        featuredRail
-                    }
-                    leagueChips
-                    leagueList
+                if !featuredEntries.isEmpty {
+                    featuredRail
                 }
+                leagueChips
+                leagueList
             }
 
             if store.channels.isEmpty {
@@ -68,7 +59,6 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .searchable(text: $searchText, prompt: "Tìm trận, đội bóng…")
         .task { await store.start() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -159,22 +149,34 @@ struct ContentView: View {
         .padding(.bottom, 10)
     }
 
-    // MARK: - Featured rail (live matches across all leagues)
+    // MARK: - Featured rail (live fixtures, swipe left for more)
 
     private var featuredRail: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                ForEach(liveChannels.prefix(12)) { channel in
-                    Button {
-                        selectedChannel = channel
-                    } label: {
-                        FeaturedCard(channel: channel)
-                    }
-                    .buttonStyle(.plain)
-                }
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Circle().fill(Color.red).frame(width: 7, height: 7)
+                Text("TRẬN NỔI BẬT")
+                    .font(.caption.bold())
+                    .tracking(1)
+                    .foregroundStyle(.white.opacity(0.6))
             }
             .padding(.horizontal)
-            .padding(.vertical, 4)
+            .padding(.top, 2)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(featuredEntries) { entry in
+                        Button {
+                            selectedChannel = entry.channel
+                        } label: {
+                            FeaturedCard(entry: entry)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+            }
         }
     }
 
@@ -248,7 +250,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - League list (bucket sections)
+    // MARK: - League list (bucket sections, one card per fixture)
 
     private var leagueList: some View {
         if store.selectedLeague == PlaylistStore.liveTabValue {
@@ -278,12 +280,13 @@ struct ContentView: View {
 
     private func bucketList(channels: [Channel], emptyText: String) -> some View {
         let now = Date()
-        let live = channels.filter { LeagueClassifier.bucket(of: $0, now: now) == 0 }
-        let upcoming = channels.filter {
-            let b = LeagueClassifier.bucket(of: $0, now: now)
+        let entries = FixtureEntry.group(channels)
+        let live = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 0 }
+        let upcoming = entries.filter {
+            let b = LeagueClassifier.bucket(of: $0.channel, now: now)
             return b == 1 || b == 2
         }
-        let rest = channels.filter { LeagueClassifier.bucket(of: $0, now: now) == 3 }
+        let rest = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 3 }
 
         return List {
             if channels.isEmpty {
@@ -294,21 +297,21 @@ struct ContentView: View {
             }
             if !live.isEmpty {
                 Section {
-                    ForEach(live) { channel in matchRow(channel) }
+                    ForEach(live) { entry in matchRow(entry) }
                 } header: {
                     sectionHeader("Đang đá", live: true)
                 }
             }
             if !upcoming.isEmpty {
                 Section {
-                    ForEach(upcoming) { channel in matchRow(channel) }
+                    ForEach(upcoming) { entry in matchRow(entry) }
                 } header: {
                     sectionHeader("Sắp đá", live: false)
                 }
             }
             if !rest.isEmpty {
                 Section {
-                    ForEach(rest) { channel in matchRow(channel) }
+                    ForEach(rest) { entry in matchRow(entry) }
                 } header: {
                     sectionHeader("Khác", live: false)
                 }
@@ -320,42 +323,13 @@ struct ContentView: View {
         .refreshable { await store.refresh() }
     }
 
-    // MARK: - Search results (all leagues, flat)
-
-    private var searchList: some View {
-        let query = searchText.lowercased()
-        let mainURLs = Set(store.channels.map(\.url))
-        let pool = store.channels + store.hotChannels.filter { !mainURLs.contains($0.url) }
-        let matches = pool.filter { $0.title.lowercased().contains(query) }
-        return List {
-            if matches.isEmpty {
-                Text("Không tìm thấy trận nào.")
-                    .foregroundStyle(.white.opacity(0.6))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
-            ForEach(matches) { channel in
-                matchRow(channel, caption: searchCaption(for: channel))
-            }
-            footerRow
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .refreshable { await store.refresh() }
-    }
-
-    private func searchCaption(for channel: Channel) -> String {
-        let leagueName = League(rawValue: channel.leagueRank)?.name ?? "Khác"
-        return channel.group.isEmpty ? leagueName : "\(leagueName) • \(channel.group)"
-    }
-
     // MARK: - Shared rows
 
-    private func matchRow(_ channel: Channel, caption: String? = nil) -> some View {
+    private func matchRow(_ entry: FixtureEntry) -> some View {
         Button {
-            selectedChannel = channel
+            selectedChannel = entry.channel
         } label: {
-            MatchCard(channel: channel, caption: caption ?? channel.group)
+            MatchCard(entry: entry)
         }
         .buttonStyle(.plain)
         .listRowBackground(Color.clear)
@@ -377,7 +351,7 @@ struct ContentView: View {
     }
 
     private var footerRow: some View {
-        Text("Đá Banh v1.10 • \(store.channels.count) trận")
+        Text("Đá Banh v1.11 • \(store.channels.count) trận")
             .font(.caption)
             .foregroundStyle(.white.opacity(0.35))
             .frame(maxWidth: .infinity, alignment: .center)
@@ -420,250 +394,5 @@ private struct PulsingDot: View {
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
                        value: faded)
             .onAppear { faded = true }
-    }
-}
-
-/// Kickoff formatting shared by the cards (Vietnam time, ICT).
-private enum KickoffFormat {
-    static let time: DateFormatter = {
-        let f = DateFormatter()
-        f.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
-        f.dateFormat = "HH:mm"
-        return f
-    }()
-
-    static let day: DateFormatter = {
-        let f = DateFormatter()
-        f.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
-        f.dateFormat = "dd/MM"
-        return f
-    }()
-
-    static let full: DateFormatter = {
-        let f = DateFormatter()
-        f.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
-        f.dateFormat = "HH:mm dd/MM"
-        return f
-    }()
-}
-
-/// Big horizontal card for a live match in the featured rail.
-private struct FeaturedCard: View {
-    let channel: Channel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                CardArt(channel: channel, crestSize: 40, logoSize: 54)
-                Text(channel.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 8) {
-                Text(channel.kickoff.map { "● ĐANG ĐÁ · \(max(1, Int(Date().timeIntervalSince($0) / 60)))'" } ?? "● ĐANG ĐÁ")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.red, in: Capsule())
-                if let kickoff = channel.kickoff {
-                    Text(KickoffFormat.full.string(from: kickoff))
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.75))
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(14)
-        .frame(width: 250, height: 118, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [Color(red: 0.05, green: 0.23, blue: 0.13),
-                         Color(red: 0.02, green: 0.09, blue: 0.06)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 16)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-    }
-}
-
-/// One match as a card row: time block (or LIVE), logo tile, title +
-/// source, play button.
-private struct MatchCard: View {
-    let channel: Channel
-    let caption: String
-
-    private var isLive: Bool { LeagueClassifier.isLive(channel) }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Four-state status block, same language as the TV
-            // versions: LIVE + minute / kickoff time / ↺ PHÁT LẠI /
-            // 📺 KÊNH — so a replay source is never mistaken for a
-            // live one (owner, 2026-11-13).
-            VStack(spacing: 2) {
-                if isLive {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.red).frame(width: 7, height: 7)
-                        Text("LIVE")
-                            .font(.caption.bold())
-                            .foregroundStyle(.red)
-                    }
-                    if let kickoff = channel.kickoff {
-                        let mins = max(1, Int(Date().timeIntervalSince(kickoff) / 60))
-                        Text("\(mins)'")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.red.opacity(0.8))
-                    }
-                } else if let kickoff = channel.kickoff, kickoff > Date() {
-                    Text(KickoffFormat.time.string(from: kickoff))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                    Text(KickoffFormat.day.string(from: kickoff))
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.5))
-                } else if channel.kickoff != nil {
-                    Text("↺")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.55))
-                    Text("PHÁT LẠI")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.55))
-                } else {
-                    Text("📺")
-                        .font(.caption)
-                    Text("KÊNH")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-            }
-            .frame(width: 46)
-
-            CardArt(channel: channel)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(channel.title)
-                    .font(.subheadline)
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Text(caption)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "play.circle.fill")
-                .font(.system(size: 24))
-                .foregroundStyle(accentGreen)
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.06))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-    }
-}
-
-/// Fixed-size channel logo with a placeholder that never breaks layout.
-private struct LogoTile: View {
-    let channel: Channel
-    let size: CGFloat
-    let corner: CGFloat
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: corner)
-                .fill(Color.white.opacity(0.08))
-            AsyncImage(url: channel.logoURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFit()
-                default:
-                    Image(systemName: "soccerball")
-                        .font(.system(size: size * 0.45))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-            }
-            .padding(4)
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: corner))
-    }
-}
-
-/// Card artwork synced with the TV versions (2026-11-13): the two
-/// team crests when the title is a fixture in the crest map, the
-/// channel logo when it is not. Reading `store.crestsRevision` makes
-/// the card re-render when the remote crest map lands.
-private struct CardArt: View {
-    @EnvironmentObject private var store: PlaylistStore
-    let channel: Channel
-    var crestSize: CGFloat = 32
-    var logoSize: CGFloat = 44
-
-    var body: some View {
-        let _ = store.crestsRevision
-        if let pair = Crests.crests(forTitle: channel.title),
-           pair.0 != nil || pair.1 != nil {
-            if pair.0 != nil && pair.1 != nil {
-                HStack(spacing: 4) {
-                    CrestImg(url: pair.0, size: crestSize)
-                    Text("vs")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.45))
-                    CrestImg(url: pair.1, size: crestSize)
-                }
-            } else {
-                HStack(spacing: 4) {
-                    CrestImg(url: pair.0 ?? pair.1, size: crestSize)
-                    LogoTile(channel: channel, size: crestSize, corner: 8)
-                }
-            }
-        } else {
-            LogoTile(channel: channel, size: logoSize, corner: 10)
-        }
-    }
-}
-
-/// One team crest with a shield placeholder while loading / missing.
-private struct CrestImg: View {
-    let url: URL?
-    let size: CGFloat
-
-    var body: some View {
-        Group {
-            if let url {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit()
-                    default:
-                        Image(systemName: "shield")
-                            .font(.system(size: size * 0.6))
-                            .foregroundStyle(.white.opacity(0.35))
-                    }
-                }
-            } else {
-                Image(systemName: "shield")
-                    .font(.system(size: size * 0.6))
-                    .foregroundStyle(.white.opacity(0.2))
-            }
-        }
-        .frame(width: size, height: size)
     }
 }

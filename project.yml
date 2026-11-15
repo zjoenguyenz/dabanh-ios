@@ -23,6 +23,7 @@ targets:
       - DaBanh/M3UParser.swift
       - DaBanh/PlaylistStore.swift
       - DaBanh/ContentView.swift
+      - DaBanh/MatchViews.swift
       - DaBanh/PlayerView.swift
       - DaBanh/Assets.xcassets
     settings:

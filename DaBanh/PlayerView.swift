@@ -79,7 +79,9 @@ struct PlayerView: View {
                 }
                 .accessibilityLabel("Đóng")
 
-                Text(current?.title ?? "")
+                // Display title only: the cleaned form (no kickoff
+                // stamp / markers), same as the match screens.
+                Text(MatchTitle.clean(current?.title ?? ""))
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
