@@ -27,8 +27,12 @@ struct TMDBInfo {
 /// and only a failed detail call returns nil.
 enum TMDBClient {
     static var apiKey: String {
-        (UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "")
+        let saved = (UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "")
             .trimmingCharacters(in: .whitespaces)
+        // A key typed in Settings wins; otherwise the bundled
+        // key injected at build time (TMDBBundledKey) is used,
+        // so a fresh install has TMDB art with zero typing.
+        return saved.isEmpty ? TMDBBundledKey.value : saved
     }
 
     static func fetch(tmdbId: String, type: String) async -> TMDBInfo? {

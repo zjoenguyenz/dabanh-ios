@@ -139,6 +139,7 @@ targets:
       - JoeTV/JoeSettings.swift
       - JoeTV/JoeStores.swift
       - JoeTV/TMDBClient.swift
+      - JoeTV/TMDBKey.swift
       - JoeTV/Assets.xcassets
     settings:
       base:
