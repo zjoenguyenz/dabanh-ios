@@ -36,8 +36,8 @@ targets:
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.13"
-        CFBundleVersion: "14"
+        CFBundleShortVersionString: "1.14"
+        CFBundleVersion: "15"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -65,15 +65,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.3.1"
-        CURRENT_PROJECT_VERSION: "13"
+        MARKETING_VERSION: "1.3.2"
+        CURRENT_PROJECT_VERSION: "14"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.3.1"
-        CFBundleVersion: "13"
+        CFBundleShortVersionString: "1.3.2"
+        CFBundleVersion: "14"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -119,6 +119,7 @@ targets:
       - TVApp/TVStore.swift
       - JoeTV/JoeModels.swift
       - JoeTV/JoeHTTP.swift
+      - JoeTV/SourceHealth.swift
       - JoeTV/KkClient.swift
       - JoeTV/VsClient.swift
       - JoeTV/F4kClient.swift
@@ -138,6 +139,7 @@ targets:
       - JoeTV/JoeTorrent.swift
       - JoeTV/JoeSettings.swift
       - JoeTV/JoeStores.swift
+      - JoeTV/SourceProbe.swift
       - JoeTV/TMDBClient.swift
       - JoeTV/TMDBKey.swift
       - JoeTV/Assets.xcassets
@@ -146,17 +148,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.8"
-        CURRENT_PROJECT_VERSION: "9"
+        MARKETING_VERSION: "1.9"
+        CURRENT_PROJECT_VERSION: "10"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "1.8"
+        CFBundleShortVersionString: "1.9"
         CFBundleVersion: "9"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
             CFBundleIconName: "AppIcon"
         UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
