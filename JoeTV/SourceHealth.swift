@@ -376,7 +376,7 @@ enum SourceHealth {
         guard snap.keys.count > maxKeys else { return }
         // Least-recently-seen first; a live latch goes last.
         let candidates = snap.keys.sorted { a, b in
-            let sa = snap.keys[a]!, sb = snap.keys[b]!
+            let sa = a.value, sb = b.value
             let la = sa.latchedUntil > now, lb = sb.latchedUntil > now
             if la != lb { return lb }
             return sa.lastSeen < sb.lastSeen
@@ -384,7 +384,7 @@ enum SourceHealth {
         var excess = snap.keys.count - maxKeys
         for k in candidates {
             if excess <= 0 { break }
-            snap.keys[k] = nil
+            snap.keys[k.key] = nil
             excess -= 1
         }
     }

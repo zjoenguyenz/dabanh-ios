@@ -325,7 +325,7 @@ final class JoeProxy {
 
     /// Upstream refused (non-2xx) before a single byte was
     /// forwarded: answer 502 exactly like the old path did.
-    fileprivate func streamRefused(_ st: StreamState) {
+    private func streamRefused(_ st: StreamState) {
         guard !st.closed else { return }
         st.closed = true
         recordProxySample(url: st.url.absoluteString, stage: .segment,
@@ -334,7 +334,7 @@ final class JoeProxy {
         respond(st.conn, status: 502, type: "text/plain", body: Data())
     }
 
-    fileprivate func streamAppend(_ st: StreamState, data: Data) {
+    private func streamAppend(_ st: StreamState, data: Data) {
         guard !st.closed else { return }
         if st.headSent {
             st.conn.send(content: data, completion: .contentProcessed { _ in })
@@ -388,7 +388,7 @@ final class JoeProxy {
                           outcome: .success)
     }
 
-    fileprivate func streamComplete(_ st: StreamState, error: Error?) {
+    private func streamComplete(_ st: StreamState, error: Error?) {
         guard !st.closed else { return }
         st.closed = true
         if let error {
