@@ -53,6 +53,39 @@ final class PhimStore: ObservableObject {
 
     var hasData: Bool { !merged.isEmpty || !kkNew.isEmpty }
 
+    /// True when NO catalogue rail has anything — the C-8
+    /// condition the load-state surfaces (G3/G5) gate on.
+    /// Shared by the rail home and the poster wall so the two
+    /// can never disagree (UI-6 defect D-20 parity).
+    var catalogueIsEmpty: Bool {
+        merged.isEmpty && chieuRap.isEmpty && vietnamAll.isEmpty
+            && kkNew.isEmpty && kkSeries.isEmpty && kkMovies.isEmpty
+            && kkAnime.isEmpty && f4kNew.isEmpty && f4kMovies.isEmpty
+            && vsNew.isEmpty && vsSeries.isEmpty
+            && tpMovies.isEmpty && tpSeries.isEmpty
+            && genreLists.values.allSatisfy { $0.isEmpty }
+            && countryLists.values.allSatisfy { $0.isEmpty }
+    }
+
+    /// G4's failed-provider display names, from providerErrors
+    /// (an entry exists exactly while that provider's latest
+    /// load failed; it clears when one of its rails lands).
+    /// Shared by the rail home and the poster wall (D-20).
+    var failedProviderNames: [String] {
+        guard !loading, hasData else { return [] }
+        return ["kk", "f4k", "vsmov", "tp"]
+            .filter { providerErrors[$0] != nil }
+            .map { code in
+                switch code {
+                case "kk": return "KKPhim"
+                case "f4k": return "Film4K"
+                case "vsmov": return "VSMOV"
+                case "tp": return "Tủ Phim"
+                default: return code
+                }
+            }
+    }
+
     func loadIfNeeded() {
         if loading { return }
         if let loadedAt, hasData,
@@ -292,6 +325,13 @@ final class PhimStore: ObservableObject {
     }
 
     private func applyRail(_ key: String, _ movies: [Movie]) {
+        // UI-5 image pipeline: warm this rail's posters as it lands.
+        // Rails land in home order (phase 1 first), so the next rail
+        // is always warming while the owner reads the current one —
+        // and on a cache-first launch the hydrated rails warm the
+        // decoded cache before the owner scrolls anywhere.
+        JoeImagePipeline.shared.prefetch(movies.compactMap { $0.posterURL },
+                                         targetPixels: 720)
         switch key {
         case "kkNew": kkNew = movies; refreshMerged()
         case "f4kNew": f4kNew = movies; refreshMerged()

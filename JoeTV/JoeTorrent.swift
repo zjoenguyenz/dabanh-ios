@@ -18,6 +18,7 @@ struct JoeTorrentHome: View {
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var store: TorHomeStore
+    @Environment(\.joeTheme) private var theme
     @State private var query = ""
     @State private var searchResults: [TorMeta] = []
     @State private var searching = false
@@ -49,7 +50,7 @@ struct JoeTorrentHome: View {
                         // an empty grid.
                         ProgressView("Đang tìm…")
                             .font(.system(size: 29))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(theme.text)
                             .tint(.white)
                     } else if !searchResults.isEmpty {
                         searchGrid
@@ -83,7 +84,7 @@ struct JoeTorrentHome: View {
                         if store.loading && !store.loadTimedOut && torCatalogueEmpty {
                             ProgressView("Đang tải danh mục…")
                                 .font(.system(size: 29))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(theme.text)
                                 .tint(.white)
                         }
                         if torErrorVisible {
@@ -92,7 +93,7 @@ struct JoeTorrentHome: View {
                         if torEmptyVisible {
                             Text("Chưa có danh mục nào.")
                                 .font(.system(size: 29))
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(theme.meta)
                         }
                         if !failedCatalogNames.isEmpty {
                             Text("Chưa tải được: " + failedCatalogNames.joined(separator: ", "))
@@ -144,46 +145,30 @@ struct JoeTorrentHome: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Phim Torrent")
                 .font(.system(size: 56, weight: .heavy))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             Text("Nguồn Torrentio + Real-Debrid của anh — lấy mới mỗi lần mở")
                 .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
         }
     }
 
     private var searchRow: some View {
         HStack(spacing: 18) {
-            TextField("Tìm phim torrent…", text: $query)
+            TextField("", text: $query,
+                      prompt: Text("Tìm phim torrent…")
+                        .foregroundColor(ThemeTokens.fieldPlaceholder))
                 .textFieldStyle(.plain)
-                .font(.system(size: 29))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 16)
-                .background(RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.white.opacity(0.07)))
-                .overlay(RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(searchFocus == .field ? JoeTheme.focusViolet : Color.clear,
-                                  lineWidth: 4))
+                .font(.system(size: ThemeTokens.fieldTextSize))
+                .joeFieldChrome(focused: searchFocus == .field)
                 .frame(width: 820)
                 .focused($searchFocus, equals: .field)
-                .focusEffectDisabled(true)
                 .onSubmit { runSearch() }
             Button {
                 runSearch()
             } label: {
-                Text(searching ? "Đang tìm…" : "Tìm")
-                    .font(.system(size: 29, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 14)
-                    .background(Capsule().fill(searchFocus == .search
-                                               ? JoeTheme.accentViolet
-                                               : JoeTheme.surface))
-                    .overlay(JoeFocusRing(shape: Capsule()))
-                    .scaleEffect(searchFocus == .search ? 1.05 : 1.0)
+                JoeSecondaryLabel(title: searching ? "Đang tìm…" : "Tìm")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($searchFocus, equals: .search)
             .disabled(searching)
             if !searchResults.isEmpty {
@@ -193,17 +178,9 @@ struct JoeTorrentHome: View {
                     searchAttempted = false
                     searchError = nil
                 } label: {
-                    Text("Xoá tìm kiếm")
-                        .font(.system(size: 29))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 14)
-                        .background(Capsule().fill(Color.white.opacity(0.10)))
-                        .overlay(JoeFocusRing(shape: Capsule()))
-                        .scaleEffect(searchFocus == .clear ? 1.05 : 1.0)
+                    JoeSecondaryLabel(title: "Xoá tìm kiếm")
                 }
                 .buttonStyle(.card)
-                .focusEffectDisabled(true)
                 .focused($searchFocus, equals: .clear)
             }
         }
@@ -217,7 +194,7 @@ struct JoeTorrentHome: View {
     @ViewBuilder
     private var cwRail: some View {
         if !torProgress.isEmpty {
-            JoeTheme.Rail(title: "▶ Đang xem dở") {
+            Rail(title: "▶ Đang xem dở") {
                 ForEach(torProgress) { entry in
                     let card = Button { nav.tor = TorRoute(
                         meta: TorMeta(id: entry.metaId, type: entry.metaType,
@@ -226,7 +203,7 @@ struct JoeTorrentHome: View {
                                       year: entry.year, desc: entry.desc),
                         base: entry.metaBase,
                         preselectStreamId: entry.streamId) } label: {
-                        JoeTheme.PosterCard(
+                        PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.epLabel,
@@ -235,7 +212,6 @@ struct JoeTorrentHome: View {
                             focused: focusedEntry == "cw|" + entry.key)
                     }
                     .buttonStyle(.card)
-                    .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -261,7 +237,7 @@ struct JoeTorrentHome: View {
     @ViewBuilder
     private var favRail: some View {
         if !torFavorites.isEmpty {
-            JoeTheme.Rail(title: "♥ Yêu thích") {
+            Rail(title: "♥ Yêu thích") {
                 ForEach(torFavorites) { entry in
                     let card = Button { nav.tor = TorRoute(
                         meta: TorMeta(id: entry.metaId, type: entry.metaType,
@@ -269,14 +245,13 @@ struct JoeTorrentHome: View {
                                       background: entry.background,
                                       year: entry.year, desc: entry.desc),
                         base: entry.metaBase) } label: {
-                        JoeTheme.PosterCard(
+                        PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
                             focused: focusedEntry == "fav|" + entry.key)
                     }
                     .buttonStyle(.card)
-                    .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -401,27 +376,19 @@ struct JoeTorrentHome: View {
                 .foregroundStyle(.orange)
             Text("Không tải được danh mục torrent.")
                 .font(.system(size: 29, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             // 1.9.2 (Team 9 item 6): the copy names the likely
             // cause — the torrent route itself, and the tunnel
             // profile's known habit of blocking it — instead of
             // a generic network shrug.
             Text("Chưa tải được mục Torrent — đường tới Torrentio/Cinemeta đang không thông. Nếu profile hầm đang bật, đường này thường bị chặn; thử tắt hầm rồi bấm Thử lại.")
                 .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
             Button { store.reload() } label: {
-                Text("Thử lại")
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 36)
-                    .padding(.vertical, 16)
-                    .background(Capsule().fill(JoeTheme.accentViolet))
-                    .overlay(JoeFocusRing(shape: Capsule()))
+                JoePrimaryLabel(title: "Thử lại")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($torRetryFocused)
-            .scaleEffect(torRetryFocused ? 1.05 : 1.0)
         }
     }
 
@@ -435,23 +402,15 @@ struct JoeTorrentHome: View {
                     .font(.system(size: 25))
                     .foregroundStyle(.orange)
                 Button { runSearch() } label: {
-                    Text("Thử lại")
-                        .font(.system(size: 29, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 36)
-                        .padding(.vertical, 16)
-                        .background(Capsule().fill(JoeTheme.accentViolet))
-                        .overlay(JoeFocusRing(shape: Capsule()))
+                    JoePrimaryLabel(title: "Thử lại")
                 }
                 .buttonStyle(.card)
-                .focusEffectDisabled(true)
                 .focused($searchRetryFocused)
-                .scaleEffect(searchRetryFocused ? 1.05 : 1.0)
             }
         } else {
             Text("Không tìm thấy kết quả nào.")
                 .font(.system(size: 29))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
         }
     }
 
@@ -543,17 +502,16 @@ struct JoeTorrentHome: View {
 
     private func metaRail(_ title: String, _ metas: [TorMeta], base: String,
                           scope: String) -> some View {
-        JoeTheme.Rail(title: title) {
+        Rail(title: title) {
             ForEach(metas) { meta in
                 let card = Button { nav.tor = TorRoute(meta: meta, base: base) } label: {
-                    JoeTheme.PosterCard(
+                    PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
                         meta: meta.year,
                         focused: focusedMeta == scope + "|" + meta.id)
                 }
                 .buttonStyle(.card)
-                .focusEffectDisabled(true)
                 .focused($focusedMeta, equals: scope + "|" + meta.id)
                 // Only the FIRST catalogue rail's cards carry
                 // the first-rail move handler (see
@@ -576,14 +534,13 @@ struct JoeTorrentHome: View {
                   alignment: .leading, spacing: 40) {
             ForEach(searchResults) { meta in
                 Button { nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta) } label: {
-                    JoeTheme.PosterCard(
+                    PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
                         meta: meta.year,
                         focused: focusedMeta == "torSearch|" + meta.id)
                 }
                 .buttonStyle(.card)
-                .focusEffectDisabled(true)
                 .focused($focusedMeta, equals: "torSearch|" + meta.id)
                 .onMoveCommand { direction in
                     searchResultMove(direction, from: meta)
@@ -665,6 +622,7 @@ struct JoeTorrentDetail: View {
     let route: TorRoute
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
+    @Environment(\.joeTheme) private var theme
     @State private var videos: [TorVideo] = []
     @State private var selectedVideo: TorVideo?
     @State private var streams: [TorStream] = []
@@ -695,7 +653,10 @@ struct JoeTorrentDetail: View {
         }
         .task { await load() }
         .fullScreenCover(item: $playerHolder) { holder in
-            JoePlayerView(director: holder.director)
+            JoePlayerView(director: holder.director,
+                          filmTitle: holder.title,
+                          filmEpisode: holder.episode,
+                          sourceLine: holder.sourceLine)
         }
         // 1.9.2 (Team 9 items 4 + 9): Menu closes THIS detail
         // from its OWN root (the wrapper-handler lesson, same
@@ -710,40 +671,37 @@ struct JoeTorrentDetail: View {
     private var hero: some View {
         HStack(alignment: .top, spacing: 40) {
             ZStack {
-                RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.45))
+                RoundedRectangle(cornerRadius: theme.rCard).fill(Color.black.opacity(0.45))
                 if let url = meta.posterURL {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image): image.resizable().scaledToFill()
-                        default: Text(meta.name)
+                    JoeRemoteImage(url: url, targetPixels: 720, fit: true) {
+                        Text(meta.name)
                             .font(.system(size: 24, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.8))
+                            .foregroundStyle(theme.text.opacity(0.8))
                             .multilineTextAlignment(.center).padding(18)
-                        }
                     }
                 }
             }
             .frame(width: 240, height: 360)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16)
+            .clipShape(RoundedRectangle(cornerRadius: theme.rCard))
+            .overlay(RoundedRectangle(cornerRadius: theme.rCard)
                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
 
             VStack(alignment: .leading, spacing: 16) {
                 Text(meta.name)
                     .font(.system(size: 64, weight: .heavy))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .foregroundStyle(theme.text)
+                    .lineLimit(3)
                 if !meta.year.isEmpty {
                     Text(meta.year)
                         .font(.system(size: 29))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                 }
                 HStack(spacing: 16) {
                     favButton
                     if hasViSub {
                         Text("Phụ đề Việt: có (OpenSubtitles)")
                             .font(.system(size: 25))
-                            .foregroundStyle(.white.opacity(0.8))
+                            .foregroundStyle(theme.text.opacity(0.8))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
                             .background(Capsule().fill(Color.white.opacity(0.10)))
@@ -752,7 +710,7 @@ struct JoeTorrentDetail: View {
                 if !meta.desc.isEmpty {
                     Text(meta.desc)
                         .font(.system(size: 29))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                         .lineSpacing(8)
                         .lineLimit(5)
                         .frame(maxWidth: 1050, alignment: .leading)
@@ -788,11 +746,10 @@ struct JoeTorrentDetail: View {
                 .foregroundStyle(isFav ? JoeTheme.accentRed : .white)
                 .padding(.horizontal, 36)
                 .padding(.vertical, 16)
-                .background(Capsule().fill(Color.white.opacity(0.07)))
+                .background(Capsule().fill(theme.surface2))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         // 1.9.2 (Team 9 item 9): the button joins the detail's
         // FocusState and is its declared default focus. It was
         // the ONLY unbound focusable on this screen: for an
@@ -830,18 +787,10 @@ struct JoeTorrentDetail: View {
     private func retryButton(focusKey: String,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text("Thử lại")
-                .font(.system(size: 29, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 36)
-                .padding(.vertical, 16)
-                .background(Capsule().fill(JoeTheme.accentViolet))
-                .overlay(JoeFocusRing(shape: Capsule()))
+            JoePrimaryLabel(title: "Thử lại")
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedRow, equals: focusKey)
-        .scaleEffect(focusedRow == focusKey ? 1.05 : 1.0)
     }
 
     @ViewBuilder
@@ -850,32 +799,29 @@ struct JoeTorrentDetail: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Tập")
                     .font(.system(size: 34, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.text)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16)],
                           alignment: .leading, spacing: 16) {
                     ForEach(videos) { video in
                         let selected = videoId == video.id
-                        let rowFocused = focusedRow == "ep|" + video.id
                         Button {
                             selectedVideo = video
                             Task { await loadStreams() }
                         } label: {
                             Text(video.label)
                                 .font(.system(size: 25, weight: selected ? .bold : .medium))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(theme.text)
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 18)
                                 .padding(.vertical, 12)
-                                .background(RoundedRectangle(cornerRadius: 12)
-                                    .fill(selected ? JoeTheme.accentViolet.opacity(0.30)
-                                          : Color.white.opacity(0.08)))
-                                .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
+                                .background(RoundedRectangle(cornerRadius: theme.rField)
+                                    .fill(selected ? theme.accent.opacity(0.30)
+                                          : theme.surface2))
+                                .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
                         }
                         .buttonStyle(.card)
-                        .focusEffectDisabled(true)
                         .focused($focusedRow, equals: "ep|" + video.id)
-                        .scaleEffect(rowFocused ? 1.05 : 1.0)
                     }
                 }
             }
@@ -889,11 +835,11 @@ struct JoeTorrentDetail: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Nguồn phát")
                 .font(.system(size: 34, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             if loadingStreams {
                 ProgressView("Đang lấy nguồn…")
                     .font(.system(size: 29))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.text)
                     .tint(.white)
             } else if streamsFailed {
                 // C-11: "the fetch failed" is its own surface
@@ -911,7 +857,7 @@ struct JoeTorrentDetail: View {
                      ? "Chưa có nguồn phát."
                      : "Chưa cấu hình nguồn — vào Cài đặt nhập link Torrentio hoặc token Real-Debrid/TorBox.")
                     .font(.system(size: 25))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             } else {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(streams) { stream in
@@ -930,7 +876,7 @@ struct JoeTorrentDetail: View {
             HStack(spacing: 16) {
                 Text(streamTag(stream))
                     .font(.system(size: 23, weight: .heavy))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Capsule().fill(stream.playable
@@ -939,12 +885,12 @@ struct JoeTorrentDetail: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(stream.label)
                         .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !stream.title.isEmpty && stream.title != stream.label {
                         Text(stream.title)
                             .font(.system(size: 25))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
                 }
@@ -956,15 +902,16 @@ struct JoeTorrentDetail: View {
             // §7.6: stream rows are the one sanctioned outline-only
             // focus variant — the fill NEVER changes on focus (the
             // old white 0.06→0.13 brightening was a focus wash).
-            .background(RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.06)))
-            .overlay(RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(focused ? JoeTheme.focusViolet : Color.clear, lineWidth: 4))
+            // v2.0.0: the fill is the theme's surface token and
+            // the outline is the theme ring (value-only).
+            .background(RoundedRectangle(cornerRadius: theme.rField)
+                .fill(theme.surface2))
+            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                .strokeBorder(focused ? theme.focus : Color.clear,
+                              lineWidth: focused ? theme.ringWidth : 0))
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
-        .scaleEffect(focused ? 1.02 : 1.0)
     }
 
     private func streamTag(_ s: TorStream) -> String {
@@ -1052,7 +999,11 @@ struct JoeTorrentDetail: View {
                     streams: fresh, preferred: tapped)
             },
             hopIdentity: nil)
-        playerHolder = JoeMovieDetail.DirectorHolder(director: director)
+        playerHolder = JoeMovieDetail.DirectorHolder(
+            director: director,
+            title: meta.name,
+            episode: selectedVideo?.label ?? "",
+            sourceLine: "Nguồn: Torrent")
     }
 }
 

@@ -122,6 +122,18 @@ enum TpClient {
         m.episodeCurrent = cleanField(JSON.str(o, "episodeCurrent"))
         m.quality = cleanField(JSON.str(o, "quality"))
         m.lang = cleanField(JSON.str(o, "lang"))
+        // UI-5-FIXUP (filter facets): the list payload carries
+        // categories[] and countries[] name lists the parser used
+        // to drop — read them into the shared Movie fields so the
+        // browse filter's country facet and the anime flag (the
+        // type mapping above folds "hoathinh" into "phim-le") work
+        // for Tủ Phim too. Additive only; absent keys leave the
+        // fields empty.
+        m.categories = (JSON.arr(o, "categories") ?? [])
+            .map { cleanField(JSON.str($0, "name")) }.filter { !$0.isEmpty }
+        m.country = (JSON.arr(o, "countries") ?? [])
+            .map { cleanField(JSON.str($0, "name")) }.filter { !$0.isEmpty }
+            .joined(separator: " · ")
         m.imdbId = JSON.str(o, "imdbId")
         m.tmdbSeason = JSON.int(o, "tmdbSeason")
         m.provider = Providers.TP

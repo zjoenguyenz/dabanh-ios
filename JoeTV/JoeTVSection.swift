@@ -10,13 +10,10 @@ import SwiftUI
 /// ScrollViews broke the focus engine's UP geometry. Playback goes through the
 /// shared TVPlayerView with same-name fallback sources.
 
-/// v1.5 focus outline colour (lighter violet) — the style law's
-/// focus stroke on every focusable element in this file.
-private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
-
 struct JoeTVSection: View {
     @EnvironmentObject private var store: TVStore
     @EnvironmentObject private var nav: JoeNavigator
+    @Environment(\.joeTheme) private var theme
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
     @State private var selectedGroup: String?
@@ -103,16 +100,16 @@ struct JoeTVSection: View {
                     Text(ch.group.uppercased())
                         .font(.system(size: 25, weight: .semibold))
                         .tracking(4)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                         .lineLimit(1)
                     Text(ch.title)
                         .font(.system(size: 56, weight: .heavy))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                         .lineLimit(2)
                     if fallbackCount(for: ch) > 0 {
                         Text("Nguồn dự phòng: \(fallbackCount(for: ch))")
                             .font(.system(size: 25, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.8))
+                            .foregroundStyle(theme.text.opacity(0.8))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
                             .background(Capsule().fill(Color.white.opacity(0.10)))
@@ -126,12 +123,12 @@ struct JoeTVSection: View {
                 if store.isLoading {
                     ProgressView("Đang tải danh sách…")
                         .font(.system(size: 29))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                         .tint(.white)
                 } else {
                     Text("Chưa có kênh nào.")
                         .font(.system(size: 29))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                 }
                 Spacer()
             }
@@ -141,30 +138,28 @@ struct JoeTVSection: View {
 
     private func heroArt(_ channel: Channel) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 22)
+            // UI-6 defect D-21: shared-section radii follow
+            // the active theme's scale.
+            RoundedRectangle(cornerRadius: theme.rCard)
                 .fill(Color.black.opacity(0.42))
             if let url = channel.logoURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit().padding(28)
-                    default:
-                        fallbackText(channel)
-                    }
+                JoeRemoteImage(url: url, targetPixels: 720, fit: true) {
+                    fallbackText(channel)
                 }
+                .padding(28)
             } else {
                 fallbackText(channel)
             }
         }
         .frame(width: 340, height: 204)
-        .overlay(RoundedRectangle(cornerRadius: 22)
+        .overlay(RoundedRectangle(cornerRadius: theme.rCard)
             .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
     }
 
     private func fallbackText(_ channel: Channel) -> some View {
         Text(channel.title)
             .font(.system(size: 28, weight: .bold))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(theme.text.opacity(0.85))
             .multilineTextAlignment(.center)
             .lineLimit(3)
             .padding(22)
@@ -201,54 +196,24 @@ struct JoeTVSection: View {
 
     private func chip(_ group: String) -> some View {
         let selected = group == effectiveGroup
-        let focused = focusedChip == group
         return Button {
             selectedGroup = group
             store.noteSelectedGroup(group)
         } label: {
-            // Chip text is ALWAYS .white. Selection AND focus are
-            // carried by the violet family (DESIGN-SPEC §3.1
-            // reserves red for LIVE + watch progress only): the
-            // selected chip wears the accentViolet fill; a focused
-            // chip adds the 4pt lighter-violet outline + scale
-            // (F3), drawn by hand under .plain.
-            Text(group)
-                .font(.system(size: 29, weight: selected ? .bold : .medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
-                .background(Capsule().fill(selected ? JoeTheme.accentViolet
-                                           : (focused ? JoeTheme.accentViolet
-                                                      : Color.white.opacity(0.07))))
-                .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                                lineWidth: 4))
-                .scaleEffect(focused ? 1.05 : 1.0)
+            // v2.0.0 (UI-5): the shared chip leaf — selection
+            // wears the theme accent fill, focus the theme ring;
+            // values only inside one painted capsule.
+            JoeChipLabel(title: group, selected: selected)
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedChip, equals: group)
     }
 
     private func actionChip(id: String, title: String, action: @escaping () -> Void) -> some View {
-        let focused = focusedChip == id
-        return Button(action: action) {
-            Text(title)
-                .font(.system(size: 29, weight: .medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
-                .background(Capsule().fill(focused ? JoeTheme.accentViolet
-                                           : Color.white.opacity(0.07)))
-                .overlay(Capsule().strokeBorder(focused ? joeFocusViolet : Color.clear,
-                                                lineWidth: 4))
-                .scaleEffect(focused ? 1.05 : 1.0)
+        Button(action: action) {
+            JoeChipLabel(title: title, selected: false)
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedChip, equals: id)
         .disabled(store.isLoading || store.isValidating)
     }
@@ -294,11 +259,11 @@ struct JoeTVSection: View {
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     Text(group)
                         .font(.system(size: 34, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Text("\(gridChannels.count) kênh")
                         .font(.system(size: 25))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                 }
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
@@ -318,11 +283,11 @@ struct JoeTVSection: View {
     /// One grid cell (DESIGN-SPEC §7.5): a single focusable
     /// 273×150 surface — channel logo centred (max 180×90) with
     /// the channel name (25pt) in the tile's lower band INSIDE
-    /// the tile. Focus is the F3 tile treatment, drawn by hand
-    /// under .plain: 4pt lighter-violet outline + scale 1.05 +
-    /// the name turns focusViolet. No shadow (F3). Tiles of a
-    /// LIVE group carry the LIVE badge (red dot + "LIVE") at
-    /// top-right — red is reserved for LIVE (§3.1).
+    /// the tile. v2.0.0 (UI-5): focus is value-only — the theme
+    /// ring colour/width and the name's focus colour change
+    /// inside the always-installed tile shape; no scale. Tiles
+    /// of a LIVE group carry the LIVE badge (red dot + "LIVE")
+    /// at top-right — red is reserved for LIVE (§3.1).
     private func tile(_ channel: Channel) -> some View {
         let focused = focusedChannel == channel.id
         let isLiveGroup = (effectiveGroup ?? "").uppercased().contains("LIVE")
@@ -330,18 +295,13 @@ struct JoeTVSection: View {
             play(channel)
         } label: {
             ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color.white.opacity(0.07))
+                RoundedRectangle(cornerRadius: theme.rCard)
+                    .fill(theme.surface2)
                 VStack(spacing: 6) {
                     ZStack {
                         if let url = channel.logoURL {
-                            AsyncImage(url: url) { phase in
-                                switch phase {
-                                case .success(let image):
-                                    image.resizable().scaledToFit()
-                                default:
-                                    fallbackText(channel)
-                                }
+                            JoeRemoteImage(url: url, targetPixels: 480, fit: true) {
+                                fallbackText(channel)
                             }
                         } else {
                             fallbackText(channel)
@@ -350,7 +310,7 @@ struct JoeTVSection: View {
                     .frame(maxWidth: 180, maxHeight: 90)
                     Text(channel.title)
                         .font(.system(size: 25, weight: focused ? .semibold : .medium))
-                        .foregroundStyle(focused ? joeFocusViolet : .white)
+                        .foregroundStyle(focused ? theme.focusTitle : theme.text)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 12)
@@ -359,7 +319,7 @@ struct JoeTVSection: View {
                         Circle().fill(JoeTheme.accentRed).frame(width: 12, height: 12)
                         Text("LIVE")
                             .font(.system(size: 23, weight: .heavy))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(theme.text)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -369,13 +329,11 @@ struct JoeTVSection: View {
                 }
             }
             .frame(width: 273, height: 150)
-            .overlay(RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(focused ? joeFocusViolet : Color.white.opacity(0.10),
-                              lineWidth: focused ? 4 : 2))
-            .scaleEffect(focused ? 1.05 : 1.0)
+            .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+                .strokeBorder(focused ? theme.focus : theme.stroke,
+                              lineWidth: focused ? theme.ringWidth : 2))
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedChannel, equals: channel.id)
         .onMoveCommand { direction in
             moveInGrid(direction, from: channel)
@@ -419,13 +377,13 @@ struct JoeTVSection: View {
             if store.isValidating {
                 Text("Đang kiểm tra link…")
                     .font(.system(size: 23))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             }
             Spacer()
             if !store.channels.isEmpty {
                 Text("\(store.channels.count) kênh")
                     .font(.system(size: 23))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             }
         }
     }

@@ -22,6 +22,24 @@ struct Movie: Identifiable, Hashable {
     var episodeCurrent = ""
     var quality = ""
     var lang = ""
+    /// List-payload extras the KK/VS catalogues already carry
+    /// (UI-6 defect D-2): genre names, country, runtime and the
+    /// total episode count. The Billboard hero's full meta line,
+    /// genres line and "Tập x / y tập" are built from these.
+    /// Additive + tolerant: payloads lacking them (Film4K, Tủ
+    /// Phim) simply leave the defaults, and every older parse
+    /// path is unchanged.
+    var categories: [String] = []
+    var country = ""
+    var time = ""
+    var episodeTotal = ""
+    /// KK/VS theatrical flag (owner source-priority policy,
+    /// 2026-11-15 — IN v2.0.0 per the owner's 16:08 ruling):
+    /// the payloads carry a `chieurap` bool on every item;
+    /// the Auto source rule reads it (with the single-type
+    /// signal) to recognise US theatrical films. Additive +
+    /// tolerant like the fields above.
+    var chieurap = false
     /// Tủ Phim extras (parity with the Android KkApi.Movie):
     /// the IMDb id keys the CacheVideo probe on TP details.
     var imdbId = ""

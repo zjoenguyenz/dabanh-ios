@@ -15,6 +15,13 @@ import UIKit
 ///   be worse than omitting it. Playback is AVPlayer everywhere.
 struct JoeSettingsView: View {
     @EnvironmentObject private var nav: JoeNavigator
+    @Environment(\.joeTheme) private var theme
+    /// v2.0.0 (UI-5): the design picker writes the same
+    /// @AppStorage key the root reads; the Settings tree itself
+    /// keeps ONE structure across themes (only token values
+    /// change), so focus stays on the tapped chip through the
+    /// switch — never stranded.
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
     @State private var addonURL: String = TorrentSettings.addonURL
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken
@@ -33,6 +40,7 @@ struct JoeSettingsView: View {
     @FocusState private var focusedField: String?
     @FocusState private var probeFocused: Bool
     @FocusState private var kkProbeFocused: Bool
+    @FocusState private var themeChipFocused: String?
 
     private enum KKRouteStatus {
         case idle, probing, ok(ms: Int), down
@@ -44,7 +52,7 @@ struct JoeSettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Cài đặt")
                         .font(.system(size: 56, weight: .heavy))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                     Text(TorrentSettings.isConfigured
                          ? "Nguồn Torrent: đã cấu hình ✓"
                          : "Nguồn Torrent: chưa cấu hình — mục Phim Torrent cần ít nhất một mục dưới đây")
@@ -52,6 +60,8 @@ struct JoeSettingsView: View {
                         .foregroundStyle(TorrentSettings.isConfigured
                                          ? JoeTheme.okGreen : .orange)
                 }
+
+                themeBlock
 
                 tunnelStatusBlock
 
@@ -83,7 +93,7 @@ struct JoeSettingsView: View {
                              ? "TMDB: đang dùng key tích hợp sẵn ✓"
                              : "TMDB: đang dùng key anh nhập ✓")
                             .font(.system(size: 25))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(theme.meta)
                     }
                 }
 
@@ -95,18 +105,22 @@ struct JoeSettingsView: View {
                     } else {
                         Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
                             .font(.system(size: 25))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(theme.meta)
                     }
                 }
 
                 Text("Trên Apple TV không có công tắc hầm trong app: đường truyền Việt Nam do profile Sing-box của hệ thống đảm nhiệm. Token chỉ lưu trong app này trên Apple TV của anh, không gửi đi đâu ngoài dịch vụ tương ứng.")
                     .font(.system(size: 25))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
 
                 diagnosticsBlock
 
                 signpostBlock
+
+                Text("Joe TV v2.0.0")
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.meta)
             }
         }
         // CONVERGENCE (Team 7 D4 + spec item 3, 2026-11-15):
@@ -133,13 +147,42 @@ struct JoeSettingsView: View {
         .onChange(of: tmdbKey) { save() }
     }
 
+    /// The "Giao diện" row (v2.0.0, UI-5): three chips, one per
+    /// design. The active design's chip wears the accent fill;
+    /// tapping another switches the whole app immediately —
+    /// this screen's own structure does not change, only its
+    /// token values, so focus remains on the chip row.
+    private var themeBlock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Giao diện")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            HStack(spacing: 14) {
+                ForEach(JoeThemeID.allCases, id: \.self) { id in
+                    Button {
+                        themeIDRaw = id.rawValue
+                    } label: {
+                        JoeChipLabel(title: id.pickerLabel,
+                                     selected: themeIDRaw == id.rawValue)
+                    }
+                    .buttonStyle(.card)
+                    .focused($themeChipFocused, equals: id.rawValue)
+                }
+            }
+            Text("Đổi giao diện áp dụng ngay cho toàn app: trang chủ, trang phim, tìm kiếm và trình phát.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1250, alignment: .leading)
+        }
+    }
+
     private func field(title: String, hint: String,
                        text: Binding<String>, id: String, secure: Bool,
                        allowsPaste: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 29, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             HStack(alignment: .center, spacing: 16) {
                 Group {
                     if secure {
@@ -149,17 +192,11 @@ struct JoeSettingsView: View {
                     }
                 }
                 .textFieldStyle(.plain)
-                .font(.system(size: 29))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-                .background(RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.white.opacity(0.07)))
-                .overlay(RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(focusedField == id ? joeFocusViolet : Color.clear,
-                                  lineWidth: 4))
+                // UI-6 defect D-22: field text is 31 pt at
+                // every field site (the shared token).
+                .font(.system(size: ThemeTokens.fieldTextSize))
+                .joeFieldChrome(focused: focusedField == id)
                 .focused($focusedField, equals: id)
-                .focusEffectDisabled(true)
                 .onSubmit { save() }
                 if allowsPaste {
                     iphoneInputButton(id: id)
@@ -168,7 +205,7 @@ struct JoeSettingsView: View {
             .frame(maxWidth: 1250, alignment: .leading)
             Text(hint)
                 .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1250, alignment: .leading)
             if let inputHint = inputHints[id] {
                 Text(inputHint)
@@ -200,18 +237,10 @@ struct JoeSettingsView: View {
             inputHints[id] = "Đã chọn ô nhập — mở bàn phím Apple TV trên iPhone của anh (thông báo hiện trên iPhone khi ô đang được chọn), dán mã vào đó, chữ sẽ tự vào ô này."
             focusedField = id
         } label: {
-            Text("Nhập từ iPhone")
-                .font(.system(size: 29, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 30)
-                .padding(.vertical, 16)
-                .background(Capsule().fill(JoeTheme.accentViolet))
-                .overlay(JoeFocusRing(shape: Capsule()))
+            JoePrimaryLabel(title: "Nhập từ iPhone")
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($focusedField, equals: "paste|" + id)
-        .scaleEffect(focusedField == "paste|" + id ? 1.05 : 1.0)
     }
 
     /// Tunnel status row (1.9.2, Team 9 item 5): READ-ONLY —
@@ -231,24 +260,16 @@ struct JoeSettingsView: View {
                     .frame(width: 16, height: 16)
                 Text(kkStatusText)
                     .font(.system(size: 29))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.text)
                     .frame(maxWidth: 1250, alignment: .leading)
             }
             Button {
                 Task { await runKKProbe() }
             } label: {
-                Text("Kiểm tra lại")
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 36)
-                    .padding(.vertical, 16)
-                    .background(Capsule().fill(JoeTheme.accentViolet))
-                    .overlay(JoeFocusRing(shape: Capsule()))
+                JoePrimaryLabel(title: "Kiểm tra lại")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($kkProbeFocused)
-            .scaleEffect(kkProbeFocused ? 1.05 : 1.0)
             .disabled(kkProbing)
         }
     }
@@ -294,17 +315,17 @@ struct JoeSettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Kiểm tra nguồn phim")
                 .font(.system(size: 34, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             Text("Đo từng nguồn phim ngay trên máy này.")
                 .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
             if probing {
                 HStack(spacing: 14) {
                     ProgressView()
                         .tint(.white)
                     Text("Đang kiểm tra…")
                         .font(.system(size: 29))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                 }
             } else if !probeResults.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -317,11 +338,11 @@ struct JoeSettingsView: View {
                                 .frame(width: 16, height: 16)
                             Text(result.name)
                                 .font(.system(size: 29))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(theme.text)
                             Spacer()
                             Text("\(result.millis) ms")
                                 .font(.system(size: 25))
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(theme.meta)
                             Text(result.note)
                                 .font(.system(size: 25))
                                 .foregroundStyle(result.ok ? .white.opacity(0.7) : .orange)
@@ -339,18 +360,10 @@ struct JoeSettingsView: View {
                     probing = false
                 }
             } label: {
-                Text("Kiểm tra ngay")
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 36)
-                    .padding(.vertical, 16)
-                    .background(Capsule().fill(JoeTheme.accentViolet))
-                    .overlay(JoeFocusRing(shape: Capsule()))
+                JoePrimaryLabel(title: "Kiểm tra ngay")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($probeFocused)
-            .scaleEffect(probeFocused ? 1.05 : 1.0)
             .disabled(probing)
         }
     }
@@ -366,11 +379,11 @@ struct JoeSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Nhật ký tải phim (chẩn đoán)")
                 .font(.system(size: 34, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             if entries.isEmpty {
                 Text("Chưa có dữ liệu — mở trang Phim một lần rồi quay lại.")
                     .font(.system(size: 25))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
             } else {
                 VStack(alignment: .leading, spacing: 4) {
@@ -403,10 +416,6 @@ struct JoeSettingsView: View {
         }
     }
 }
-
-/// v1.5 focus outline colour (lighter violet) — the style law's
-/// focus stroke; replaces the fields' old white focused stroke.
-private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
 // CONVERGENCE RECORD (2026-11-15): JoeSettingsMoveTrap — this
 // file's copy of the conditional move-trap pattern — is

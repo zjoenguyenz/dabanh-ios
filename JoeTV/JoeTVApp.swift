@@ -1,9 +1,5 @@
 import SwiftUI
 
-/// v1.5 focus outline colour (lighter violet) — the style law's
-/// focus stroke on every focusable element in this file.
-private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
-
 /// Joe TV for Apple TV — one app for live TV, the aggregated Phim
 /// library (KKPhim + Film4K + VSMOV + Tủ Phim) and the debrid
 /// Torrent section. v1.1 reaches parity with the Android app the
@@ -83,6 +79,11 @@ final class JoeNavigator: ObservableObject {
     @Published var movie: MovieRoute?
     @Published var tor: TorRoute?
     @Published var searchOpen = false
+    /// v2.0.0 (UI-5): the browse/grid layer inside the Phim
+    /// section (genre filter). Like searchOpen it lives inside
+    /// JoePhimHome's tree; the Phim root's exit handler closes
+    /// it before offering the exit confirmation.
+    @Published var browseOpen = false
 
     // CONVERGENCE (Team 7 D4/D5, 2026-11-15): the v1.5 focus hub
     // (focusTarget / focusNonce / requestFocus) is REMOVED. It
@@ -112,7 +113,8 @@ final class JoeNavigator: ObservableObject {
 /// gone: with the rail, focus could not move from the rail into
 /// the TV section's channels or the Settings fields at all, and
 /// the system focus effect washed a pale halo over focused rail
-/// rows despite .buttonStyle(.plain)+.focusEffectDisabled().
+/// rows despite the plain button style with the focus effect
+/// disabled on the buttons.
 /// v1.5: pills draw focus themselves (violet fill +
 /// lighter-violet outline + scale) — .card's pale focus card
 /// washed titles out in the owner's v1.4 videos and is banned.
@@ -127,8 +129,8 @@ final class JoeNavigator: ObservableObject {
 /// The pills are real Buttons again (.buttonStyle(.card), the
 /// Đá Banh TV construction) with the app-drawn look kept via a
 /// label that reads its own focus from the environment and
-/// .focusEffectDisabled(true) on the Button itself; routing
-/// between pills and sections is geometric.
+/// the system focus effect disabled on the Button itself;
+/// routing between pills and sections is geometric.
 ///
 /// MENU SEMANTICS (1.9.2, Team 9 item 4 — G-EXIT REDEFINED by
 /// the owner's explicit order, mirroring the Android app):
@@ -142,11 +144,21 @@ final class JoeNavigator: ObservableObject {
 /// device-proven NOT to intercept), and the three non-Phim
 /// section roots (JoeTVSection / JoeTorrentHome /
 /// JoeSettingsView — Menu there returns to the Phim section).
-/// JoePhimHome carries NO handler, and neither does this
-/// shell or the app root — so at the Phim root no app consumer
-/// exists and the press reaches the system default: exit.
+/// v2.0.0 (UI-5): JoePhimHome now carries the eighth handler —
+/// at the Phim root a Menu press first closes the browse layer
+/// when it is open, otherwise presents the exit confirmation
+/// ("Thoát Joe TV?" / "Ở lại" / "Thoát" → exit(0)), per UI-1's
+/// spec. Inner Back levels are unchanged.
 struct JoeRootView: View {
     @StateObject private var nav = JoeNavigator()
+    @EnvironmentObject private var watch: WatchStore
+    /// v2.0.0 (UI-5): the active design, chosen in Settings'
+    /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
+
+    private var theme: ThemeTokens {
+        ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .sourceBoard)
+    }
 
     /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
     /// Phim section's view. If the owner opened search, escaped
@@ -160,7 +172,7 @@ struct JoeRootView: View {
 
     var body: some View {
         ZStack {
-            JoeTheme.background
+            theme.bg
             // §4 (DESIGN-SPEC-V19): the tvOS safe area IS the
             // HIG inset (80 pt sides, 60 pt top/bottom) — the
             // content container respects it and adds NO further
@@ -174,7 +186,7 @@ struct JoeRootView: View {
             .disabled(nav.movie != nil || nav.tor != nil)
             if let route = nav.movie {
                 ZStack {
-                    JoeTheme.background
+                    theme.bg
                     JoeMovieDetail(route: route)
                 }
                 // 1.9.2 (Team 9 item 4): NO exit handler on
@@ -192,7 +204,7 @@ struct JoeRootView: View {
             }
             if let route = nav.tor {
                 ZStack {
-                    JoeTheme.background
+                    theme.bg
                     JoeTorrentDetail(route: route)
                 }
                 // Same move as the movie layer above: the
@@ -203,16 +215,27 @@ struct JoeRootView: View {
         }
         .onChange(of: nav.section) { _, _ in
             // S1.1: see the note above `body` — search must
-            // not outlive the Phim section.
+            // not outlive the Phim section. The v2.0.0 browse
+            // layer follows the same rule.
             if nav.searchOpen { nav.searchOpen = false }
+            if nav.browseOpen { nav.browseOpen = false }
         }
+        .task {
+            // UI-5 pipeline: warm the owner's own posters at
+            // launch (Continue Watching + favourites render from
+            // the decoded cache on cold open, no network wait).
+            let entries = watch.progress() + watch.favorites()
+            JoeImagePipeline.shared.prefetch(
+                entries.compactMap { $0.posterURL }, targetPixels: 720)
+        }
+        .environment(\.joeTheme, theme)
         .environmentObject(nav)
-        // CONVERGENCE (2026-11-15): the root-level
-        // .focusEffectDisabled(true) backstop and the shell's
-        // focus-hub consumer are REMOVED (spec items 3–4).
-        // Focus-effect suppression is per-view, on the controls
-        // themselves, exactly as it already was everywhere
-        // except this root line.
+        // v2.0.0 (UI-5): the construction law is now absolute —
+        // NO .focusEffectDisabled and NO .scaleEffect anywhere
+        // in the target (UI-1's dissection convicted both as
+        // halves of the 1.9.2 slab/grey-corner defect; Đá Banh
+        // TV ships zero of either). Every control paints one
+        // full shape and focus changes values only.
     }
 
     // The top row stays well under ~1,800pt wide on purpose
@@ -220,20 +243,68 @@ struct JoeRootView: View {
     // buttons until the focus engine cannot land on them) —
     // every pill label is .lineLimit(1) + .fixedSize so it can
     // never be squeezed.
+    //
+    // v2.0.0 (UI-5): the bar follows the active design — A and F
+    // keep the pill row (token colours; A renders approved the
+    // pills translucent over the hero, but the shell geometry is
+    // the device-proven pills-above-content, so the hero starts
+    // below the bar and the pills take A's surface token), D
+    // replaces the pills with text links (its system verbatim).
+    // Both variants carry a "Tìm phim" control into the Phim
+    // search layer.
+    @ViewBuilder
     private var topBar: some View {
-        HStack(alignment: .center, spacing: 20) {
-            wordmark
-            ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
-                sectionPill(s)
+        if theme.id == .posterWall {
+            HStack(alignment: .center, spacing: 26) {
+                wordmark
+                Spacer()
+                ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
+                    topLink(s.title, selected: nav.section == s) { nav.section = s }
+                }
+                topLink("Tìm phim", selected: false) { openSearch() }
             }
-            Spacer()
-            Text("Joe TV v1.9.2")
-                .font(.system(size: 23))
-                .foregroundStyle(.white.opacity(0.4))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+            .frame(height: 76)
+        } else {
+            HStack(alignment: .center, spacing: 20) {
+                wordmark
+                ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
+                    sectionPill(s)
+                }
+                Spacer()
+                Button { openSearch() } label: {
+                    PillLabel(title: "Tìm phim", icon: "magnifyingglass", selected: false)
+                }
+                .buttonStyle(.card)
+                Text("Joe TV v2.0.0")
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .frame(height: 76)
         }
-        .frame(height: 76)
+    }
+
+    /// Open the Phim search layer from any section. When the
+    /// section changes in the same action, the search flag is
+    /// set on the next main-actor turn — after the root's
+    /// section-change consumer (S1.1) has run — so the layer
+    /// opens instead of being closed by that rule.
+    private func openSearch() {
+        if nav.section == .phim {
+            nav.searchOpen = true
+        } else {
+            nav.section = .phim
+            Task { @MainActor in nav.searchOpen = true }
+        }
+    }
+
+    private func topLink(_ title: String, selected: Bool,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            TopLinkLabel(title: title, selected: selected)
+        }
+        .buttonStyle(.card)
     }
 
     /// v1.8: the real Joe TV wordmark (the approved master, the
@@ -270,13 +341,12 @@ struct JoeRootView: View {
     /// the row and DOWN lands on the section's top element
     /// GEOMETRICALLY (pills sit directly above the content — the
     /// geometry this shell already had), which is the routing the
-    /// owner gets on Đá Banh TV on the same box. The app-drawn
-    /// look is kept: the label (PillLabel) reads its own focus
-    /// from the environment and draws the v1.9 capsule (violet
-    /// fill + lighter-violet outline + scale), and the system
-    /// focus effect is disabled on the Button itself —
-    /// unconditionally, as a plain modifier, never as a
-    /// structure switch.
+    /// owner gets on Đá Banh TV on the same box.
+    /// v2.0.0 (UI-5): the label's look is theme-tokenised and the
+    /// last two 1.9.2 ingredients are gone — no scale on focus,
+    /// no .focusEffectDisabled on the Button (the absolute
+    /// construction law; the label paints the full capsule, so
+    /// the system platter never shows).
     private func sectionPill(_ s: JoeNavigator.Section) -> some View {
         Button {
             nav.section = s
@@ -284,7 +354,6 @@ struct JoeRootView: View {
             PillLabel(title: s.title, icon: s.icon, selected: nav.section == s)
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
     }
 
     @ViewBuilder
@@ -305,17 +374,17 @@ struct JoeRootView: View {
 /// The pill's label (convergence, Team 7 item 2): reads its OWN
 /// focus state from the environment — the focus engine writes
 /// `isFocused` into a focused view's subtree as a pure rendering
-/// input; the label branches on it only to pick colours/scale
-/// INSIDE one stable view, writes nothing back, and no view's
-/// structure depends on it. Reproduces the app-drawn v1.9 pill
-/// look exactly: violet fill when selected or focused,
-/// lighter-violet 4 pt outline and 1.06 scale when focused,
-/// semibold title when selected or focused.
+/// input; the label branches on it only to pick colours INSIDE
+/// one stable view, writes nothing back, and no view's structure
+/// depends on it. v2.0.0 (UI-5): theme tokens — selected or
+/// focused wears the theme accent fill, focus adds the theme
+/// ring; NO scale (construction law).
 private struct PillLabel: View {
     let title: String
     let icon: String
     let selected: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
@@ -326,15 +395,46 @@ private struct PillLabel: View {
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
         }
-        .foregroundStyle((selected || isFocused) ? .white : .white.opacity(0.85))
+        .foregroundStyle((selected || isFocused) ? theme.onAccent : theme.text.opacity(0.85))
         .padding(.horizontal, 28)
         .padding(.vertical, 14)
-        .background(Capsule().fill(selected ? JoeTheme.accentViolet
-                                   : (isFocused ? JoeTheme.accentViolet
-                                                : Color.white.opacity(0.07))))
-        .overlay(Capsule().strokeBorder(isFocused ? joeFocusViolet : Color.clear,
-                                        lineWidth: 4))
-        .scaleEffect(isFocused ? 1.06 : 1.0)
+        .background(Capsule().fill(selected || isFocused ? theme.accent : theme.surface2))
+        .overlay(JoeFocusRing(shape: Capsule()))
+    }
+}
+
+/// Design D's top-bar link (UI-4 spec verbatim): plain text —
+/// selected is bold with the yellow underline bar, focused is
+/// yellow text with a 3 pt inset ring. Values only, one shape.
+/// UI-6 defect D-3: the label PAINTS its full frame with the
+/// theme foundation — a bare-text .card label leaves the
+/// system focus platter exposed behind the text (the 1.9.2
+/// slab mechanism); the foundation paint is the same recipe
+/// PosterCard.wallBody uses.
+private struct TopLinkLabel: View {
+    let title: String
+    let selected: Bool
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 27, weight: selected ? .bold : .medium))
+            .foregroundStyle(isFocused ? theme.focus
+                             : (selected ? theme.text : theme.meta))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(theme.bg)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(selected ? theme.focus : .clear)
+                    .frame(height: 4)
+                    .padding(.horizontal, 18)
+            }
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isFocused ? theme.focus : .clear, lineWidth: 3))
     }
 }
 

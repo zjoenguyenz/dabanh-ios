@@ -1,4 +1,5 @@
 import SwiftUI
+import Darwin
 
 /// Route into a movie detail, from any rail or search result.
 struct MovieRoute: Hashable {
@@ -11,20 +12,34 @@ struct MovieRoute: Hashable {
     var preselectEp: String = ""
 }
 
-/// The Phim home: the owner's aggregated library — KKPhim +
-/// Film4K.net + VSMOV behind one screen, exactly like the
-/// Android app he verified (v1.5.1 shape, RapPhim removed by his
-/// 2026-11-14 order; Film4K.net added from the same night's link
-/// hunt). Continue Watching + Favorites lead (from WatchStore),
-/// then the merged rail, then per-provider rails. Every tile
-/// carries its provider badge so the sources never blur.
+/// The Phim section root (v2.0.0, Team UI-5). One root, three
+/// design trees over the unchanged data layer:
+///  - A Billboard: full-bleed backdrop hero + every rail below
+///  - D Poster Wall: JoeWallHomeView (JoeBrowse.swift)
+///  - F Source Board: source bands over the provider rails +
+///    every category shelf as rails below the bands
+/// Search and the browse/grid layer swap in above the home,
+/// exactly as search always has.
+///
+/// MENU (v2.0.0): this root carries the eighth exit handler
+/// (UI-1's exit-dialog spec) — always installed, state-checked
+/// inside: browse open → close browse; otherwise present the
+/// exit confirmation. Search and the detail/player layers keep
+/// their own nearer handlers, so one press still closes exactly
+/// one layer. WatchStore persists synchronously on every
+/// mutation (1.9.2), so the destructive action's flush is
+/// already done by construction; it dismisses the alert and
+/// exits on the next main-actor turn.
 struct JoePhimHome: View {
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var phim: PhimStore
+    @Environment(\.joeTheme) private var theme
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var focusedEntry: String?
     @FocusState private var headerFocused: Bool
+    @FocusState private var heroPlayFocused: Bool
+    @FocusState private var bandFocused: String?
     @FocusState private var retryFocused: Bool
     /// Team 4 fix-round minor: the state surfaces (G3/G5) are
     /// gated on "a load has been attempted" so they cannot flash
@@ -32,189 +47,402 @@ struct JoePhimHome: View {
     /// has even run (at that instant loading == false and the
     /// catalogue is trivially empty).
     @State private var attempted = false
+    @State private var exitConfirm = false
+    /// UI-6 defect D-2: the featured film's DETAIL, fetched
+    /// fail-soft for the hero's synopsis (the list payloads
+    /// carry no synopsis) and as the fallback source for the
+    /// meta fields a sparse list item left empty.
+    @State private var heroDetail: Detail?
 
     var body: some View {
         Group {
             if nav.searchOpen {
                 JoeSearchView()
+            } else if nav.browseOpen {
+                JoeBrowseView()
+            } else if theme.id == .posterWall {
+                JoeWallHomeView()
             } else {
-                grid
+                railHome
             }
         }
         .task {
             attempted = true
             phim.loadIfNeeded()
         }
-        // CONVERGENCE (spec item 3, 2026-11-15): the focus-hub
-        // consumer that used to sit here (onChange of
-        // nav.focusNonce → headerFocused = true) is REMOVED —
-        // no programmatic focus writes on the launch path.
-        // DOWN from the pills lands on the header geometrically.
+        // CONVERGENCE (spec item 3, 2026-11-15): no programmatic
+        // focus writes on the launch path. DOWN from the pills
+        // lands on the home's top element geometrically.
+        //
+        // EXIT DIALOG (UI-5, handler #8 of the 8 in
+        // JoeTV/*.swift — the compiled target also carries the
+        // shared TV player's own cover handler in
+        // DaBanhTV/TVPlayerView.swift:47; inventory wording per
+        // UI-7 F-3 / APPLE-CONFORMANCE G-EXIT-2): always
+        // installed on the Phim section root; the state check
+        // lives INSIDE the closure, so the handler's
+        // installation never depends on any state (the D4-safe
+        // shape). Search has its own nearer handler while it is
+        // open; details and the player are nearer still.
+        .onExitCommand {
+            if nav.browseOpen {
+                nav.browseOpen = false
+            } else if !nav.searchOpen {
+                exitConfirm = true
+            }
+        }
+        .alert("Thoát Joe TV?", isPresented: $exitConfirm) {
+            Button("Thoát", role: .destructive) {
+                exitConfirm = false
+                DispatchQueue.main.async { exit(0) }
+            }
+            Button("Ở lại", role: .cancel) { }
+        } message: {
+            Text("Phim đang xem dở vẫn được lưu lại cho lần mở sau.")
+        }
     }
 
-    private var grid: some View {
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 40) {
-                    header
-                    cwRail
-                    favRail
-                    if !phim.merged.isEmpty {
-                        movieRail("✨ Mới cập nhật · Tổng hợp", phim.merged, badges: true, scope: "merged")
+    // MARK: - Rail home (designs A and F)
+
+    private var railHome: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 40) {
+                if theme.id == .billboard {
+                    if heroMovie != nil {
+                        hero
+                    } else {
+                        slimHeader
                     }
-                    if !phim.chieuRap.isEmpty {
-                        movieRail("🔥 Phim chiếu rạp", phim.chieuRap, badges: true, scope: "chieuRap")
-                    }
-                    if !phim.vietnamAll.isEmpty {
-                        movieRail("🇻🇳 Phim Việt Nam", phim.vietnamAll, badges: true, scope: "vnAll")
-                    }
-                    if !phim.vietnamSeries.isEmpty {
-                        movieRail("🇻🇳 Phim bộ Việt Nam", phim.vietnamSeries, badges: true, scope: "vnSeries")
-                    }
-                    if !phim.vietnamSingle.isEmpty {
-                        movieRail("🇻🇳 Phim lẻ Việt Nam", phim.vietnamSingle, badges: true, scope: "vnSingle")
-                    }
-                    ForEach(Array(PhimStore.genreSpec.enumerated()), id: \.offset) { _, spec in
-                        if let list = phim.genreLists[spec.slug], !list.isEmpty {
-                            movieRail(spec.title, list, badges: true, scope: "genre:" + spec.slug)
+                } else {
+                    slimHeader
+                }
+                cwRail
+                favRail
+                ForEach(railSpecs) { spec in
+                    if !spec.movies.isEmpty {
+                        if let band = spec.bandName {
+                            bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
                         }
-                    }
-                    ForEach(Array(PhimStore.countrySpec.enumerated()), id: \.offset) { _, spec in
-                        if let list = phim.countryLists[spec.slug], !list.isEmpty {
-                            movieRail(spec.title, list, badges: true, scope: "country:" + spec.slug)
-                        }
-                    }
-                    if !phim.kkNew.isEmpty {
-                        movieRail("✨ Mới cập nhật", phim.kkNew, badges: false, scope: "kkNew")
-                    }
-                    if !phim.kkSeries.isEmpty {
-                        movieRail("📺 Phim bộ mới", phim.kkSeries, badges: false, scope: "kkSeries")
-                    }
-                    if !phim.kkMovies.isEmpty {
-                        movieRail("🎞️ Phim lẻ mới", phim.kkMovies, badges: false, scope: "kkMovies")
-                    }
-                    if !phim.kkAnime.isEmpty {
-                        movieRail("🐣 Hoạt hình", phim.kkAnime, badges: false, scope: "kkAnime")
-                    }
-                    if !phim.f4kNew.isEmpty {
-                        movieRail("✨ Film4K · Mới cập nhật", phim.f4kNew, badges: false, scope: "f4kNew")
-                    }
-                    if !phim.f4kMovies.isEmpty {
-                        movieRail("🎞️ Film4K · Phim lẻ mới", phim.f4kMovies, badges: false, scope: "f4kMovies")
-                    }
-                    if !phim.vsNew.isEmpty {
-                        movieRail("🎬 VSMOV · Mới cập nhật", phim.vsNew, badges: false, scope: "vsNew")
-                    }
-                    if !phim.vsSeries.isEmpty {
-                        movieRail("🎬 VSMOV · Phim bộ mới", phim.vsSeries, badges: false, scope: "vsSeries")
-                    }
-                    if !phim.tpMovies.isEmpty {
-                        movieRail("📚 Tủ Phim · Phim lẻ mới", phim.tpMovies, badges: false, scope: "tpMovies")
-                    }
-                    if !phim.tpSeries.isEmpty {
-                        movieRail("📚 Tủ Phim · Phim bộ mới", phim.tpSeries, badges: false, scope: "tpSeries")
-                    }
-                    // §8/G1: the spinner exists only while a load
-                    // is running, nothing has landed, and the 20 s
-                    // store deadline has not fired — never longer.
-                    if catalogueEmpty && phim.loading && !phim.loadTimedOut {
-                        ProgressView("Đang tải thư viện phim…")
-                            .font(.system(size: 29))
-                            .foregroundStyle(.white)
-                            .tint(.white)
-                            .padding(.top, 30)
-                    }
-                    // §8/G3 + C-8 + BLOCK-2: the error surface
-                    // shows ONLY when no catalogue rail has data
-                    // (never under healthy rails), and only in
-                    // Team 4's two failure states — the deadline
-                    // fired, or the load ended with real provider
-                    // errors. An all-empty SUCCESS is G5 below,
-                    // not an error (spec-wins ruling (d)).
-                    if showPhimError {
-                        errorSurface
-                    }
-                    // §8/G5: every provider answered, nothing
-                    // failed, the catalogue is simply empty —
-                    // message only, no spinner, no Retry.
-                    if showPhimEmpty {
-                        Text("Thư viện chưa có dữ liệu.")
-                            .font(.system(size: 29))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .padding(.top, 30)
-                    }
-                    // §8/G4: partial failure — content renders,
-                    // one non-focusable warning line at the very
-                    // bottom names the providers with no content.
-                    if phim.hasData && !failedProviders.isEmpty {
-                        Text("Chưa tải được: " + failedProviders.joined(separator: ", "))
-                            .font(.system(size: 25))
-                            .foregroundStyle(.orange)
+                        movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
                     }
                 }
+                // §8/G1: the spinner exists only while a load
+                // is running, nothing has landed, and the 20 s
+                // store deadline has not fired — never longer.
+                if catalogueEmpty && phim.loading && !phim.loadTimedOut {
+                    ProgressView("Đang tải thư viện phim…")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.text)
+                        .tint(theme.text)
+                        .padding(.top, 30)
+                }
+                // §8/G3 + C-8 + BLOCK-2: the error surface
+                // shows ONLY when no catalogue rail has data
+                // (never under healthy rails), and only in
+                // Team 4's two failure states — the deadline
+                // fired, or the load ended with real provider
+                // errors. An all-empty SUCCESS is G5 below,
+                // not an error (spec-wins ruling (d)).
+                if showPhimError {
+                    errorSurface
+                }
+                // §8/G5: every provider answered, nothing
+                // failed, the catalogue is simply empty —
+                // message only, no spinner, no Retry.
+                if showPhimEmpty {
+                    Text("Thư viện chưa có dữ liệu.")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.meta)
+                        .padding(.top, 30)
+                }
+                // §8/G4: partial failure — content renders,
+                // one non-focusable warning line at the very
+                // bottom names the providers with no content.
+                if phim.hasData && !failedProviders.isEmpty {
+                    Text("Chưa tải được: " + failedProviders.joined(separator: ", "))
+                        .font(.system(size: 25))
+                        .foregroundStyle(.orange)
+                }
             }
-            // CONVERGENCE (Team 7 D4, 2026-11-15): the three
-            // JoeMoveTrap modifiers that wrapped this ScrollView
-            // (enabled by headerFocused / firstRailFocusIndex /
-            // retryFocused) are REMOVED — each flip rebuilt the
-            // ENTIRE ScrollView subtree under the focus engine.
-            // Routing now: header and Retry are plain focusable
-            // elements in the stack, so UP/DOWN between them and
-            // the pills is geometric; the first rail's exact
-            // arithmetic routing survives as an ALWAYS-installed
-            // .onMoveCommand on the first rail's own cards (see
-            // handleFirstRailMove), the codebase's per-element
-            // shape that never fed back into the tree's identity.
+        }
+        // CONVERGENCE (Team 7 D4, 2026-11-15): routing between
+        // the header/hero and the rails is geometric, except the
+        // first rail's exact arithmetic, which survives as an
+        // ALWAYS-installed .onMoveCommand on the first rail's own
+        // cards (see handleFirstRailMove) — per-element, and its
+        // attachment follows catalogue DATA (which rail is first),
+        // never focus state.
     }
 
-    // MARK: - Header
+    // MARK: - Rail specs (single source of truth for order)
 
-    private var header: some View {
+    /// The rail list lives at file scope (joeRailSpecs below)
+    /// since UI-6 defect D-1: design D's wall renders the same
+    /// category shelves as titled wall sections, driven by this
+    /// one list — the completeness A/F have, from one source.
+    private var railSpecs: [JoeRailSpec] {
+        joeRailSpecs(phim: phim, themeID: theme.id)
+    }
+
+    // MARK: - Design A hero
+
+    /// The featured slot: the first thumb-bearing film in rail
+    /// order (thumb-bearing sources only — UI-4's cost note),
+    /// falling back to the first film's poster as the backdrop.
+    private var heroMovie: Movie? {
+        let all = railSpecs.flatMap { $0.movies }
+        return all.first(where: { !$0.thumb.isEmpty }) ?? all.first
+    }
+
+    @ViewBuilder
+    private var hero: some View {
+        if let featured = heroMovie {
+            ZStack(alignment: .bottomLeading) {
+                JoeRemoteImage(url: featured.thumbURL ?? featured.posterURL,
+                               targetPixels: 1920) {
+                    Color.black.opacity(0.45)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 668)
+                .clipped()
+                // UI-3 SCRIM FLOOR (hard requirement): the
+                // horizontal scrim never drops below the token
+                // floor (0.55 black) anywhere inside the text
+                // zone (the left ~65% of the hero), so worst-case
+                // text contrast is guaranteed by the TOKEN, not
+                // by the backdrop's brightness. The bottom fade
+                // only takes over below the text block.
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.92), location: 0),
+                    .init(color: .black.opacity(0.80), location: 0.45),
+                    .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
+                    .init(color: .black.opacity(0.15), location: 0.82),
+                    .init(color: .black.opacity(0.05), location: 1)
+                ], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.55),
+                    .init(color: theme.bg, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Nổi bật hôm nay")
+                        .font(.system(size: 23, weight: .bold))
+                        .tracking(3)
+                        .foregroundStyle(theme.heroMeta)
+                    Text(featured.name)
+                        .font(.system(size: 68, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(2)
+                    if !featured.originName.isEmpty, featured.originName != featured.name {
+                        Text(featured.originName)
+                            .font(.system(size: 27))
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                    }
+                    Text(heroMetaLine(featured))
+                        .font(.system(size: 27))
+                        .foregroundStyle(theme.heroMeta)
+                    // UI-6 D-2: the render's genres line and
+                    // synopsis — genres from the list payload's
+                    // own category names (heroDetail's parsed
+                    // categories behind them), the synopsis from
+                    // the featured film's detail fetch.
+                    if !heroGenres.isEmpty {
+                        Text(heroGenres.joined(separator: " · "))
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                    }
+                    if let synopsis = heroDetail?.content, !synopsis.isEmpty {
+                        Text(synopsis)
+                            .font(.system(size: 26))
+                            .foregroundStyle(theme.text.opacity(0.92))
+                            .lineSpacing(6)
+                            .lineLimit(3)
+                            .frame(maxWidth: 880, alignment: .leading)
+                    }
+                    HStack(spacing: 16) {
+                        Button {
+                            nav.movie = MovieRoute(provider: featured.provider,
+                                                   slug: featured.slug,
+                                                   name: featured.name,
+                                                   poster: featured.poster,
+                                                   year: featured.year)
+                        } label: {
+                            JoePrimaryLabel(title: "Xem ngay", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.card)
+                        .focused($heroPlayFocused)
+                        Button {
+                            toggleHeroFavorite(featured)
+                        } label: {
+                            JoeSecondaryLabel(title: isHeroFavorite(featured)
+                                              ? "♥ Đã thích" : "♡ Yêu thích")
+                        }
+                        .buttonStyle(.card)
+                        Button {
+                            nav.browseOpen = true
+                        } label: {
+                            JoeSecondaryLabel(title: "Tất cả phim",
+                                              systemImage: "square.grid.2x2")
+                        }
+                        .buttonStyle(.card)
+                    }
+                    .padding(.top, 8)
+                }
+                .padding(40)
+                .frame(maxWidth: 1100, alignment: .leading)
+            }
+            .frame(height: 668)
+            // UI-6 D-2: fetch the featured film's detail for
+            // the synopsis (fail-soft — a failed fetch simply
+            // leaves the hero without one).
+            .task(id: featured.id) {
+                heroDetail = nil
+                heroDetail = try? await Providers.detail(
+                    featured.provider, slug: featured.slug)
+            }
+        }
+    }
+
+    /// The render's full hero meta (UI-6 D-2): year · quality
+    /// · lang · episode (with the total appended as
+    /// "Tập x / y tập" when both are known) · runtime ·
+    /// country. Sparse list items borrow the missing fields
+    /// from the featured film's detail movie.
+    private func heroMetaLine(_ m: Movie) -> String {
+        var episode = m.episodeCurrent
+        let total = !m.episodeTotal.isEmpty
+            ? m.episodeTotal : (heroDetail?.movie.episodeTotal ?? "")
+        if episode.hasPrefix("Tập"), !total.isEmpty, total != "0" {
+            episode = "\(episode) / \(total) tập"
+        }
+        let time = !m.time.isEmpty ? m.time : (heroDetail?.movie.time ?? "")
+        let country = !m.country.isEmpty
+            ? m.country : (heroDetail?.movie.country ?? "")
+        return [m.year, m.quality, m.lang, episode, time, country]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    /// The hero's genre names: the list item's own categories
+    /// first (the payloads carry them — D-2), the detail's
+    /// parsed categories behind them, its joined categories
+    /// string last.
+    private var heroGenres: [String] {
+        if let featured = heroMovie, !featured.categories.isEmpty {
+            return featured.categories
+        }
+        if let fromDetail = heroDetail?.movie.categories, !fromDetail.isEmpty {
+            return fromDetail
+        }
+        guard let joined = heroDetail?.categories, !joined.isEmpty else { return [] }
+        return joined.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func isHeroFavorite(_ m: Movie) -> Bool {
+        watch.isFavorite(key: WatchStore.movieFavKey(provider: m.provider, slug: m.slug))
+    }
+
+    private func toggleHeroFavorite(_ m: Movie) {
+        var e = WatchStore.Entry()
+        e.kind = Providers.kindOf(m.provider)
+        e.key = WatchStore.movieFavKey(provider: m.provider, slug: m.slug)
+        e.title = m.name
+        e.poster = m.poster
+        e.year = m.year
+        e.slug = m.slug
+        e.source = m.provider
+        e.ts = Int64(Date().timeIntervalSince1970 * 1000)
+        watch.toggleFavorite(e)
+    }
+
+    // MARK: - Design F header + source bands
+
+    /// F's slim header (the band stack carries the screen; the
+    /// header keeps the "Tất cả phim" browse entry and the
+    /// first rail's UP landing). Also design A's fallback when
+    /// no catalogue film exists yet to feature.
+    ///
+    /// UI-6 defect D-16 — DECLARED RETENTION (UI-6's fix text
+    /// offers "remove or declare"): this header is F's ONLY
+    /// focusable element above the owner rails. The first-rail
+    /// move handler's UP branch lands on its browse button
+    /// (headerFocused), and from there the pills are one
+    /// geometric UP away. Removing it would strand the
+    /// UP-to-pills chain whenever Continue Watching or
+    /// Favourites is on screen (the handler consumes the press
+    /// and no element above the entry rails would claim the
+    /// focus write). It stays, declared, in both roles.
+    private var slimHeader: some View {
         HStack(alignment: .center, spacing: 28) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Thư viện phim")
-                    .font(.system(size: 56, weight: .heavy))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 44, weight: .heavy))
+                    .foregroundStyle(theme.text)
                 Text("KKPhim · Film4K · VSMOV · Tủ Phim — link được lấy mới mỗi lần bấm xem")
                     .font(.system(size: 25))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             }
             Spacer()
             Button {
-                nav.searchOpen = true
+                nav.browseOpen = true
             } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                    Text("Tìm phim")
-                }
-                .font(.system(size: 29, weight: .medium))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 26)
-                .padding(.vertical, 14)
-                .background(Capsule().fill(headerFocused ? JoeTheme.accentViolet
-                                           : JoeTheme.surface))
-                .overlay(JoeFocusRing(shape: Capsule()))
-                .scaleEffect(headerFocused ? 1.05 : 1.0)
+                JoeSecondaryLabel(title: "Tất cả phim", systemImage: "square.grid.2x2")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($headerFocused)
         }
+    }
+
+    /// F's source band header (UI-6 defects D-15 + D-3): ONE
+    /// row — source name and catalogue note inline on the same
+    /// baseline row (the render's .band), padding 28/18, an
+    /// inset stroke over the surface2 fill — and the "Xem tất
+    /// cả ›" label PAINTS its full frame (a bg capsule behind
+    /// the text), so the system platter can never show through
+    /// the .card label.
+    private func bandHeader(name: String, note: String, scope: String) -> some View {
+        HStack(alignment: .center, spacing: 20) {
+            Text(name)
+                .font(.system(size: 34, weight: .heavy))
+                .foregroundStyle(theme.text)
+            Text(note)
+                .font(.system(size: 24))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                nav.browseOpen = true
+            } label: {
+                Text("Xem tất cả ›")
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(bandFocused == scope ? theme.text : theme.focusTitle)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(theme.bg))
+                    .overlay(JoeFocusRing(shape: Capsule()))
+            }
+            .buttonStyle(.card)
+            .focused($bandFocused, equals: scope)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+        .background(RoundedRectangle(cornerRadius: 14).fill(theme.surface2))
+        .overlay(RoundedRectangle(cornerRadius: 14)
+            .strokeBorder(theme.stroke, lineWidth: 1))
     }
 
     // MARK: - Load states (§8)
 
     /// True when NO catalogue rail has anything — the C-8
     /// condition for the error surface (CW/Favourites are the
-    /// owner's own data, not catalogue health).
-    private var catalogueEmpty: Bool {
-        phim.merged.isEmpty && phim.chieuRap.isEmpty && phim.vietnamAll.isEmpty
-            && phim.kkNew.isEmpty && phim.kkSeries.isEmpty && phim.kkMovies.isEmpty
-            && phim.kkAnime.isEmpty && phim.f4kNew.isEmpty && phim.f4kMovies.isEmpty
-            && phim.vsNew.isEmpty && phim.vsSeries.isEmpty
-            && phim.tpMovies.isEmpty && phim.tpSeries.isEmpty
-            && phim.genreLists.values.allSatisfy { $0.isEmpty }
-            && phim.countryLists.values.allSatisfy { $0.isEmpty }
-    }
+    /// owner's own data, not catalogue health). The predicate
+    /// itself lives on the store (PhimStore.catalogueIsEmpty)
+    /// so the poster wall's D-20 parity surfaces read the
+    /// identical condition.
+    private var catalogueEmpty: Bool { phim.catalogueIsEmpty }
 
     /// Team 4's BLOCK-2 predicate (spec-wins over the old board
     /// contract): G3 fires when the store deadline fired
@@ -246,12 +474,8 @@ struct JoePhimHome: View {
     /// its rails lands). A provider that answered empty-but-valid
     /// has no entry and is correctly NOT named — the earlier
     /// rail-emptiness heuristic could not tell the two apart.
-    private var failedProviders: [String] {
-        guard !phim.loading, phim.hasData else { return [] }
-        return ["kk", "f4k", "vsmov", "tp"]
-            .filter { phim.providerErrors[$0] != nil }
-            .map(providerDisplayName)
-    }
+    /// The computation lives on the store (D-20 parity).
+    private var failedProviders: [String] { phim.failedProviderNames }
 
     private func providerDisplayName(_ code: String) -> String {
         switch code {
@@ -272,12 +496,12 @@ struct JoePhimHome: View {
                 .foregroundStyle(.orange)
             Text("Không tải được thư viện phim.")
                 .font(.system(size: 29, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.text)
             Text(phim.loadTimedOut
                  ? "Quá 20 giây chưa có dữ liệu. Kiểm tra mạng và profile Sing-box trên Apple TV."
                  : "Các nguồn phim đều lỗi hoặc trả về trống. Kiểm tra mạng rồi thử lại.")
                 .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(theme.meta)
             // G3: the cause line carries the store's REAL captured
             // errors (providerErrors — what each provider actually
             // threw; pre-v1.9 every error was discarded by try?).
@@ -287,21 +511,13 @@ struct JoePhimHome: View {
                         .map { "\(providerDisplayName($0.key)): \($0.value)" }
                         .joined(separator: " · "))
                     .font(.system(size: 25))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             }
             Button { phim.retry() } label: {
-                Text("Thử lại")
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 36)
-                    .padding(.vertical, 16)
-                    .background(Capsule().fill(JoeTheme.accentViolet))
-                    .overlay(JoeFocusRing(shape: Capsule()))
+                JoePrimaryLabel(title: "Thử lại")
             }
             .buttonStyle(.card)
-            .focusEffectDisabled(true)
             .focused($retryFocused)
-            .scaleEffect(retryFocused ? 1.05 : 1.0)
         }
         .padding(.top, 30)
     }
@@ -331,7 +547,8 @@ struct JoePhimHome: View {
     /// Every rail in on-screen order, empty rails skipped — the
     /// first element is the section's first rail (the
     /// Continue-Watching entry rail when non-empty, else the
-    /// first movie rail).
+    /// first movie rail). Derived from the same railSpecs the
+    /// body renders, so the two can never drift apart.
     private var phimRails: [[RailItem]] {
         var rails: [[RailItem]] = []
         if !movieProgress.isEmpty {
@@ -343,26 +560,8 @@ struct JoePhimHome: View {
         // F4: every movie focus key is "<railKey>|<movie.id>" —
         // the same film in three rails is three distinct focus
         // targets, so exactly one card can show focus (C-3).
-        var scopedRails: [(scope: String, movies: [Movie])] = [
-            ("merged", phim.merged), ("chieuRap", phim.chieuRap),
-            ("vnAll", phim.vietnamAll), ("vnSeries", phim.vietnamSeries),
-            ("vnSingle", phim.vietnamSingle),
-        ]
-        for (slug, _) in PhimStore.genreSpec {
-            scopedRails.append(("genre:" + slug, phim.genreLists[slug] ?? []))
-        }
-        for (slug, _) in PhimStore.countrySpec {
-            scopedRails.append(("country:" + slug, phim.countryLists[slug] ?? []))
-        }
-        scopedRails.append(contentsOf: [
-            ("kkNew", phim.kkNew), ("kkSeries", phim.kkSeries),
-            ("kkMovies", phim.kkMovies), ("kkAnime", phim.kkAnime),
-            ("f4kNew", phim.f4kNew), ("f4kMovies", phim.f4kMovies),
-            ("vsNew", phim.vsNew), ("vsSeries", phim.vsSeries),
-            ("tpMovies", phim.tpMovies), ("tpSeries", phim.tpSeries),
-        ])
-        for scoped in scopedRails where !scoped.movies.isEmpty {
-            rails.append(scoped.movies.map { .movie(scoped.scope + "|" + $0.id) })
+        for spec in railSpecs where !spec.movies.isEmpty {
+            rails.append(spec.movies.map { .movie(spec.scope + "|" + $0.id) })
         }
         return rails
     }
@@ -394,32 +593,7 @@ struct JoePhimHome: View {
     /// never when focus moves.
     private var firstRailScope: String? {
         if !movieProgress.isEmpty || !movieFavorites.isEmpty { return nil }
-        var scoped: [(scope: String, hasData: Bool)] = [
-            ("merged", !phim.merged.isEmpty),
-            ("chieuRap", !phim.chieuRap.isEmpty),
-            ("vnAll", !phim.vietnamAll.isEmpty),
-            ("vnSeries", !phim.vietnamSeries.isEmpty),
-            ("vnSingle", !phim.vietnamSingle.isEmpty),
-        ]
-        for (slug, _) in PhimStore.genreSpec {
-            scoped.append(("genre:" + slug, !(phim.genreLists[slug] ?? []).isEmpty))
-        }
-        for (slug, _) in PhimStore.countrySpec {
-            scoped.append(("country:" + slug, !(phim.countryLists[slug] ?? []).isEmpty))
-        }
-        scoped.append(contentsOf: [
-            ("kkNew", !phim.kkNew.isEmpty),
-            ("kkSeries", !phim.kkSeries.isEmpty),
-            ("kkMovies", !phim.kkMovies.isEmpty),
-            ("kkAnime", !phim.kkAnime.isEmpty),
-            ("f4kNew", !phim.f4kNew.isEmpty),
-            ("f4kMovies", !phim.f4kMovies.isEmpty),
-            ("vsNew", !phim.vsNew.isEmpty),
-            ("vsSeries", !phim.vsSeries.isEmpty),
-            ("tpMovies", !phim.tpMovies.isEmpty),
-            ("tpSeries", !phim.tpSeries.isEmpty),
-        ])
-        return scoped.first { $0.hasData }?.scope
+        return railSpecs.first { !$0.movies.isEmpty }?.scope
     }
 
     private func setRailFocus(_ item: RailItem) {
@@ -434,31 +608,34 @@ struct JoePhimHome: View {
     }
 
     // CONVERGENCE (2026-11-15): the header and Retry boundary
-    // handlers (handleHeaderMove / handleRetryMove) are DELETED
-    // with their traps. Every outcome they produced is what
-    // geometric focus movement does on this layout unaided:
-    // header UP → the pills (the row directly above), header
-    // DOWN → the first rail's first card, or — in the C-1/F5.6
-    // error state — the Retry button, the only focusable
-    // element below the header; Retry UP → the header. The
-    // header's LEFT/RIGHT no-ops were the screen edge, which
-    // geometry also gives. What geometry does NOT reproduce is
-    // the first rail's exact arithmetic, kept below.
+    // handlers are geometric on this layout: header/hero UP →
+    // the pills (the row directly above), DOWN → the first
+    // rail's first card, or — in the error state — the Retry
+    // button, the only focusable element below the header.
+    // What geometry does NOT reproduce is the first rail's
+    // exact arithmetic, kept below.
 
-    /// First-rail boundary: UP to the header button, LEFT/RIGHT
-    /// arithmetic neighbours inside the rail (no-op at its ends),
-    /// DOWN to the same-index card (clamped) in the next rail;
-    /// with a single rail, DOWN lands on the error surface's
-    /// Retry when one is showing (Scope-3), else a no-op.
-    /// Installed per-card on the first rail's cards only (the
-    /// handler is unconditional; it reads the CURRENT focus
-    /// index when a press arrives). Deeper rails carry no
-    /// handler — the focus engine's geometry handles them.
+    /// First-rail boundary: UP to the hero's play button
+    /// (design A, when a hero is on screen) or the header's
+    /// browse button (design F / A fallback), LEFT/RIGHT
+    /// arithmetic neighbours inside the rail (no-op at its
+    /// ends), DOWN to the same-index card (clamped) in the
+    /// next rail; with a single rail, DOWN lands on the error
+    /// surface's Retry when one is showing (Scope-3), else a
+    /// no-op. Installed per-card on the first rail's cards
+    /// only (the handler is unconditional; it reads the
+    /// CURRENT focus index when a press arrives). Deeper rails
+    /// carry no handler — the focus engine's geometry handles
+    /// them.
     private func handleFirstRailMove(_ dir: MoveCommandDirection) {
         guard let idx = firstRailFocusIndex,
               let first = phimRails.first else { return }
         if dir == .up {
-            headerFocused = true
+            if theme.id == .billboard && heroMovie != nil {
+                heroPlayFocused = true
+            } else {
+                headerFocused = true
+            }
         } else if dir == .left {
             if idx > 0 { setRailFocus(first[idx - 1]) }
         } else if dir == .right {
@@ -483,13 +660,13 @@ struct JoePhimHome: View {
     @ViewBuilder
     private var cwRail: some View {
         if !movieProgress.isEmpty {
-            JoeTheme.Rail(title: "▶ Đang xem dở") {
+            Rail(title: "▶ Đang xem dở") {
                 ForEach(movieProgress) { entry in
                     let card = Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year, preselectEp: entry.ep) } label: {
-                        JoeTheme.PosterCard(
+                        PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.epLabel,
@@ -499,7 +676,6 @@ struct JoePhimHome: View {
                             focused: focusedEntry == "cw|" + entry.key)
                     }
                     .buttonStyle(.card)
-                    .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -520,13 +696,13 @@ struct JoePhimHome: View {
     @ViewBuilder
     private var favRail: some View {
         if !movieFavorites.isEmpty {
-            JoeTheme.Rail(title: "♥ Yêu thích") {
+            Rail(title: "♥ Yêu thích") {
                 ForEach(movieFavorites) { entry in
                     let card = Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year) } label: {
-                        JoeTheme.PosterCard(
+                        PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
@@ -534,7 +710,6 @@ struct JoePhimHome: View {
                             focused: focusedEntry == "fav|" + entry.key)
                     }
                     .buttonStyle(.card)
-                    .focusEffectDisabled(true)
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -559,20 +734,20 @@ struct JoePhimHome: View {
 
     private func movieRail(_ title: String, _ movies: [Movie], badges: Bool,
                            scope: String) -> some View {
-        JoeTheme.Rail(title: title) {
+        Rail(title: title) {
             ForEach(movies) { movie in
                 let card = Button { nav.movie = MovieRoute(
                     provider: movie.provider, slug: movie.slug,
                     name: movie.name, poster: movie.poster, year: movie.year) } label: {
-                    JoeTheme.PosterCard(
+                    PosterCard(
                         title: movie.name,
                         posterURL: movie.posterURL,
                         meta: movie.cardMeta,
                         badge: badges ? Providers.badge(movie.provider) : nil,
+                        quality: movie.quality,
                         focused: focusedMovie == scope + "|" + movie.id)
                 }
                 .buttonStyle(.card)
-                .focusEffectDisabled(true)
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
                 // Only the FIRST catalogue rail's cards carry
                 // the first-rail move handler (see
@@ -587,6 +762,106 @@ struct JoePhimHome: View {
         }
     }
 
+}
+
+// MARK: - Rail specs (file scope — shared with the poster wall)
+
+/// One catalogue rail in on-screen order. In design F the
+/// four "newest" provider rails carry a source band header;
+/// the merged rail is replaced by those bands (it is their
+/// aggregate). Every other shelf the app presents — chiếu
+/// rạp, Việt Nam, genres, countries, per-provider series /
+/// movies / anime — is present in BOTH rail designs, in the
+/// 1.9.2 order. Design D's wall (JoeBrowse.swift) renders the
+/// non-merged, non-genre specs of the SAME list as titled
+/// wall sections (UI-6 defect D-1).
+struct JoeRailSpec: Identifiable {
+    let scope: String
+    let title: String
+    let movies: [Movie]
+    let badges: Bool
+    var bandName: String? = nil
+    var bandNote: String? = nil
+    var id: String { scope }
+}
+
+func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
+    var specs: [JoeRailSpec] = []
+    if themeID == .sourceBoard {
+        specs.append(JoeRailSpec(scope: "kkNew", title: "Mới cập nhật",
+                                 movies: phim.kkNew, badges: false,
+                                 bandName: "KKPhim",
+                                 bandNote: "Kho phim lớn nhất · cập nhật liên tục"))
+        specs.append(JoeRailSpec(scope: "f4kNew", title: "Mới cập nhật",
+                                 movies: phim.f4kNew, badges: false,
+                                 bandName: "Phim4K",
+                                 bandNote: "Phim mới mỗi ngày"))
+        specs.append(JoeRailSpec(scope: "vsNew", title: "Mới cập nhật",
+                                 movies: phim.vsNew, badges: false,
+                                 bandName: "VSMOV",
+                                 bandNote: "Vietsub · phim bộ & phim lẻ"))
+        specs.append(JoeRailSpec(scope: "tpNew", title: "Mới cập nhật",
+                                 movies: phim.tpNew, badges: false,
+                                 bandName: "Tủ Phim",
+                                 bandNote: "Kho lưu trữ · phim chọn lọc"))
+    } else {
+        specs.append(JoeRailSpec(scope: "merged", title: "✨ Mới cập nhật · Tổng hợp",
+                                 movies: phim.merged, badges: true))
+    }
+    specs.append(JoeRailSpec(scope: "chieuRap", title: "🔥 Phim chiếu rạp",
+                             movies: phim.chieuRap, badges: true))
+    specs.append(JoeRailSpec(scope: "vnAll", title: "🇻🇳 Phim Việt Nam",
+                             movies: phim.vietnamAll, badges: true))
+    specs.append(JoeRailSpec(scope: "vnSeries", title: "🇻🇳 Phim bộ Việt Nam",
+                             movies: phim.vietnamSeries, badges: true))
+    specs.append(JoeRailSpec(scope: "vnSingle", title: "🇻🇳 Phim lẻ Việt Nam",
+                             movies: phim.vietnamSingle, badges: true))
+    for spec in PhimStore.genreSpec {
+        specs.append(JoeRailSpec(scope: "genre:" + spec.slug, title: spec.title,
+                                 movies: phim.genreLists[spec.slug] ?? [], badges: true))
+    }
+    for spec in PhimStore.countrySpec {
+        specs.append(JoeRailSpec(scope: "country:" + spec.slug, title: spec.title,
+                                 movies: phim.countryLists[spec.slug] ?? [], badges: true))
+    }
+    if themeID == .sourceBoard {
+        specs.append(JoeRailSpec(scope: "kkSeries", title: "📺 KKPhim · Phim bộ mới",
+                                 movies: phim.kkSeries, badges: false))
+        specs.append(JoeRailSpec(scope: "kkMovies", title: "🎞️ KKPhim · Phim lẻ mới",
+                                 movies: phim.kkMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "kkAnime", title: "🐣 KKPhim · Hoạt hình",
+                                 movies: phim.kkAnime, badges: false))
+        specs.append(JoeRailSpec(scope: "f4kMovies", title: "🎞️ Film4K · Phim lẻ mới",
+                                 movies: phim.f4kMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "vsSeries", title: "🎬 VSMOV · Phim bộ mới",
+                                 movies: phim.vsSeries, badges: false))
+        specs.append(JoeRailSpec(scope: "tpMovies", title: "📚 Tủ Phim · Phim lẻ mới",
+                                 movies: phim.tpMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "tpSeries", title: "📚 Tủ Phim · Phim bộ mới",
+                                 movies: phim.tpSeries, badges: false))
+    } else {
+        specs.append(JoeRailSpec(scope: "kkNew", title: "✨ Mới cập nhật",
+                                 movies: phim.kkNew, badges: false))
+        specs.append(JoeRailSpec(scope: "kkSeries", title: "📺 Phim bộ mới",
+                                 movies: phim.kkSeries, badges: false))
+        specs.append(JoeRailSpec(scope: "kkMovies", title: "🎞️ Phim lẻ mới",
+                                 movies: phim.kkMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "kkAnime", title: "🐣 Hoạt hình",
+                                 movies: phim.kkAnime, badges: false))
+        specs.append(JoeRailSpec(scope: "f4kNew", title: "✨ Film4K · Mới cập nhật",
+                                 movies: phim.f4kNew, badges: false))
+        specs.append(JoeRailSpec(scope: "f4kMovies", title: "🎞️ Film4K · Phim lẻ mới",
+                                 movies: phim.f4kMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "vsNew", title: "🎬 VSMOV · Mới cập nhật",
+                                 movies: phim.vsNew, badges: false))
+        specs.append(JoeRailSpec(scope: "vsSeries", title: "🎬 VSMOV · Phim bộ mới",
+                                 movies: phim.vsSeries, badges: false))
+        specs.append(JoeRailSpec(scope: "tpMovies", title: "📚 Tủ Phim · Phim lẻ mới",
+                                 movies: phim.tpMovies, badges: false))
+        specs.append(JoeRailSpec(scope: "tpSeries", title: "📚 Tủ Phim · Phim bộ mới",
+                                 movies: phim.tpSeries, badges: false))
+    }
+    return specs
 }
 
 // CONVERGENCE RECORD (2026-11-15): this file's duplicated

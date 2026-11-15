@@ -150,6 +150,35 @@ struct TorStream: Identifiable {
         }
         return true
     }
+
+    /// Owner source-priority policy (2026-11-15, IN v2.0.0 per
+    /// the owner's 16:08 ruling): a HIGH-QUALITY release for
+    /// the Auto torrent-first rule. Token-based over the same
+    /// name+title text the container rule reads: the release
+    /// must carry a 2160p or 1080p token AND a BluRay /
+    /// WEB-DL / WEBRip-class tag (Blu-ray, BDRip and BRRip
+    /// count as the BluRay class). A CAM-class token (CAM,
+    /// CAMRIP, HDCAM, HDTS, TS, TELESYNC, TELECINE…) vetoes
+    /// the stream outright — CAM-class NEVER qualifies, even
+    /// when a resolution token rides along.
+    var isHighQualityRelease: Bool {
+        let tokens = Set((name + " " + title).uppercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty })
+        let camClass: Set<String> = ["CAM", "CAMRIP", "HDCAM", "HDTS",
+                                     "TS", "TELESYNC", "TELECINE", "TC",
+                                     "HDTC", "SCREENER", "SCR"]
+        if !tokens.isDisjoint(with: camClass) { return false }
+        let hasResolution = tokens.contains("2160P") || tokens.contains("1080P")
+        let hasClass = tokens.contains("BLURAY")
+            || (tokens.contains("BLU") && tokens.contains("RAY"))
+            || tokens.contains("BDRIP") || tokens.contains("BRRIP")
+            || tokens.contains("WEBDL")
+            || (tokens.contains("WEB") && tokens.contains("DL"))
+            || tokens.contains("WEBRIP")
+        return hasResolution && hasClass
+    }
+
     /// The row's two lines, Stremio-style: addon/quality name on
     /// top, release title below.
     var label: String { name.isEmpty ? title : name }

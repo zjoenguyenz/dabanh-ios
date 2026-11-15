@@ -6,7 +6,12 @@ import SwiftUI
 /// shows once per source, so the owner picks the source himself).
 struct JoeSearchView: View {
     @EnvironmentObject private var nav: JoeNavigator
+    @Environment(\.joeTheme) private var theme
     @State private var query = ""
+    /// The term the on-screen results belong to (UI-6 defect
+    /// D-19: D's results heading names it — the live field
+    /// text can already have been edited past it).
+    @State private var searchedQuery = ""
     @State private var results: [Movie] = []
     @State private var searching = false
     @State private var searched = false
@@ -20,59 +25,19 @@ struct JoeSearchView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
-            HStack(spacing: 18) {
-                TextField("Tên phim…", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 29))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 16)
-                    .background(RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.white.opacity(0.07)))
-                    .overlay(RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(topFocus == .field ? joeFocusViolet : Color.clear,
-                                      lineWidth: 4))
-                    .frame(width: 900)
-                    .focused($topFocus, equals: .field)
-                    .focusEffectDisabled(true)
-                    .onSubmit { runSearch() }
-                Button {
-                    runSearch()
-                } label: {
-                    Text(searching ? "Đang tìm…" : "Tìm")
-                        .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 30)
-                        .padding(.vertical, 16)
-                        .background(Capsule().fill(topFocus == .search
-                                                   ? JoeTheme.accentViolet
-                                                   : JoeTheme.surface))
-                        .overlay(Capsule().strokeBorder(topFocus == .search ? joeFocusViolet : Color.clear,
-                                                        lineWidth: 4))
-                        .scaleEffect(topFocus == .search ? 1.05 : 1.0)
+            // v2.0.0 (UI-5): the field is light by design in
+            // every theme (UI-1 law — the 1.9.2 white-on-dark
+            // slab was the defect construction). A/F centre the
+            // field row (maxW 1150, the render anatomy); D runs
+            // it full width at the top of the wall.
+            if theme.id == .posterWall {
+                fieldRow
+            } else {
+                HStack(spacing: 0) {
+                    Spacer()
+                    fieldRow
+                    Spacer()
                 }
-                .buttonStyle(.card)
-                .focusEffectDisabled(true)
-                .focused($topFocus, equals: .search)
-                .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button {
-                    nav.searchOpen = false
-                } label: {
-                    Text("⟵ Quay lại")
-                        .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 30)
-                        .padding(.vertical, 16)
-                        .background(Capsule().fill(topFocus == .back
-                                                   ? JoeTheme.accentViolet
-                                                   : JoeTheme.surface))
-                        .overlay(Capsule().strokeBorder(topFocus == .back ? joeFocusViolet : Color.clear,
-                                                        lineWidth: 4))
-                        .scaleEffect(topFocus == .back ? 1.05 : 1.0)
-                }
-                .buttonStyle(.card)
-                .focusEffectDisabled(true)
-                .focused($topFocus, equals: .back)
             }
             // CONVERGENCE (Team 7 D4, 2026-11-15): the
             // JoeSearchMoveTrap that wrapped this row (enabled:
@@ -89,8 +54,8 @@ struct JoeSearchView: View {
             if searching {
                 ProgressView("Đang tìm…")
                     .font(.system(size: 29))
-                    .foregroundStyle(.white)
-                    .tint(.white)
+                    .foregroundStyle(theme.text)
+                    .tint(theme.text)
             } else if searchFailed && results.isEmpty {
                 VStack(alignment: .leading, spacing: 16) {
                     Image(systemName: "exclamationmark.triangle")
@@ -98,23 +63,15 @@ struct JoeSearchView: View {
                         .foregroundStyle(.orange)
                     Text("Không tải được kết quả tìm kiếm.")
                         .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.text)
                     Text("Các nguồn phim đều lỗi. Kiểm tra mạng rồi thử lại.")
                         .font(.system(size: 25))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(theme.meta)
                     Button { runSearch() } label: {
-                        Text("Thử lại")
-                            .font(.system(size: 29, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 36)
-                            .padding(.vertical, 16)
-                            .background(Capsule().fill(JoeTheme.accentViolet))
-                            .overlay(JoeFocusRing(shape: Capsule()))
+                        JoePrimaryLabel(title: "Thử lại")
                     }
                     .buttonStyle(.card)
-                    .focusEffectDisabled(true)
                     .focused($retryFocused)
-                    .scaleEffect(retryFocused ? 1.05 : 1.0)
                     // (Its UP-to-field routing is geometric:
                     // the field is the nearest focusable above.
                     // The conditional trap that used to force
@@ -124,40 +81,16 @@ struct JoeSearchView: View {
             } else if searched && results.isEmpty {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(theme.meta)
             }
-            ScrollView(.vertical, showsIndicators: false) {
-                // Fixed 6 columns (was .adaptive(minimum: 240),
-                // whose column count the code cannot enumerate) so
-                // result focus routing is exact arithmetic — see
-                // resultMove. PosterCard art is 240 wide (§7.2),
-                // so the flexible columns render as before.
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28),
-                                         count: 6),
-                          alignment: .leading, spacing: 40) {
-                    ForEach(results) { movie in
-                        Button { nav.movie = MovieRoute(
-                            provider: movie.provider, slug: movie.slug,
-                            name: movie.name, poster: movie.poster,
-                            year: movie.year) } label: {
-                            JoeTheme.PosterCard(
-                                title: movie.name,
-                                posterURL: movie.posterURL,
-                                meta: movie.cardMeta,
-                                badge: Providers.badge(movie.provider),
-                                focused: focusedMovie == "search|" + movie.id)
-                        }
-                        .buttonStyle(.card)
-                        .focusEffectDisabled(true)
-                        .focused($focusedMovie, equals: "search|" + movie.id)
-                        .onMoveCommand { direction in
-                            resultMove(direction, from: movie)
-                        }
-                    }
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 4)
+            // UI-6 defect D-19: D's results carry the render's
+            // heading naming the searched term.
+            if theme.id == .posterWall && searched && !results.isEmpty {
+                Text("Kết quả cho “\(searchedQuery)”")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(theme.text)
             }
+            resultsArea
         }
         // Menu closes the search layer (convergence, Team 7):
         // the handler is unconditional and lives on the layer
@@ -179,6 +112,112 @@ struct JoeSearchView: View {
         // D4-safe: the declaration installs nothing in response
         // to focus state and no structure depends on it.
         .defaultFocus($topFocus, .field)
+    }
+
+    /// The query row: light field + Tìm + Quay lại. In A/F the
+    /// row is centred by the body; its field is narrower so the
+    /// whole row stays inside the renders' 1150 max width.
+    private var fieldRow: some View {
+        HStack(spacing: 18) {
+            TextField("", text: $query,
+                      prompt: Text("Tên phim…")
+                        .foregroundColor(ThemeTokens.fieldPlaceholder))
+                .textFieldStyle(.plain)
+                .font(.system(size: ThemeTokens.fieldTextSize))
+                .joeFieldChrome(focused: topFocus == .field)
+                // UI-6 defects D-22 (31 pt field text, above)
+                // and D-19: D's field runs the FULL width of
+                // the wall (the render's block field); A/F keep
+                // their centred 700.
+                .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
+                .focused($topFocus, equals: .field)
+                .onSubmit { runSearch() }
+            Button {
+                runSearch()
+            } label: {
+                JoeSecondaryLabel(title: searching ? "Đang tìm…" : "Tìm")
+            }
+            .buttonStyle(.card)
+            .focused($topFocus, equals: .search)
+            .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button {
+                nav.searchOpen = false
+            } label: {
+                JoeSecondaryLabel(title: "⟵ Quay lại")
+            }
+            .buttonStyle(.card)
+            .focused($topFocus, equals: .back)
+        }
+    }
+
+    /// Results: design F groups them by source (one rail per
+    /// provider, in failover priority order, with counts);
+    /// designs A and D keep the 6-column grid (D's cards render
+    /// in wall anatomy via the shared PosterCard).
+    @ViewBuilder
+    private var resultsArea: some View {
+        if theme.id == .sourceBoard && !results.isEmpty {
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 36) {
+                    ForEach([Providers.KK, Providers.F4K, Providers.VS, Providers.TP],
+                            id: \.self) { code in
+                        let list = results.filter { $0.provider == code }
+                        if !list.isEmpty {
+                            Rail(title: "\(Providers.displayName(code)) — \(list.count) kết quả") {
+                                ForEach(list) { movie in
+                                    resultCard(movie, routed: false)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+        } else {
+            ScrollView(.vertical, showsIndicators: false) {
+                // Fixed 6 columns (was .adaptive(minimum: 240),
+                // whose column count the code cannot enumerate) so
+                // result focus routing is exact arithmetic — see
+                // resultMove.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28),
+                                         count: 6),
+                          alignment: .leading, spacing: 40) {
+                    ForEach(results) { movie in
+                        resultCard(movie, routed: true)
+                    }
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 4)
+            }
+        }
+    }
+
+    private func resultCard(_ movie: Movie, routed: Bool) -> some View {
+        let card = Button { nav.movie = MovieRoute(
+            provider: movie.provider, slug: movie.slug,
+            name: movie.name, poster: movie.poster,
+            year: movie.year) } label: {
+            PosterCard(
+                title: movie.name,
+                posterURL: movie.posterURL,
+                meta: movie.cardMeta,
+                badge: Providers.badge(movie.provider),
+                quality: movie.quality,
+                focused: focusedMovie == "search|" + movie.id)
+        }
+        .buttonStyle(.card)
+        .focused($focusedMovie, equals: "search|" + movie.id)
+        // The arithmetic handler belongs to the GRID layout
+        // (resultMove counts 6 columns); F's grouped rails route
+        // geometrically. The attachment follows the LAYOUT (theme
+        // + result set), never focus state.
+        if routed {
+            card.onMoveCommand { direction in
+                resultMove(direction, from: movie)
+            }
+        } else {
+            card
+        }
     }
 
     /// Result-grid routing: the handler sits on each result, so
@@ -220,6 +259,7 @@ struct JoeSearchView: View {
         guard !kw.isEmpty, !searching else { return }
         searching = true
         searchFailed = false
+        searchedQuery = kw
         Task {
             async let kk = try? Providers.search(Providers.KK, keyword: kw)
             async let f4k = try? Providers.search(Providers.F4K, keyword: kw)
@@ -235,10 +275,6 @@ struct JoeSearchView: View {
         }
     }
 }
-
-/// v1.5 focus outline colour (lighter violet) — the style law's
-/// focus stroke on every focusable element in this file.
-private let joeFocusViolet = Color(red: 0.72, green: 0.58, blue: 1.0)
 
 // CONVERGENCE RECORD (2026-11-15): JoeSearchMoveTrap — this
 // file's copy of the conditional move-trap pattern — is

@@ -315,6 +315,18 @@ enum KkClient {
         }
         m.quality = cleanField(JSON.str(o, "quality"))
         m.lang = cleanField(JSON.str(o, "lang"))
+        // UI-6 D-2: the list payloads already carry these — the
+        // hero's full meta / genres line read them from here.
+        if let cats = JSON.arr(o, "category") {
+            m.categories = cats.map { cleanField(JSON.str($0, "name")) }
+                .filter { !$0.isEmpty }
+        }
+        if let countries = JSON.arr(o, "country") {
+            m.country = joinParts(countries.map { JSON.str($0, "name") }, " · ")
+        }
+        m.time = cleanField(JSON.str(o, "time"))
+        m.episodeTotal = cleanField(JSON.str(o, "episode_total"))
+        m.chieurap = JSON.bool(o, "chieurap")
         if let tm = JSON.obj(o, "tmdb") {
             m.tmdbId = JSON.str(tm, "id")
             m.tmdbType = JSON.str(tm, "type")

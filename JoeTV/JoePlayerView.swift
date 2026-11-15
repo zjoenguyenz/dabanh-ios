@@ -235,12 +235,35 @@ final class PlayDirector: ObservableObject {
 struct JoePlayerView: View {
     @StateObject private var director: PlayDirector
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.joeTheme) private var theme
     @FocusState private var slateFocus: SlateButton?
 
     private enum SlateButton: Hashable { case retry, back }
 
-    init(director: PlayDirector) {
+    /// v2.0.0 (UI-5): design F's exhausted slate lists the tried
+    /// source families as rows (the render's shape). The Phim
+    /// detail passes the four provider names; torrent sessions
+    /// pass nil and F falls back to the plain slate.
+    private let attemptRows: [String]?
+
+    /// UI-6 defect D-18: the slate's kicker carries the film
+    /// title + episode (the renders' slate heading), and the
+    /// source line names the active source mode (owner
+    /// source-priority policy: Tự động / ưu tiên Torrent / the
+    /// pinned source). Both default empty — torrent sessions
+    /// pass their own values.
+    private let filmTitle: String
+    private let filmEpisode: String
+    private let sourceLine: String
+
+    init(director: PlayDirector, attemptRows: [String]? = nil,
+         filmTitle: String = "", filmEpisode: String = "",
+         sourceLine: String = "") {
         _director = StateObject(wrappedValue: director)
+        self.attemptRows = attemptRows
+        self.filmTitle = filmTitle
+        self.filmEpisode = filmEpisode
+        self.sourceLine = sourceLine
     }
 
     var body: some View {
@@ -279,32 +302,11 @@ struct JoePlayerView: View {
                 // Menu, which read as part of the freeze.)
                 // 1.9.2 (Team 9 item 1a): the text column is
                 // CAPPED (≈1150) and the padding sits INSIDE the
-                // flexible frame. Pre-fix the padding was applied
-                // OUTSIDE the .infinity frame with no width cap
-                // and no trailing inset, so the second line laid
-                // out as one long line and ran off the right edge
-                // of the owner's screen instead of wrapping.
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Không phát được nguồn này.")
-                        .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được.")
-                        .font(.system(size: 25))
-                        .foregroundStyle(.white.opacity(0.7))
-                    HStack(spacing: 16) {
-                        slateButton("Thử lại", tag: .retry) {
-                            director.retryFromExhausted()
-                        }
-                        slateButton("Quay lại", tag: .back) {
-                            dismiss()
-                        }
-                    }
-                    .padding(.top, 8)
-                }
-                .frame(maxWidth: 1150, alignment: .leading)
-                .padding(.leading, 48)
-                .padding(.bottom, 36)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                // flexible frame.
+                // v2.0.0 (UI-5): the slate's placement follows
+                // the active design — A a left column, D centred,
+                // F bottom-left with the tried sources as rows.
+                exhaustedSlate
             }
         }
         .onAppear { director.start() }
@@ -317,21 +319,132 @@ struct JoePlayerView: View {
         .onExitCommand { dismiss() }
     }
 
-    private func slateButton(_ title: String, tag: SlateButton,
+    @ViewBuilder
+    private var exhaustedSlate: some View {
+        switch theme.id {
+        case .posterWall:
+            VStack(alignment: .center, spacing: 18) {
+                slateTexts(centred: true)
+                HStack(spacing: 16) {
+                    slateButton("Thử lại", tag: .retry, primary: true) {
+                        director.retryFromExhausted()
+                    }
+                    slateButton("Quay lại", tag: .back, primary: false) {
+                        dismiss()
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: 1150)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        case .billboard:
+            VStack(alignment: .leading, spacing: 18) {
+                slateTexts(centred: false)
+                HStack(spacing: 16) {
+                    slateButton("Thử lại", tag: .retry, primary: true) {
+                        director.retryFromExhausted()
+                    }
+                    slateButton("Quay lại", tag: .back, primary: false) {
+                        dismiss()
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: 1150, alignment: .leading)
+            .padding(.leading, 48)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        case .sourceBoard:
+            VStack(alignment: .leading, spacing: 18) {
+                slateTexts(centred: false)
+                if let attemptRows {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(attemptRows, id: \.self) { name in
+                            HStack(spacing: 16) {
+                                Text(name)
+                                    .font(.system(size: 27, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                Spacer()
+                                Text("✗ Không phát được")
+                                    .font(.system(size: 25))
+                                    .foregroundStyle(JoeTheme.accentRed)
+                            }
+                            .padding(.horizontal, 22)
+                            .padding(.vertical, 12)
+                            // UI-6 defect D-18: F's attempt
+                            // rows follow the theme's field
+                            // radius and surface gradient.
+                            .background(RoundedRectangle(cornerRadius: theme.rField)
+                                .fill(theme.surfaceGradient))
+                        }
+                    }
+                    .frame(maxWidth: 700, alignment: .leading)
+                }
+                HStack(spacing: 16) {
+                    slateButton("Thử lại", tag: .retry, primary: true) {
+                        director.retryFromExhausted()
+                    }
+                    slateButton("Quay lại", tag: .back, primary: false) {
+                        dismiss()
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: 1150, alignment: .leading)
+            .padding(.leading, 48)
+            .padding(.bottom, 36)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        }
+    }
+
+    /// The slate's text block (UI-6 defect D-18 — the renders'
+    /// slate composition): the kicker (film title — episode,
+    /// focusTitle colour, tracked uppercase), the 52 pt heavy
+    /// headline, the explanation, the tried-sources line
+    /// (designs A/D; F renders the same data as rows below),
+    /// and the active source-mode line.
+    @ViewBuilder
+    private func slateTexts(centred: Bool) -> some View {
+        if !filmTitle.isEmpty {
+            Text(filmEpisode.isEmpty ? filmTitle : "\(filmTitle) — \(filmEpisode)")
+                .font(.system(size: 22, weight: .bold))
+                .tracking(4)
+                .textCase(.uppercase)
+                .foregroundStyle(theme.focusTitle)
+                .multilineTextAlignment(centred ? .center : .leading)
+        }
+        Text("Không phát được nguồn này")
+            .font(.system(size: 52, weight: .heavy))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(centred ? .center : .leading)
+        Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được.")
+            .font(.system(size: 29))
+            .foregroundStyle(.white.opacity(0.7))
+            .multilineTextAlignment(centred ? .center : .leading)
+        if theme.id != .sourceBoard, let attemptRows, !attemptRows.isEmpty {
+            Text("Đã thử: " + attemptRows.joined(separator: " · "))
+                .font(.system(size: 25))
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(centred ? .center : .leading)
+        }
+        if !sourceLine.isEmpty {
+            Text(sourceLine)
+                .font(.system(size: 25))
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(centred ? .center : .leading)
+        }
+    }
+
+    private func slateButton(_ title: String, tag: SlateButton, primary: Bool,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 29, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 36)
-                .padding(.vertical, 16)
-                .background(Capsule().fill(JoeTheme.accentViolet))
-                .overlay(JoeFocusRing(shape: Capsule()))
+            if primary {
+                JoePrimaryLabel(title: title)
+            } else {
+                JoeSecondaryLabel(title: title)
+            }
         }
         .buttonStyle(.card)
-        .focusEffectDisabled(true)
         .focused($slateFocus, equals: tag)
-        .scaleEffect(slateFocus == tag ? 1.05 : 1.0)
     }
 
     private var statusCapsule: some View {

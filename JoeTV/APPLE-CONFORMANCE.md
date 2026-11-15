@@ -514,25 +514,34 @@ evidence — §3).** These are hard gates, equal in rank to playback:
   the Phim root. The gate artefact is the handler INVENTORY, not an
   ancestry argument (the ancestry argument failed on device twice:
   v1.1 NavigationStack, 1.9.1 wrapper handlers). The target must
-  contain EXACTLY these 7 runtime `.onExitCommand` sites, each
-  unconditional and on the OWNING view's root:
+  contain EXACTLY these 8 runtime `.onExitCommand` sites in
+  JoeTV/*.swift, each unconditional and on the OWNING view's root:
   (1) JoePlayerView — `{ dismiss() }`;
   (2) JoeSearch — `{ nav.searchOpen = false }`;
   (3) JoeMovieDetail — `{ nav.movie = nil }`;
   (4) JoeTorrentDetail (in JoeTorrent.swift) — `{ nav.tor = nil }`;
   (5) JoeTVSection — `{ nav.section = .phim }`;
   (6) JoeTorrentHome (in JoeTorrent.swift) — `{ nav.section = .phim }`;
-  (7) JoeSettingsView — `{ nav.section = .phim }`.
-  NOTHING on JoePhimHome, the shell (JoeRootView), or the app root;
-  comment mentions do not count. Supporting structure the gate
-  verifies with it: `section` is `@Published` on JoeNavigator and
-  JoeRootView observes it; the detail layers are root-ZStack
-  SIBLINGS of the section container (never descendants of section
-  views), so exactly-one-consumer-per-press holds structurally; at
-  the Phim root no handler is in any possible focus ancestry, so
-  the press provably falls through to the system. The device
-  observation (Phim-root press → Home; section/detail presses walk
-  inward) is a DEVICE gate (P-E), not desk-passable.
+  (7) JoeSettingsView — `{ nav.section = .phim }`;
+  (8) JoePhimHome — the exit confirmation (AMENDED 2026-11-15,
+  v2.0.0, by the owner's exit-dialog order: browse open → close
+  browse; otherwise present "Thoát Joe TV?"; "Thoát" → exit(0)).
+  NOTHING on the shell (JoeRootView) or the app root; comment
+  mentions do not count. The compiled TARGET carries one further
+  handler outside JoeTV/*.swift: the shared TV player's own
+  cover handler in DaBanhTV/TVPlayerView.swift:47
+  (`{ dismiss() }`, compiled into the target via project.yml) —
+  the inventory of record is "8 in JoeTV/*.swift, plus the shared
+  TV player's cover handler (DaBanhTV/TVPlayerView.swift:47)",
+  and the gate counts it the same way (UI-7 F-3). Supporting
+  structure the gate verifies with it: `section` is `@Published`
+  on JoeNavigator and JoeRootView observes it; the detail layers
+  are root-ZStack SIBLINGS of the section container (never
+  descendants of section views), so exactly-one-consumer-per-
+  press holds structurally; at the Phim root the only consumer
+  is site (8), the exit confirmation. The device observation
+  (Phim-root press → exit confirmation; section/detail presses
+  walk inward) is a DEVICE gate (P-E), not desk-passable.
 - **G-EXIT-3 — One press per level, everywhere.** For each presented
   layer (player, search, movie detail, torrent detail) and each
   non-Phim section (TV, Torrent, Settings): Menu performs exactly

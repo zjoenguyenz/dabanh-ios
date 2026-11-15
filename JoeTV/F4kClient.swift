@@ -224,6 +224,17 @@ enum F4kClient {
         m.episodeCurrent = episodeCurrent(o)
         m.quality = cleanField(JSON.str(o, "maxRes"))
         m.lang = langLine(o)
+        // UI-5-FIXUP (filter facets): the payload also carries a
+        // localised country dict and a {en, vi} genre pair — read
+        // them into the shared Movie fields so the browse filter's
+        // country facet and the anime flag work for Film4K too.
+        // Additive only; absent keys leave the fields empty.
+        m.country = localized(o, "country")
+        if let g = JSON.obj(o, "genres"),
+           let vi = g["vi"] as? [Any] {
+            m.categories = vi.compactMap { ($0 as? String) }
+                .map { cleanField($0) }.filter { !$0.isEmpty }
+        }
         m.provider = Providers.F4K
         return m
     }
