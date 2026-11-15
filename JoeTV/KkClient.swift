@@ -69,8 +69,8 @@ enum KkClient {
     /// answer (the {"status":false} stub class) never wins — it
     /// is recorded as an error and the race runs on. When every
     /// host fails, the last error received is thrown.
-    private static func fetchJSON(path: (Bool) -> String,
-                                  shape: ([String: Any]) -> Bool,
+    private static func fetchJSON(path: @escaping (Bool) -> String,
+                                  shape: @escaping ([String: Any]) -> Bool,
                                   timeout: TimeInterval = 25,
                                   health: (provider: String,
                                            stage: SourceHealth.Stage,
