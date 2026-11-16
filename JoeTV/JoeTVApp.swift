@@ -182,7 +182,7 @@ struct JoeRootView: View {
 
     var body: some View {
         ZStack {
-            theme.bg
+            theme.bg.ignoresSafeArea()
             // §4 (DESIGN-SPEC-V19): the tvOS safe area IS the
             // HIG inset (80 pt sides, 60 pt top/bottom) — the
             // content container respects it and adds NO further
@@ -196,7 +196,7 @@ struct JoeRootView: View {
             .disabled(nav.movie != nil || nav.tor != nil)
             if let route = nav.movie {
                 ZStack {
-                    theme.bg
+                    theme.bg.ignoresSafeArea()
                     JoeMovieDetail(route: route)
                 }
                 // 1.9.2 (Team 9 item 4): NO exit handler on
@@ -214,7 +214,7 @@ struct JoeRootView: View {
             }
             if let route = nav.tor {
                 ZStack {
-                    theme.bg
+                    theme.bg.ignoresSafeArea()
                     JoeTorrentDetail(route: route)
                 }
                 // Same move as the movie layer above: the
