@@ -118,7 +118,10 @@ struct JoeSettingsView: View {
 
                 signpostBlock
 
-                Text("Joe TV v2.0.0")
+                // Hero forensics fix (2026-11-15): the real
+                // bundle version, like the corner label — this
+                // footer carried the same frozen "v2.0.0".
+                Text("Joe TV v\(JoeRootView.appVersion)")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
             }

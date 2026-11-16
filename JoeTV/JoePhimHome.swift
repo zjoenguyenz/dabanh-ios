@@ -53,6 +53,17 @@ struct JoePhimHome: View {
     /// carry no synopsis) and as the fallback source for the
     /// meta fields a sparse list item left empty.
     @State private var heroDetail: Detail?
+    /// Hero forensics fix (2026-11-15): the featured film's
+    /// TMDB w1280 backdrop URL, resolved by the hero task.
+    /// The list thumb cannot be the hero's only art source —
+    /// for many KK titles it is a 780×438 marketing composite
+    /// with the title logo baked into the art, and no window
+    /// of it reads as a backdrop in the 668-tall hero (the
+    /// owner's "hầu như hư hết" photos). The detail screen
+    /// already holds the owner's standard — TMDB backdrop
+    /// first, provider art as fallback; the hero now mirrors
+    /// it (see the stage stack in `hero`).
+    @State private var heroBackdropURL: URL?
 
     var body: some View {
         Group {
@@ -206,12 +217,53 @@ struct JoePhimHome: View {
                 // only feature falls back to the blurred field
                 // rather than a cropped poster. The scrims
                 // below are untouched.
-                JoeBandImage(url: featured.thumbURL ?? featured.posterURL,
-                             targetPixels: 1920, anchor: 0.20,
-                             portraitMode: .blurField)
-                .frame(maxWidth: .infinity)
-                .frame(height: 668)
-                .clipped()
+                //
+                // Hero forensics fix (2026-11-15): the single
+                // layer above became a three-stage stack — the
+                // detail band's own discipline, each stage
+                // painting the moment its bitmap lands, higher
+                // stages covering lower ones:
+                //   1. the poster as a blurred field — the
+                //      stand-in. The rail card below already
+                //      decoded this bitmap, so the hero never
+                //      sits black while a usable image is on
+                //      the device (the Android FIX4 lesson the
+                //      port applied to the detail band but not
+                //      to the hero: the old single layer's
+                //      thumb URL is decoded nowhere else, so
+                //      one failed load = an empty hero for the
+                //      view's whole life — the owner's wide
+                //      photo);
+                //   2. the provider thumb slice (the v2.0.1
+                //      art, kept as the fallback) — skipped
+                //      when it is the same URL as the poster
+                //      (the KK/VS poster fallback), which
+                //      stage 1 already paints;
+                //   3. the featured film's TMDB w1280 backdrop
+                //      (heroBackdropURL, resolved by the task
+                //      below) — the primary art, per the
+                //      owner's backdrop standard.
+                if let url = featured.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .blurField)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
+                if let url = featured.thumbURL, url != featured.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .blurField)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
+                if let heroBackdropURL {
+                    JoeBandImage(url: heroBackdropURL, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .slice)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
                 // UI-3 SCRIM FLOOR (hard requirement): the
                 // horizontal scrim never drops below the token
                 // floor (0.55 black) anywhere inside the text
@@ -303,10 +355,37 @@ struct JoePhimHome: View {
             // UI-6 D-2: fetch the featured film's detail for
             // the synopsis (fail-soft — a failed fetch simply
             // leaves the hero without one).
+            //
+            // Hero forensics fix (2026-11-15): the same task
+            // then resolves the featured film's TMDB backdrop
+            // for stage 3 of the hero stack — by the payload
+            // TMDB id when one is carried (the detail's movie
+            // first, the list item behind it: KK parses the
+            // tmdb object in both), else the name + year hunt
+            // — the detail screen's exact pattern
+            // (JoeMovieDetail's TMDB task). Fail-soft end to
+            // end: no key, no id and no match simply leave the
+            // hero on its provider-art stages.
             .task(id: featured.id) {
                 heroDetail = nil
+                heroBackdropURL = nil
                 heroDetail = try? await Providers.detail(
                     featured.provider, slug: featured.slug)
+                guard !TMDBClient.apiKey.isEmpty else { return }
+                let m = heroDetail?.movie ?? featured
+                var backdrop = ""
+                if !m.tmdbId.isEmpty {
+                    backdrop = await TMDBClient.fetchInfo(
+                        tmdbId: m.tmdbId, type: m.tmdbType)?.backdropURL ?? ""
+                }
+                if backdrop.isEmpty {
+                    backdrop = await TMDBClient.searchBackdrop(
+                        name: m.name, origin: m.originName,
+                        year: Providers.yearOf(m)) ?? ""
+                }
+                if !backdrop.isEmpty {
+                    heroBackdropURL = URL(string: backdrop)
+                }
             }
         }
     }

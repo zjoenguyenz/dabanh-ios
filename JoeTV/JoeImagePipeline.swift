@@ -22,6 +22,10 @@ import UIKit
 //    lands (rails land in home order, so the next rail is always warming
 //    while the owner reads the current one); the root warms Continue
 //    Watching / favourites posters at launch.
+//  - v2.0.2 (P1): loads retry transient failures with a bounded
+//    policy (a single failure no longer fossilises a placeholder
+//    for a view's life), and prefetch drains through a
+//    3-worker cap instead of one detached task per URL.
 
 final class JoeImagePipeline: @unchecked Sendable {
     static let shared = JoeImagePipeline()
@@ -30,6 +34,15 @@ final class JoeImagePipeline: @unchecked Sendable {
     private let decoded = NSCache<NSString, UIImage>()
     private let lock = NSLock()
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    /// Prefetch backlog + running-worker count (v2.0.2, P1),
+    /// both guarded by `lock`. See prefetch(_:targetPixels:).
+    private var prefetchBacklog: [(url: URL, bucket: Int, key: String)] = []
+    private var prefetchActive = 0
+    /// How many prefetch-originated loads may be inside the
+    /// network at once. The session allows 8 connections per
+    /// host; capping warm-up at 3 leaves the rest of the pool
+    /// to the loads the owner is actually looking at.
+    private static let prefetchWorkers = 3
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -103,22 +116,59 @@ final class JoeImagePipeline: @unchecked Sendable {
 
     /// Fire-and-forget warm-up at background priority; shares the in-flight
     /// dedupe and both caches with visible loads.
+    ///
+    /// Bounded concurrency (v2.0.2, P1): pre-fix, EVERY URL
+    /// spawned its own detached task at once — one rail
+    /// landing pushed ~24 requests, several rails hundreds,
+    /// all competing for the session's 8 per-host connections
+    /// against the visible cards (HERO-FORENSICS §D). URLs
+    /// now join a FIFO backlog (home order preserved across
+    /// rails) drained by at most `prefetchWorkers` loads at a
+    /// time. Visible loads never touch the backlog: a URL a
+    /// view asks for directly starts (or joins) its own
+    /// full-priority load immediately, and a backlog entry
+    /// for it is dropped when its turn comes.
     func prefetch(_ urls: [URL], targetPixels: Int) {
         let bucket = Self.bucket(forPixels: targetPixels)
+        lock.lock()
         for url in urls {
             let k = key(url, bucket)
             if decoded.object(forKey: k as NSString) != nil { continue }
-            lock.lock()
-            if inFlight[k] == nil {
-                inFlight[k] = Task.detached(priority: .background) {
-                    let img = await Self.load(url: url, bucket: bucket,
-                                              session: self.session, decoded: self.decoded)
-                    self.removeInFlight(k)
-                    return img
-                }
-            }
-            lock.unlock()
+            if inFlight[k] != nil { continue }
+            if prefetchBacklog.contains(where: { $0.key == k }) { continue }
+            prefetchBacklog.append((url, bucket, k))
         }
+        pumpPrefetchLocked()
+        lock.unlock()
+    }
+
+    /// Start backlog loads up to the worker cap. MUST be
+    /// called with `lock` held. Entries already decoded or
+    /// already in flight (a visible load got there first)
+    /// are dropped without consuming a worker slot.
+    private func pumpPrefetchLocked() {
+        while prefetchActive < Self.prefetchWorkers,
+              !prefetchBacklog.isEmpty {
+            let item = prefetchBacklog.removeFirst()
+            if decoded.object(forKey: item.key as NSString) != nil { continue }
+            if inFlight[item.key] != nil { continue }
+            prefetchActive += 1
+            let k = item.key
+            inFlight[k] = Task.detached(priority: .background) {
+                let img = await Self.load(url: item.url, bucket: item.bucket,
+                                          session: self.session, decoded: self.decoded)
+                self.prefetchTaskFinished(k)
+                return img
+            }
+        }
+    }
+
+    private func prefetchTaskFinished(_ key: String) {
+        lock.lock()
+        inFlight.removeValue(forKey: key)
+        prefetchActive -= 1
+        pumpPrefetchLocked()
+        lock.unlock()
     }
 
     private func removeInFlight(_ key: String) {
@@ -127,17 +177,80 @@ final class JoeImagePipeline: @unchecked Sendable {
         lock.unlock()
     }
 
-    private static func load(url: URL, bucket: Int, session: URLSession,
-                             decoded: NSCache<NSString, UIImage>) async -> UIImage? {
+    /// One load attempt's outcome, classified for the retry
+    /// policy: a decoded image; a PERMANENT failure (an HTTP
+    /// 4xx other than 429 — the CDN has no such poster, and
+    /// asking again inside this view's life cannot change
+    /// that); or a TRANSIENT failure (a thrown error/timeout,
+    /// 429, 5xx, or an undecodable body — the truncated-
+    /// transfer class), which the bounded retry may still
+    /// heal.
+    private enum LoadOutcome {
+        case image(UIImage)
+        case permanent
+        case transient
+    }
+
+    private static func attempt(url: URL, bucket: Int,
+                                session: URLSession) async -> LoadOutcome {
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
         request.timeoutInterval = 30
-        guard let (data, response) = try? await session.data(for: request),
-              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false,
-              let image = decode(data, maxPixel: bucket) else { return nil }
-        let cost = image.cgImage.map { $0.width * $0.height * 4 } ?? 0
-        decoded.setObject(image, forKey: "\(url.absoluteString)|\(bucket)" as NSString, cost: cost)
-        return image
+        let fetched: (Data, URLResponse)
+        do {
+            fetched = try await session.data(for: request)
+        } catch {
+            return .transient
+        }
+        let (data, response) = fetched
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 429 || http.statusCode >= 500 {
+                return .transient
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                return .permanent
+            }
+        } else {
+            // Pre-P1 behaviour for a non-HTTP response was an
+            // outright failure; keep it, classified permanent
+            // so the retry never spins on it.
+            return .permanent
+        }
+        guard let image = decode(data, maxPixel: bucket) else {
+            return .transient
+        }
+        return .image(image)
+    }
+
+    /// Bounded retry (v2.0.2, P1): pre-fix, ANY load failure
+    /// returned nil and the view sat on its placeholder for
+    /// its entire life — one transient failure under prefetch
+    /// contention fossilised an empty card (HERO-FORENSICS
+    /// §D). A load now makes up to 3 attempts with short
+    /// backoff (0.5 s, 1.5 s) while failures classify as
+    /// transient; a permanent failure stops at once. The
+    /// whole sequence lives inside the ONE in-flight task,
+    /// so dedupe and cache semantics are unchanged — every
+    /// view awaiting this (URL, bucket) gets the healed
+    /// result, and a success is cached exactly as before.
+    private static func load(url: URL, bucket: Int, session: URLSession,
+                             decoded: NSCache<NSString, UIImage>) async -> UIImage? {
+        let backoffs: [UInt64] = [500_000_000, 1_500_000_000]
+        for i in 0...backoffs.count {
+            switch await attempt(url: url, bucket: bucket, session: session) {
+            case .image(let image):
+                let cost = image.cgImage.map { $0.width * $0.height * 4 } ?? 0
+                decoded.setObject(image, forKey: "\(url.absoluteString)|\(bucket)" as NSString, cost: cost)
+                return image
+            case .permanent:
+                return nil
+            case .transient:
+                if i < backoffs.count {
+                    try? await Task.sleep(nanoseconds: backoffs[i])
+                }
+            }
+        }
+        return nil
     }
 
     /// ImageIO thumbnail decode straight to display size — the full-size

@@ -172,6 +172,27 @@ enum VsClient {
         m.time = cleanField(JSON.str(o, "time"))
         m.episodeTotal = cleanField(JSON.str(o, "episode_total"))
         m.chieurap = JSON.bool(o, "chieurap")
+        // v2.0.2 (P2 — mirror of Android FIX5): VS payloads are
+        // KK-shaped and carry the same identity objects —
+        // measured live on Android, the VS Die Hard detail
+        // carries tmdb {type:"movie", id:"562"} and imdb
+        // {id:"tt0095016"} — and this parser read NEITHER, so
+        // a VS film's TMDB identity was dropped (with it the
+        // detail screen's IMDb derivation when the imdb
+        // object is absent) and its IMDb id never landed at
+        // all: a VS-only title had no torrent identity. Same
+        // tolerant blocks as KkClient (cleanField = the house
+        // null discipline for every identity field).
+        if let tm = JSON.obj(o, "tmdb") {
+            m.tmdbId = cleanField(JSON.str(tm, "id"))
+            m.tmdbType = cleanField(JSON.str(tm, "type"))
+            let season = JSON.int(tm, "season")
+            if season > 0 { m.tmdbSeason = season }
+        }
+        if m.imdbId.isEmpty, let im = JSON.obj(o, "imdb") {
+            let idv = cleanField(JSON.str(im, "id"))
+            if !idv.isEmpty { m.imdbId = idv }
+        }
         m.provider = Providers.VS
         return m
     }

@@ -235,6 +235,41 @@ enum F4kClient {
             m.categories = vi.compactMap { ($0 as? String) }
                 .map { cleanField($0) }.filter { !$0.isEmpty }
         }
+        // v2.0.2 (P2 — mirror of Android FIX5): the DETAIL
+        // payloads carry a flat TMDB id (a JSON number —
+        // measured live from this machine 2026-11-15:
+        // /api/title and /api/watch items carry "tmdbId": 562
+        // for Die Hard) that this parser never read, so an
+        // F4K film had NO identity at all: no IMDb derivation,
+        // and the torrent rung starved. List / suggest items
+        // carry no tmdbId (measured the same day) and simply
+        // stay empty. A numeric 0 is the payload family's
+        // missing-value marker (same as year 0 above), and
+        // mediaType is the TMDB type dialect ("movie" / "tv").
+        let rawTmdbId = cleanField(JSON.str(o, "tmdbId"))
+        if !rawTmdbId.isEmpty && rawTmdbId != "0" {
+            m.tmdbId = rawTmdbId
+            switch JSON.str(o, "mediaType") {
+            case "tv": m.tmdbType = "tv"
+            case "movie": m.tmdbType = "movie"
+            default: m.tmdbType = ""
+            }
+        }
+        // No measured F4K payload carries an IMDb identity
+        // (title / watch / home / suggest items checked live
+        // this round — no imdb key at all). Read one
+        // tolerantly if a future payload adds it, in either
+        // the KK object shape or a flat string field.
+        if m.imdbId.isEmpty {
+            if let im = JSON.obj(o, "imdb") {
+                let idv = cleanField(JSON.str(im, "id"))
+                if !idv.isEmpty { m.imdbId = idv }
+            }
+            if m.imdbId.isEmpty {
+                let flat = cleanField(JSON.str(o, "imdbId"))
+                if !flat.isEmpty { m.imdbId = flat }
+            }
+        }
         m.provider = Providers.F4K
         return m
     }

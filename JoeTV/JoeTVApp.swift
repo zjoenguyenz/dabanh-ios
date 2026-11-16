@@ -160,6 +160,16 @@ struct JoeRootView: View {
         ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .sourceBoard)
     }
 
+    /// The corner version label reads the REAL bundle version
+    /// (CFBundleShortVersionString, stamped from project.yml
+    /// at build time) — never a hardcoded string. Forensics
+    /// 2026-11-15: the label was frozen at "v2.0.0" through
+    /// the whole v2.0.1 round, so the owner's defect photos
+    /// could not establish which build his TV was running.
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
     /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
     /// Phim section's view. If the owner opened search, escaped
     /// UP to the pills and selected another section, searchOpen
@@ -275,7 +285,7 @@ struct JoeRootView: View {
                     PillLabel(title: "Tìm phim", icon: "magnifyingglass", selected: false)
                 }
                 .buttonStyle(.card)
-                Text("Joe TV v2.0.0")
+                Text("Joe TV v\(Self.appVersion)")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)

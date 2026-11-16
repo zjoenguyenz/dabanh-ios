@@ -328,10 +328,25 @@ enum KkClient {
         m.episodeTotal = cleanField(JSON.str(o, "episode_total"))
         m.chieurap = JSON.bool(o, "chieurap")
         if let tm = JSON.obj(o, "tmdb") {
-            m.tmdbId = JSON.str(tm, "id")
-            m.tmdbType = JSON.str(tm, "type")
+            m.tmdbId = cleanField(JSON.str(tm, "id"))
+            m.tmdbType = cleanField(JSON.str(tm, "type"))
             let season = JSON.int(tm, "season")
             if season > 0 { m.tmdbSeason = season }
+        }
+        // v2.0.2 (P2 — mirror of Android FIX5): the payload's
+        // "imdb" object ({id: "tt…"} — e.g. tt47712459 for
+        // "Yêu Là Tàn Nhẫn") was never read, so a KK film's own
+        // IMDb id stayed "" — every consumer paid the TMDB
+        // external_ids round trip instead, and the play-time
+        // rescue ladder's alt-KK leg in JoeMovieDetail read an
+        // always-empty kd.movie.imdbId (a dead leg). Same
+        // tolerant shape as Android KkApi.fillFacets: fills
+        // only an empty field, and cleanField applies the
+        // house null discipline (a JSON null or the literal
+        // text "null" is missing data, never an identity).
+        if m.imdbId.isEmpty, let im = JSON.obj(o, "imdb") {
+            let idv = cleanField(JSON.str(im, "id"))
+            if !idv.isEmpty { m.imdbId = idv }
         }
         m.provider = Providers.KK
         return m
