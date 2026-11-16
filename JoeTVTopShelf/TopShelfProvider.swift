@@ -6,8 +6,7 @@ import TVServices
 // JoeTVTopShelf/TopShelfProvider.swift (its own
 // app-extension target, bundle com.luun.nguyen.joetv.topshelf,
 // extension point com.apple.tv-top-shelf). Applied from
-// tvos-training/topshelf-staging for Package B (v2.0.10);
-// not compile-verified until the first CI build.
+// tvos-training/topshelf-staging for Package B (v2.0.10).
 //
 // The extension is a pure reader: the Joe TV app writes
 // topshelf.json + JPEG image files into the App Group container
@@ -19,31 +18,41 @@ import TVServices
 //
 // CONTENT MODEL (owner's Prime-Video spec, verbatim intent):
 // the shelf background is the hottest movie's backdrop,
-// full-bleed. Within the kit that is the CAROUSEL style — the
-// only style whose focused item's backdrop fills the shelf —
-// so the whole shelf is one TVTopShelfCarouselContent: hero
+// full-bleed, and the whole shelf is ONE carousel: hero
 // (hot #1) first, then Continue Watching, then more hot
-// titles. Every item carries a joetv:// display action that
-// opens ITS OWN title in the app (the deep-link rule: never a
-// generic landing). NOTE for the leader: the Package B design
-// note also named TVTopShelfSectionedContent for CW/hot — one
-// loadTopShelfContent call returns ONE content object, so
-// carousel-vs-sectioned is an either/or; carousel is used
-// because it is the only full-bleed-backdrop style. If the
-// sectioned shape is preferred at apply time, the reader below
-// already carries everything it needs (progress included).
+// titles. Every item deep-links (joetv://) to ITS OWN title
+// in the app — never a generic landing.
 //
-// [UNVERIFIED — no compiler/SDK in this environment] Every
-// TVServices signature in this file is from the documented
-// API shape and MUST be pinned against the tvOS SDK headers
-// on the first CI build (the house pattern: spelling-level
-// fixes would be mechanical):
-//   - TVTopShelfContentProvider.loadTopShelfContent(completionHandler:)
-//   - TVTopShelfCarouselContent(style:items:)
-//   - TVTopShelfCarouselItem(identifier:), .title,
-//     .setImageURL(_:for:) with ImageTraits.carousel,
-//     .displayAction = TVTopShelfAction(url:)
-//   - file:// image URLs into the shared group container.
+// API SHAPE — pinned against Apple's TVServices documentation
+// after CI run 33 rejected the staged guesses (there is no
+// Style.carousel and no ImageTraits.carousel in the SDK):
+//   - TVTopShelfCarouselContent.Style has exactly two cases:
+//     .actions and .details. The Prime shape is .actions:
+//     full-bleed art with the item's title and its Play /
+//     More Info buttons, driven by the item's playAction and
+//     displayAction. (.details would render a metadata panel
+//     — summary/genre/duration — that the JSON contract does
+//     not carry.)
+//   - A carousel item has ONE image, registered with
+//     setImageURL(_:for:). ImageTraits is an OptionSet whose
+//     only documented members are the screen scales
+//     .screenScale1x and .screenScale2x — the traits describe
+//     the image's scale, not its role. The writer produces a
+//     single-resolution file per item, so the same file is
+//     registered under BOTH scale traits: the system picks
+//     the image whose traits match the device, and this way
+//     every device matches. The item's backdrop (16:9) is the
+//     image; the poster is only the fallback when no backdrop
+//     file exists.
+//   - Both buttons carry the item's own deep link: playAction
+//     (the primary Play button) and displayAction (More Info /
+//     selecting the item) are the same TVTopShelfAction.
+//   - The CW progress fraction in the JSON has no carousel
+//     rendering in this API and stays unused here, exactly as
+//     in the staged version.
+// (Doc basis: TVTopShelfCarouselContent, its Style enum page,
+// TVTopShelfItem + ImageTraits + setImageURL(_:for:), and
+// TVTopShelfAction in Apple's TVServices documentation.)
 
 /// The writer's JSON contract (mirror of ShelfDoc in
 /// JoeTopShelfWriter.swift — keep in sync).
@@ -85,23 +94,32 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             guard !item.action.isEmpty else { return nil }
             let ci = TVTopShelfCarouselItem(identifier: item.id)
             ci.title = item.title
-            // The backdrop is the carousel image: focused, it
-            // fills the shelf full-bleed (the owner's Prime
-            // shape). Poster is the fallback slot if the
-            // backdrop file is missing.
+            // The backdrop is the item's image: in the carousel
+            // it is the full-bleed background (the owner's
+            // Prime shape). Poster is the fallback if the
+            // backdrop file is missing. One file, registered
+            // for both screen scales (see the header note).
             let backdropURL = container.appendingPathComponent(item.backdrop)
             let posterURL = container.appendingPathComponent(item.poster)
             if !item.backdrop.isEmpty,
                FileManager.default.fileExists(atPath: backdropURL.path) {
-                ci.setImageURL(backdropURL, for: .carousel)
+                ci.setImageURL(backdropURL, for: .screenScale1x)
+                ci.setImageURL(backdropURL, for: .screenScale2x)
             } else if !item.poster.isEmpty,
                       FileManager.default.fileExists(atPath: posterURL.path) {
-                ci.setImageURL(posterURL, for: .carousel)
+                ci.setImageURL(posterURL, for: .screenScale1x)
+                ci.setImageURL(posterURL, for: .screenScale2x)
             } else {
                 return nil
             }
             if let url = URL(string: item.action) {
-                ci.displayAction = TVTopShelfAction(url: url)
+                // .actions style: the Play button fires
+                // playAction, More Info / selection fires
+                // displayAction. Both open this item's own
+                // title in the app (the deep-link rule).
+                let action = TVTopShelfAction(url: url)
+                ci.playAction = action
+                ci.displayAction = action
             }
             return ci
         }
@@ -121,7 +139,7 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             completionHandler(nil)
             return
         }
-        completionHandler(TVTopShelfCarouselContent(style: .carousel,
+        completionHandler(TVTopShelfCarouselContent(style: .actions,
                                                     items: items))
     }
 }
