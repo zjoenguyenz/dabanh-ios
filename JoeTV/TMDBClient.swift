@@ -30,6 +30,15 @@ struct TMDBInfo {
 /// failed credits call keeps the detail data already fetched,
 /// and only a failed detail call returns nil.
 enum TMDBClient {
+    /// v2.0.8 (P2e): ONE explicit short timeout for every
+    /// TMDB call. Pre-fix every call rode JoeHTTP's 25 s
+    /// default, so a slow TMDB taxed the detail screen's
+    /// enrichment chain endlessly; 8 s is the budget, applied
+    /// at every JoeHTTP call site in this client. Fail-soft
+    /// behaviour (try? → nil/[]) is unchanged, and TMDB calls
+    /// deliberately carry no SourceHealth wrapping.
+    private static let callTimeout: TimeInterval = 8
+
     static var apiKey: String {
         let saved = (UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "")
             .trimmingCharacters(in: .whitespaces)
@@ -52,7 +61,8 @@ enum TMDBClient {
         let kind = (type == "tv") ? "tv" : "movie"
 
         guard let root = try? await JoeHTTP.getJSON(
-            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)&language=vi-VN")
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)&language=vi-VN",
+            timeout: callTimeout)
         else { return nil }
 
         var info = TMDBInfo()
@@ -73,7 +83,8 @@ enum TMDBClient {
         let kind = (type == "tv") ? "tv" : "movie"
 
         guard let credits = try? await JoeHTTP.getJSON(
-            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/credits?api_key=\(key)")
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/credits?api_key=\(key)",
+            timeout: callTimeout)
         else { return [] }
         return (JSON.arr(credits, "cast") ?? []).prefix(12).map { member in
             let profilePath = JSON.str(member, "profile_path")
@@ -109,7 +120,8 @@ enum TMDBClient {
         let wantYear = Providers.yearOf(year)
         for q in queries {
             guard let root = try? await JoeHTTP.getJSON(
-                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false")
+                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false",
+                timeout: callTimeout)
             else { continue }
             for item in JSON.arr(root, "results") ?? [] {
                 let backdropPath = JSON.str(item, "backdrop_path")
@@ -144,7 +156,8 @@ enum TMDBClient {
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
         guard let root = try? await JoeHTTP.getJSON(
-            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/external_ids?api_key=\(key)")
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/external_ids?api_key=\(key)",
+            timeout: callTimeout)
         else { return nil }
         let id = JSON.str(root, "imdb_id")
         return id.isEmpty ? nil : id
@@ -181,7 +194,8 @@ enum TMDBClient {
         guard !queries.isEmpty, !wantNames.isEmpty else { return nil }
         for q in queries {
             guard let root = try? await JoeHTTP.getJSON(
-                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false")
+                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false",
+                timeout: callTimeout)
             else { continue }
             for item in JSON.arr(root, "results") ?? [] {
                 let mediaType = JSON.str(item, "media_type")
@@ -217,7 +231,8 @@ enum TMDBClient {
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
         guard let root = try? await JoeHTTP.getJSON(
-            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)")
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)",
+            timeout: callTimeout)
         else { return nil }
         let path = JSON.str(root, "poster_path")
         return path.isEmpty ? nil : path

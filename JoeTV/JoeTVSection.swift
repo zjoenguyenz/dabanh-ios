@@ -201,9 +201,12 @@ struct JoeTVSection: View {
         }
         // v2.0.5 (N1, pair f): the chip row is a declared
         // focus region, the grid below it another — chip ↔
-        // grid movement is section-to-section, with the
-        // grid's own handler (moveInGrid) declaring the UP
-        // landing back onto the active group's chip.
+        // grid movement is section-to-section. v2.0.8
+        // (Phase 1): that movement is the engine's geometric
+        // search — moveInGrid's declared UP landing onto the
+        // active group's chip is deleted with its handler,
+        // so the grid is enterable from any chip and UP
+        // leaves it from any column.
         .focusSection()
     }
 
@@ -238,11 +241,13 @@ struct JoeTVSection: View {
     // visual order (the engine also skips the action chips
     // while they are disabled — the case chipIDs hand-managed),
     // UP reaches the pills, DOWN enters the grid at its first
-    // tile. The grid tiles keep their own per-tile handler
-    // (moveInGrid below): exact 6-column arithmetic the owner
-    // asked for, always installed, per-element — its UP from
-    // the first row writes focusedChip, a plain focus move
-    // between stable elements that no structure depends on.
+    // tile.
+    // v2.0.8 (Phase 1): the grid tiles' per-tile handler
+    // (moveInGrid) is DELETED too — an attached .onMoveCommand
+    // owned every direction and made undeclared ones no-ops.
+    // Tiles are plain buttons now; the engine moves within
+    // the grid and back UP to the chip row geometrically,
+    // from any column.
 
     // MARK: - Channel grid (v1.5: ONE grid, no nested rails)
 
@@ -250,8 +255,10 @@ struct JoeTVSection: View {
     /// inside the vertical one; the focus engine's geometry then
     /// never carried UP from deep tiles back to the chips. v1.5
     /// shows exactly ONE grid — the effective group's channels —
-    /// inside the section's single vertical ScrollView, and every
-    /// tile routes focus arithmetically (see moveInGrid).
+    /// inside the section's single vertical ScrollView. v2.0.8
+    /// (Phase 1): tiles are plain buttons and focus moves
+    /// geometrically — the v1.5 arithmetic routing (moveInGrid)
+    /// is deleted.
 
     private let gridColumns = Array(repeating: GridItem(.fixed(273), spacing: 24),
                                     count: 6)
@@ -287,10 +294,14 @@ struct JoeTVSection: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
                 }
+                // v2.0.8 (Phase 4): a focused tile's ring is
+                // never clipped by the scroll container.
+                .scrollClipDisabled()
                 // v2.0.5 (N1, pair f): the grid's focus region
                 // (see chipRow) — entering it from the chips is
-                // section-to-section navigation; within it,
-                // moveInGrid's exact arithmetic rules.
+                // section-to-section navigation; within it the
+                // engine's geometric search rules (v2.0.8
+                // Phase 1 — moveInGrid deleted).
                 .focusSection()
             }
         } else {
@@ -362,42 +373,13 @@ struct JoeTVSection: View {
         }
         .joeCardButton()
         .focused($focusedChannel, equals: channel.id)
-        .onMoveCommand { direction in
-            moveInGrid(direction, from: channel)
-        }
     }
 
-    /// Manual grid routing: the handler sits on each tile, so it
-    /// is active exactly while that tile holds focus, and every
-    /// direction is arithmetic over gridChannels with 6 columns —
-    /// LEFT/RIGHT stop at row edges, DOWN past the last row is a
-    /// defined no-op, and UP from the first row escapes to the
-    /// chips (focusedChip = effectiveGroup).
-    private func moveInGrid(_ direction: MoveCommandDirection, from channel: Channel) {
-        let channels = gridChannels
-        guard let idx = channels.firstIndex(where: { $0.id == channel.id }) else { return }
-        let columns = 6
-        switch direction {
-        case .left:
-            if idx % columns > 0 { focusedChannel = channels[idx - 1].id }
-        case .right:
-            if idx + 1 < channels.count, idx % columns < columns - 1 {
-                focusedChannel = channels[idx + 1].id
-            }
-        case .up:
-            if idx >= columns {
-                focusedChannel = channels[idx - columns].id
-            } else {
-                focusedChip = effectiveGroup
-            }
-        case .down:
-            if idx + columns < channels.count {
-                focusedChannel = channels[idx + columns].id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): moveInGrid is DELETED — tiles are
+    // plain buttons in the grid's focus section; the engine
+    // moves within the grid geometrically and out of it (UP
+    // to the chip row, from any column) the same way. No
+    // coded no-op directions remain in this view.
 
     private var footer: some View {
         HStack(spacing: 10) {

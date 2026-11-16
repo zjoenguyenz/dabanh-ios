@@ -63,6 +63,19 @@ enum JoeDetailCache {
         return env.d
     }
 
+    /// Async read (v2.0.8, P7): the existing read's file I/O
+    /// + JSONDecoder work runs in a detached task, off the
+    /// caller's executor, so a view-driven caller no longer
+    /// pays the synchronous decode on its own thread. The
+    /// sync read above stays for any other callers; the
+    /// envelope, TTL, cap, prune and fingerprint are
+    /// untouched.
+    static func readAsync(provider: String, slug: String) async -> Detail? {
+        await Task.detached {
+            JoeDetailCache.read(provider: provider, slug: slug)
+        }.value
+    }
+
     static func write(_ detail: Detail, provider: String, slug: String) {
         guard let url = fileURL(provider: provider, slug: slug) else { return }
         let env = Envelope(v: appBuild,

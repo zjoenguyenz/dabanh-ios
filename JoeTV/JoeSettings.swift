@@ -55,7 +55,11 @@ struct JoeSettingsView: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 40) {
+            // v2.0.8 (Phase 7): lazy root stack — identical
+            // children, order and spacing; the eager VStack
+            // built every block (all fields, all diagnostics
+            // rows) before first paint.
+            LazyVStack(alignment: .leading, spacing: 40) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Cài đặt")
                         .font(.system(size: 56, weight: .heavy))
@@ -68,10 +72,21 @@ struct JoeSettingsView: View {
                                          ? JoeTheme.okGreen : .orange)
                 }
 
+                // v2.0.8 (Phase 1): this screen was ONE
+                // unsectioned column (zero .focusSection in
+                // the file). The existing blocks are now
+                // grouped into focus sections — theme /
+                // fields / history / diagnostics — so the
+                // focus engine moves section-to-section, then
+                // within a section. Composition, order and
+                // content of every block are unchanged.
                 themeBlock
+                    .focusSection()
 
                 tunnelStatusBlock
+                    .focusSection()
 
+                Group {
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
                       text: $addonURL, id: "addon", secure: false, allowsPaste: true)
@@ -123,12 +138,18 @@ struct JoeSettingsView: View {
                     .font(.system(size: 25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
+                }
+                .focusSection()
 
                 historyBlock
+                    .focusSection()
 
+                Group {
                 diagnosticsBlock
 
                 signpostBlock
+                }
+                .focusSection()
 
                 // Hero forensics fix (2026-11-15): the real
                 // bundle version, like the corner label — this

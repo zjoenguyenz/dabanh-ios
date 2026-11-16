@@ -324,14 +324,14 @@ enum Providers {
         var isEmpty: Bool { entries.isEmpty }
     }
 
-    /// Build the play ladder for one episode of one provider's
-    /// detail: match the episode by exact name first, then by
-    /// episode number; one URL per server. Playable = non-empty
-    /// m3u8, EXCEPT VSMOV whose episodes carry only an embed URL —
-    /// those are resolved to master.m3u8 HERE, fresh, every call.
-    static func ladderFor(code: String, detail d: Detail, filmTitle: String,
-                          epName: String?, epNum: Int) async -> Ladder {
-        var lad = Ladder()
+    /// The ladder's target episode, matched exactly as
+    /// ladderFor has always matched it: by exact name first,
+    /// then by episode number, then the single-playable
+    /// fallback. Shared by ladderFor and preResolve so the
+    /// speculative dwell resolve can never drift from the
+    /// real ladder's matching.
+    private static func ladderTarget(code: String, detail d: Detail,
+                                     epName: String?, epNum: Int) -> Episode? {
         var byName: Episode?
         var byNum: Episode?
         for s in d.servers {
@@ -360,28 +360,101 @@ enum Providers {
                 .filter { isPlayable(code: code, episode: $0) }
             if playable.count == 1 { target = playable[0] }
         }
-        guard let target else { return lad }
-        lad.matchedEpName = target.name
-        for s in orderServers(code: code, servers: d.servers) {
-            var pick: Episode?
-            for e in s.episodes
-            where e.name.trimmingCharacters(in: .whitespaces).lowercased()
-                == target.name.trimmingCharacters(in: .whitespaces).lowercased() {
-                pick = e
-                break
-            }
-            if pick == nil && epNum > 0 {
-                pick = s.episodes.first { episodeNumber($0.name) == epNum }
-            }
-            guard let pick, let resolved = await playableURL(code: code, episode: pick),
+        return target
+    }
+
+    /// One server's copy of the target episode, matched
+    /// exactly as ladderFor has always matched it inside a
+    /// server: by the target's name first, then by number.
+    private static func pickEpisode(in server: Server, target: Episode,
+                                    epNum: Int) -> Episode? {
+        var pick: Episode?
+        for e in server.episodes
+        where e.name.trimmingCharacters(in: .whitespaces).lowercased()
+            == target.name.trimmingCharacters(in: .whitespaces).lowercased() {
+            pick = e
+            break
+        }
+        if pick == nil && epNum > 0 {
+            pick = server.episodes.first { episodeNumber($0.name) == epNum }
+        }
+        return pick
+    }
+
+    /// Resolve `servers` (already in pass order) into the
+    /// ladder, one entry per server, through the memoised
+    /// wrapper. Entry order is the servers' order.
+    private static func appendResolved(code: String, servers: [Server],
+                                       target: Episode, epNum: Int,
+                                       filmTitle: String, multiServer: Bool,
+                                       lad: inout Ladder) async {
+        for s in servers {
+            guard let pick = pickEpisode(in: s, target: target, epNum: epNum),
+                  let resolved = await playableURLMemoised(code: code, episode: pick),
                   !resolved.url.isEmpty else { continue }
             lad.entries.append(LadderEntry(
                 url: resolved.url,
                 title: filmTitle + " · " + pick.name
-                    + (d.servers.count > 1 ? " · " + s.name : ""),
+                    + (multiServer ? " · " + s.name : ""),
                 proxy: resolved.proxy, headers: resolved.headers))
         }
+    }
+
+    /// Build the play ladder for one episode of one provider's
+    /// detail: match the episode by exact name first, then by
+    /// episode number; one URL per server. Playable = non-empty
+    /// m3u8, EXCEPT VSMOV whose episodes carry only an embed URL —
+    /// those are resolved to master.m3u8 HERE, fresh, every call.
+    ///
+    /// v2.0.8 (P3-gate): SourceHealth latches are a GATE here,
+    /// not just a reorder. Servers whose resolution path is
+    /// latched (serverDemoted) are resolved on a SECOND pass
+    /// only: when the unlatched pass produced at least one
+    /// entry the latched servers are not resolved at all in
+    /// this ladder; when it produced nothing the latched pass
+    /// runs — a latched server is deferred, never deleted, so
+    /// the same sources remain playable. Entry order within
+    /// each pass is orderServers' order.
+    static func ladderFor(code: String, detail d: Detail, filmTitle: String,
+                          epName: String?, epNum: Int) async -> Ladder {
+        var lad = Ladder()
+        guard let target = ladderTarget(code: code, detail: d,
+                                        epName: epName, epNum: epNum)
+        else { return lad }
+        lad.matchedEpName = target.name
+        let ordered = orderServers(code: code, servers: d.servers)
+        let unlatched = ordered.filter { !serverDemoted(code: code, server: $0) }
+        let latched = ordered.filter { serverDemoted(code: code, server: $0) }
+        await appendResolved(code: code, servers: unlatched, target: target,
+                             epNum: epNum, filmTitle: filmTitle,
+                             multiServer: d.servers.count > 1, lad: &lad)
+        if lad.entries.isEmpty && !latched.isEmpty {
+            await appendResolved(code: code, servers: latched, target: target,
+                                 epNum: epNum, filmTitle: filmTitle,
+                                 multiServer: d.servers.count > 1, lad: &lad)
+        }
         return lad
+    }
+
+    /// Speculative dwell-time resolve (v2.0.8, P3b): find the
+    /// ladder target exactly as ladderFor does, take the FIRST
+    /// server in orderServers order that carries the target,
+    /// and resolve that server's copy through the memoised
+    /// wrapper, discarding the result — it lands in the memo,
+    /// so a following Play tap starts from a warm ladder.
+    /// Providers whose playableURL needs no network (KK/F4K
+    /// direct m3u8) are NOT skipped: the wrapper returns
+    /// instantly for them and the memo entry is harmless.
+    static func preResolve(code: String, detail: Detail, epName: String?, epNum: Int) async {
+        guard let target = ladderTarget(code: code, detail: detail,
+                                        epName: epName, epNum: epNum)
+        else { return }
+        for s in orderServers(code: code, servers: detail.servers) {
+            if let pick = pickEpisode(in: s, target: target, epNum: epNum) {
+                _ = await playableURLMemoised(code: code, episode: pick)
+                return
+            }
+        }
     }
 
     /// The playable URL of one episode RIGHT NOW, or nil — plus
@@ -414,6 +487,78 @@ enum Providers {
         default:
             return e.m3u8.isEmpty ? nil : (e.m3u8, false, [:])
         }
+    }
+
+    // MARK: - Resolve memo (dwell pre-resolve, v2.0.8 P3b)
+
+    /// In-memory memo of playableURL results, keyed by
+    /// provider code + the episode's embed/m3u8 identity.
+    /// Discipline mirrors the CacheVideo memo
+    /// (CacheVideo.swift): SUCCESS ONLY, 10-minute TTL,
+    /// wholesale clear past 64 entries, lock-guarded.
+    ///
+    /// ★ Addendum rule (owner, 2026-11-13 — see the header):
+    /// stream URLs are resolved fresh at tap and never
+    /// PERSISTED. This memo honours that rule: it is
+    /// in-memory only (nothing is written to WatchStore,
+    /// prefs or disk), holds successful resolutions only,
+    /// and dies with the process or the TTL — it exists so
+    /// the dwell-time preResolve and the Play tap that
+    /// follows it do not pay for the same resolve twice.
+    private struct ResolveMemoEntry {
+        var url: String
+        var proxy: Bool
+        var headers: [String: String]
+        var at: TimeInterval
+    }
+
+    private static let resolveMemoLock = NSLock()
+    private static var resolveMemo: [String: ResolveMemoEntry] = [:]
+    private static let resolveMemoTTL: TimeInterval = 600
+
+    private static func resolveMemoKey(code: String, episode e: Episode) -> String? {
+        if !e.embed.isEmpty { return code + "|e|" + e.embed }
+        if !e.m3u8.isEmpty { return code + "|m|" + e.m3u8 }
+        return nil
+    }
+
+    private static func resolveMemoGet(_ key: String)
+        -> (url: String, proxy: Bool, headers: [String: String])? {
+        resolveMemoLock.lock()
+        defer { resolveMemoLock.unlock() }
+        guard let hit = resolveMemo[key],
+              Date().timeIntervalSince1970 - hit.at <= resolveMemoTTL
+        else { return nil }
+        return (hit.url, hit.proxy, hit.headers)
+    }
+
+    private static func resolveMemoSet(
+        _ key: String,
+        _ resolved: (url: String, proxy: Bool, headers: [String: String])
+    ) {
+        resolveMemoLock.lock()
+        if resolveMemo.count > 64 { resolveMemo.removeAll() }
+        resolveMemo[key] = ResolveMemoEntry(
+            url: resolved.url, proxy: resolved.proxy,
+            headers: resolved.headers, at: Date().timeIntervalSince1970)
+        resolveMemoLock.unlock()
+    }
+
+    /// playableURL through the memo above: a fresh hit is
+    /// returned without touching the network; a miss resolves
+    /// for real (playableURL's exact behaviour) and only a
+    /// successful, non-empty result is memoised.
+    static func playableURLMemoised(code: String, episode e: Episode)
+        async -> (url: String, proxy: Bool, headers: [String: String])? {
+        guard let key = resolveMemoKey(code: code, episode: e) else {
+            return await playableURL(code: code, episode: e)
+        }
+        if let hit = resolveMemoGet(key) { return hit }
+        let resolved = await playableURL(code: code, episode: e)
+        if let resolved, !resolved.url.isEmpty {
+            resolveMemoSet(key, resolved)
+        }
+        return resolved
     }
 
     // MARK: - Predictor-ordered servers (consumer b)
@@ -557,15 +702,26 @@ enum Providers {
     /// a failover-ordered list of providerCode → slug, possibly
     /// empty.
     ///
-    /// OVERALL DEADLINE 12 s (LATENCY-AUDIT §6): the searches
-    /// run sequentially (up to 2 per provider at a 12 s list
-    /// budget each — an unbounded worst case near 72 s), while
-    /// the measured typical is 2.7–5.7 s total. The search
-    /// therefore runs in a task the caller stops waiting on at
-    /// 12 s; whatever it found by then is returned (the hop
-    /// tries it), the task is cancelled, and a deadline-cut
-    /// result is NOT written to the session cache — providers
-    /// it never reached are "unsearched", not "not carried".
+    /// OVERALL DEADLINE 12 s (LATENCY-AUDIT §6): each search
+    /// can take up to 2 calls per provider at a 12 s list
+    /// budget each — an unbounded worst case near 72 s if
+    /// they ran sequentially, while the measured typical is
+    /// 2.7–5.7 s total. The search therefore runs in a task
+    /// the caller stops waiting on at 12 s; whatever it found
+    /// by then is returned (the hop tries it), the task is
+    /// cancelled, and a deadline-cut result is NOT written
+    /// to the session cache — providers it never reached are
+    /// "unsearched", not "not carried".
+    ///
+    /// v2.0.8 (P2a): the per-provider findSlug calls now run
+    /// CONCURRENTLY in a task group (each provider keeps its
+    /// own name→origin fallback sequence inside findSlug),
+    /// and each provider's hit is published into the box the
+    /// moment it lands, so the caller polling the box sees
+    /// results stream in per provider instead of arriving in
+    /// priority-walk order. The 12 s caller deadline, the
+    /// poll loop, the cache discipline and the return value's
+    /// orderedAlternatives ordering are unchanged.
     static func findAlternatives(fromCode: String, name: String,
                                  origin: String, year: String) async -> [(code: String, slug: String)] {
         let key = filmKey(name: name, year: year) + "@" + fromCode
@@ -575,12 +731,19 @@ enum Providers {
         let box = AltSearchBox()
         let search = Task {
             var found: [String: String] = [:]
-            for code in priority where code != fromCode {
-                if Task.isCancelled { return }
-                if let slug = await findSlug(code: code, name: name,
-                                             origin: origin, year: year) {
-                    found[code] = slug
-                    box.update(found)
+            await withTaskGroup(of: (String, String?).self) { group in
+                for code in priority where code != fromCode {
+                    group.addTask {
+                        let slug = await Providers.findSlug(
+                            code: code, name: name, origin: origin, year: year)
+                        return (code, slug)
+                    }
+                }
+                for await (code, slug) in group {
+                    if !Task.isCancelled, let slug {
+                        found[code] = slug
+                        box.update(found)
+                    }
                 }
             }
             if !Task.isCancelled { box.finish(found) }
@@ -706,10 +869,28 @@ enum Providers {
         // is converted through rung 2's bridge before moving
         // on, so a shallower carrier is preferred over a
         // deeper one.
+        //
+        // v2.0.8 (P2b): the alternatives' details are fetched
+        // CONCURRENTLY (one bounded task group — the
+        // alternative list is at most the other providers),
+        // then evaluated IN THE ORIGINAL ORDER with the exact
+        // win rules below, the TMDB bridge included. The
+        // fetch order changed; the decision order did not.
         if id.imdbId.isEmpty {
-            for alt in alternatives {
-                guard let d = try? await detail(alt.code, slug: alt.slug)
-                else { continue }
+            var fetched: [Detail?] = Array(repeating: nil, count: alternatives.count)
+            await withTaskGroup(of: (Int, Detail?).self) { group in
+                for (idx, alt) in alternatives.enumerated() {
+                    group.addTask {
+                        let d = try? await Providers.detail(alt.code, slug: alt.slug)
+                        return (idx, d)
+                    }
+                }
+                for await (idx, d) in group {
+                    fetched[idx] = d
+                }
+            }
+            for idx in alternatives.indices {
+                guard let d = fetched[idx] else { continue }
                 let am = d.movie
                 if !am.imdbId.isEmpty {
                     id.imdbId = am.imdbId

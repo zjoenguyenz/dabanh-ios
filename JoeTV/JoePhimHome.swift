@@ -35,12 +35,45 @@ struct JoePhimHome: View {
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var phim: PhimStore
     @Environment(\.joeTheme) private var theme
+    // v2.0.8 (Phase 1 — focus memory): these seven @FocusState
+    // values are the home's focus MEMORY and nothing else. The
+    // engine writes them as focus moves; the move handlers
+    // that used to write landings are retired, and nothing
+    // resets them: this file has no .onAppear, its two .task
+    // blocks write only `attempted` / catalogue state and
+    // heroDetail / heroBackdropURL, and the root presents the
+    // detail as a ZStack overlay over this still-living view —
+    // so the card the owner left is the card focus returns to
+    // when the detail closes. The .focused bindings below are
+    // what keep each card's identity stable for that return.
+    // ONE sanctioned write remains: the browse layer SWAPS
+    // this home out of the tree (it is not an overlay), so on
+    // browse close the browse-return observer in `body` writes
+    // the invoking browse entry's state back (F5 restoration —
+    // see browseReturnTarget).
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var focusedEntry: String?
     @FocusState private var headerFocused: Bool
     @FocusState private var heroPlayFocused: Bool
+    @FocusState private var heroBrowseFocused: Bool
     @FocusState private var bandFocused: String?
     @FocusState private var retryFocused: Bool
+    /// v2.0.8 (Phase 5/F5): which of this home's three browse
+    /// entries opened the browse layer — the hero's "Tất cả
+    /// phim" button, the slim header's "Tất cả phim" button, or
+    /// a source band's "Xem tất cả ›" (by rail scope). Recorded
+    /// in the entry's own action, consumed by the browse-close
+    /// observer in `body`, which restores focus to exactly
+    /// that entry. (Design F's slim-header entry was already
+    /// the .defaultFocus landing; the hero's entry and the
+    /// band entries were not — returning from browse landed on
+    /// Play / the header button instead of the invoking box.)
+    @State private var browseReturnTarget: BrowseReturnTarget?
+    private enum BrowseReturnTarget {
+        case heroBrowse
+        case header
+        case band(String)
+    }
     /// Team 4 fix-round minor: the state surfaces (G3/G5) are
     /// gated on "a load has been attempted" so they cannot flash
     /// for a frame at cold entry, before the first loadIfNeeded
@@ -122,6 +155,36 @@ struct JoePhimHome: View {
                 exitConfirm = true
             }
         }
+        // v2.0.8 (Phase 5/F5): browse-return focus restoration.
+        // The browse layer swaps this home out of the tree, so
+        // the persisting-@FocusState return the detail overlay
+        // gets for free does not happen here — without this
+        // write, focus re-enters at the home's .defaultFocus
+        // (the hero's Play button, or the slim header's browse
+        // button), not at the entry that opened browse. On the
+        // true→false transition, restore focus to the recorded
+        // invoking entry (browseReturnTarget). The guards keep
+        // the write honest: it fires only when the home is
+        // actually coming back on screen (Phim section current,
+        // search not open) — a browse closed as a side effect
+        // of leaving the section restores nothing. This is a
+        // restoration write on layer close, not a landing
+        // write on appear; it changes no structure (law D4).
+        .onChange(of: nav.browseOpen) { wasOpen, isOpen in
+            guard wasOpen, !isOpen else { return }
+            let target = browseReturnTarget
+            browseReturnTarget = nil
+            guard let target, nav.section == .phim,
+                  !nav.searchOpen else { return }
+            switch target {
+            case .heroBrowse:
+                heroBrowseFocused = true
+            case .header:
+                headerFocused = true
+            case .band(let scope):
+                bandFocused = scope
+            }
+        }
         .alert("Thoát Joe TV?", isPresented: $exitConfirm) {
             Button("Thoát", role: .destructive) {
                 exitConfirm = false
@@ -196,13 +259,18 @@ struct JoePhimHome: View {
                 }
             }
         }
-        // CONVERGENCE (Team 7 D4, 2026-11-15): routing between
-        // the header/hero and the rails is geometric, except the
-        // first rail's exact arithmetic, which survives as an
-        // ALWAYS-installed .onMoveCommand on the first rail's own
-        // cards (see handleFirstRailMove) — per-element, and its
-        // attachment follows catalogue DATA (which rail is first),
-        // never focus state.
+        // v2.0.8 (Phase 1 — navigation freedom): routing between
+        // the header/hero and the rails is FULLY geometric. The
+        // first rail's arithmetic .onMoveCommand handler
+        // (handleFirstRailMove) is RETIRED: an attached handler
+        // owns every direction and swallows the directions it
+        // does not declare, which is what trapped movement on a
+        // single axis. Every rail is its own .focusSection()
+        // (the shared Rail view), so the focus engine's
+        // geometric search over the declared sections owns all
+        // movement here — the deeper rails' long-standing shape
+        // (see the focus-memory note at the @FocusState block),
+        // now the whole home's shape.
     }
 
     // MARK: - Rail specs (single source of truth for order)
@@ -372,12 +440,20 @@ struct JoePhimHome: View {
                         }
                         .joeCardButton()
                         Button {
+                            browseReturnTarget = .heroBrowse
                             nav.browseOpen = true
                         } label: {
                             JoeSecondaryLabel(title: "Tất cả phim",
                                               systemImage: "square.grid.2x2")
                         }
                         .joeCardButton()
+                        // v2.0.8 (Phase 5/F5): bound so the
+                        // browse-close observer can restore focus
+                        // to THIS button — the hero's .defaultFocus
+                        // stays on Play (the section entry), which
+                        // is exactly why the return needed its own
+                        // restoration path.
+                        .focused($heroBrowseFocused)
                     }
                     .padding(.top, 26)
                 }
@@ -390,12 +466,15 @@ struct JoePhimHome: View {
                 .frame(maxWidth: 1000, alignment: .leading)
             }
             .frame(height: 668)
-            // v2.0.5 (N1/N2): the hero's play button is this
-            // section's DECLARED top element while a hero is
-            // on screen — the landing the pill row's DOWN
-            // resigns focus to, and the section's entry when
-            // focus re-resolves into the home. Static
-            // declaration, the JoeSearchView shape.
+            // v2.0.5 (N1/N2), v2.0.8: the hero's play button is
+            // this section's DECLARED top element while a hero
+            // is on screen — the content section's entry landing
+            // when focus moves DOWN from the pill row (the
+            // engine resolves that move between the two focus
+            // sections; since v2.0.8 nothing resigns focus to
+            // force it) and the section's entry when focus
+            // re-resolves into the home. Static declaration,
+            // the JoeSearchView shape.
             .defaultFocus($heroPlayFocused, true)
             // UI-6 D-2: fetch the featured film's detail for
             // the synopsis (fail-soft — a failed fetch simply
@@ -411,17 +490,49 @@ struct JoePhimHome: View {
             // (JoeMovieDetail's TMDB task). Fail-soft end to
             // end: no key, no id and no match simply leave the
             // hero on its provider-art stages.
+            //
+            // v2.0.8 (S-A4 parallelised): fetchInfo's inputs
+            // (tmdbId + tmdbType) are carried by the featured
+            // LIST record itself, so when the list item carries
+            // an id the TMDB call no longer queues behind the
+            // provider detail fetch — both start together
+            // (async let) and the backdrop waits only for the
+            // slower of the two. What PUBLISHES is unchanged:
+            // heroDetail still lands the moment the detail
+            // returns (before any TMDB wait), and the backdrop
+            // is still decided by the serial rule — the
+            // authoritative record is the detail's movie when
+            // the detail landed, the list item behind it. The
+            // early fetchInfo result is used ONLY when its
+            // inputs are exactly the authoritative record's;
+            // when the detail supplies a different id (or the
+            // list item carried none and only the detail has
+            // one), fetchInfo runs then with the authoritative
+            // inputs, as before. searchBackdrop stays exactly
+            // where it was: conditional on fetchInfo yielding
+            // no backdrop, with the authoritative record's
+            // name/origin/year.
             .task(id: featured.id) {
                 heroDetail = nil
                 heroBackdropURL = nil
-                heroDetail = try? await Providers.detail(
+                async let detailFetch = Providers.detail(
                     featured.provider, slug: featured.slug)
+                async let earlyInfo = TMDBClient.fetchInfo(
+                    tmdbId: featured.tmdbId, type: featured.tmdbType)
+                heroDetail = try? await detailFetch
                 guard !TMDBClient.apiKey.isEmpty else { return }
                 let m = heroDetail?.movie ?? featured
                 var backdrop = ""
                 if !m.tmdbId.isEmpty {
-                    backdrop = await TMDBClient.fetchInfo(
-                        tmdbId: m.tmdbId, type: m.tmdbType)?.backdropURL ?? ""
+                    if m.tmdbId == featured.tmdbId,
+                       m.tmdbType == featured.tmdbType {
+                        if let info = await earlyInfo {
+                            backdrop = info.backdropURL
+                        }
+                    } else {
+                        backdrop = await TMDBClient.fetchInfo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)?.backdropURL ?? ""
+                    }
                 }
                 if backdrop.isEmpty {
                     backdrop = await TMDBClient.searchBackdrop(
@@ -492,20 +603,22 @@ struct JoePhimHome: View {
     // MARK: - Design F header + source bands
 
     /// F's slim header (the band stack carries the screen; the
-    /// header keeps the "Tất cả phim" browse entry and the
-    /// first rail's UP landing). Also design A's fallback when
-    /// no catalogue film exists yet to feature.
+    /// header keeps the "Tất cả phim" browse entry). Also
+    /// design A's fallback when no catalogue film exists yet
+    /// to feature.
     ///
     /// UI-6 defect D-16 — DECLARED RETENTION (UI-6's fix text
     /// offers "remove or declare"): this header is F's ONLY
-    /// focusable element above the owner rails. The first-rail
-    /// move handler's UP branch lands on its browse button
-    /// (headerFocused), and from there the pills are one
-    /// geometric UP away. Removing it would strand the
-    /// UP-to-pills chain whenever Continue Watching or
-    /// Favourites is on screen (the handler consumes the press
-    /// and no element above the entry rails would claim the
-    /// focus write). It stays, declared, in both roles.
+    /// focusable element above the owner rails. UP from the
+    /// first rail lands on its browse button geometrically —
+    /// v2.0.8 retired the first-rail move handler whose UP
+    /// branch used to write that landing (headerFocused); the
+    /// button's .focused binding and its .defaultFocus entry
+    /// declaration below are what remain, and they are enough:
+    /// from the button the pills are one geometric UP away.
+    /// Removing the header would leave nothing above the
+    /// entry rails for that UP to land on. It stays, declared,
+    /// in both roles.
     private var slimHeader: some View {
         HStack(alignment: .center, spacing: 28) {
             VStack(alignment: .leading, spacing: 6) {
@@ -518,6 +631,7 @@ struct JoePhimHome: View {
             }
             Spacer()
             Button {
+                browseReturnTarget = .header
                 nav.browseOpen = true
             } label: {
                 JoeSecondaryLabel(title: "Tất cả phim", systemImage: "square.grid.2x2")
@@ -555,6 +669,7 @@ struct JoePhimHome: View {
                 .lineLimit(1)
             Spacer()
             Button {
+                browseReturnTarget = .band(scope)
                 nav.browseOpen = true
             } label: {
                 Text("Xem tất cả ›")
@@ -566,15 +681,19 @@ struct JoePhimHome: View {
             }
             .joeCardButton()
             .focused($bandFocused, equals: scope)
-            // v2.0.5 (N1, pair c): the band button sits at the
-            // FAR RIGHT, its rail's cards at the far left — the
-            // cross-column DOWN/UP pair the beam dropped.
-            // Declared landings both ways (bandMove); LEFT/
-            // RIGHT are declared no-ops (the button is the
-            // band row's only focusable element).
-            .joeBoundaryMove(
-                up: { bandMove(.up, scope: scope) },
-                down: { bandMove(.down, scope: scope) })
+            // v2.0.8 (Phase 1): NO move handler on this button.
+            // The v2.0.5 bandMove handler existed because the
+            // button sits at the FAR RIGHT with its rail's cards
+            // at the far left — the cross-column DOWN/UP pair
+            // the beam was seen to drop — but the handler owned
+            // every direction and made LEFT/RIGHT declared
+            // no-ops (the band row's only focusable element
+            // became a trap). Movement to and from the band is
+            // now the focus engine's geometric search: the rail
+            // below is its own .focusSection() (the shared Rail
+            // view), so DOWN/UP cross between the band row and
+            // the rail by geometry, like every other region
+            // pair in the app.
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
@@ -685,165 +804,27 @@ struct JoePhimHome: View {
             .prefix(WatchStore.railCap))
     }
 
-    // MARK: - Focus traversal (first-rail routing)
+    // MARK: - Focus memory (v2.0.8, Phase 1)
 
-    /// One focusable card in a rail, whichever FocusState owns it.
-    private enum RailItem: Equatable {
-        case entry(String)
-        case movie(Movie.ID)
-    }
-
-    /// Every rail in on-screen order, empty rails skipped — the
-    /// first element is the section's first rail (the
-    /// Continue-Watching entry rail when non-empty, else the
-    /// first movie rail). Derived from the same railSpecs the
-    /// body renders, so the two can never drift apart.
-    private var phimRails: [[RailItem]] {
-        var rails: [[RailItem]] = []
-        if !movieProgress.isEmpty {
-            rails.append(movieProgress.map { .entry("cw|" + $0.key) })
-        }
-        if !movieFavorites.isEmpty {
-            rails.append(movieFavorites.map { .entry("fav|" + $0.key) })
-        }
-        // F4: every movie focus key is "<railKey>|<movie.id>" —
-        // the same film in three rails is three distinct focus
-        // targets, so exactly one card can show focus (C-3).
-        for spec in railSpecs where !spec.movies.isEmpty {
-            rails.append(spec.movies.map { .movie(spec.scope + "|" + $0.id) })
-        }
-        return rails
-    }
-
-    private var currentRailItem: RailItem? {
-        if let focusedEntry { return .entry(focusedEntry) }
-        if let focusedMovie { return .movie(focusedMovie) }
-        return nil
-    }
-
-    /// Non-nil only while focus sits in the FIRST rail — the
-    /// cards of that rail carry the always-installed
-    /// .onMoveCommand whose handler (handleFirstRailMove)
-    /// reads this.
-    private var firstRailFocusIndex: Int? {
-        guard let item = currentRailItem,
-              let first = phimRails.first,
-              let idx = first.firstIndex(of: item) else { return nil }
-        return idx
-    }
-
-    /// The scope of the first CATALOGUE rail on screen, or nil
-    /// when an entry rail (Continue Watching / Favourites)
-    /// leads. Mirrors the body's rail order exactly; movieRail
-    /// compares its own scope against this to decide whether
-    /// its cards carry the first-rail move handler. This is a
-    /// pure function of catalogue data — the handler attachment
-    /// changes only when the DATA changes (a rail landing),
-    /// never when focus moves.
-    private var firstRailScope: String? {
-        if !movieProgress.isEmpty || !movieFavorites.isEmpty { return nil }
-        return railSpecs.first { !$0.movies.isEmpty }?.scope
-    }
-
-    private func setRailFocus(_ item: RailItem) {
-        switch item {
-        case .entry(let key):
-            focusedMovie = nil
-            focusedEntry = key
-        case .movie(let id):
-            focusedEntry = nil
-            focusedMovie = id
-        }
-    }
-
-    // CONVERGENCE (2026-11-15): the header and Retry boundary
-    // handlers are geometric on this layout: header/hero UP →
-    // the pills (the row directly above), DOWN → the first
-    // rail's first card, or — in the error state — the Retry
-    // button, the only focusable element below the header.
-    // What geometry does NOT reproduce is the first rail's
-    // exact arithmetic, kept below.
-
-    /// First-rail boundary: UP to the hero's play button
-    /// (design A, when a hero is on screen) or the header's
-    /// browse button (design F / A fallback), LEFT/RIGHT
-    /// arithmetic neighbours inside the rail (no-op at its
-    /// ends), DOWN to the same-index card (clamped) in the
-    /// next rail; with a single rail, DOWN lands on the error
-    /// surface's Retry when one is showing (Scope-3), else a
-    /// no-op. Installed per-card on the first rail's cards
-    /// only (the handler is unconditional; it reads the
-    /// CURRENT focus index when a press arrives). Deeper rails
-    /// carry no handler — the focus engine's geometry handles
-    /// them.
-    private func handleFirstRailMove(_ dir: MoveCommandDirection) {
-        guard let idx = firstRailFocusIndex,
-              let first = phimRails.first else { return }
-        if dir == .up {
-            if theme.id == .billboard && heroMovie != nil {
-                heroPlayFocused = true
-            } else {
-                headerFocused = true
-            }
-        } else if dir == .left {
-            if idx > 0 { setRailFocus(first[idx - 1]) }
-        } else if dir == .right {
-            if idx < first.count - 1 { setRailFocus(first[idx + 1]) }
-        } else if dir == .down {
-            if phimRails.count > 1 {
-                let next = phimRails[1]
-                setRailFocus(next[min(idx, next.count - 1)])
-            } else if showPhimError {
-                // Scope-3 residual (Team 4 re-gate): with a
-                // single owner rail (CW/favourites) and a dead
-                // catalogue, the error surface below is the only
-                // thing DOWN can reach — land on its Retry
-                // instead of consuming the press as a no-op.
-                retryFocused = true
-            }
-            // else: defined no-op (no next rail, no error
-            // surface — nothing below the first rail).
-        }
-    }
-
-    /// Band-button boundary (v2.0.5, N1 pair c): DOWN lands
-    /// on the band's OWN rail's first card; UP lands on the
-    /// last card of the rail above the band, or — when the
-    /// band's rail is the first rail on screen — on the
-    /// header's browse button (design F always renders the
-    /// slim header above its bands). All targets are this
-    /// view's own focus state, the first-rail handler's
-    /// in-view shape.
-    private func bandMove(_ direction: MoveCommandDirection, scope: String) {
-        switch direction {
-        case .down:
-            if let spec = railSpecs.first(where: { $0.scope == scope }),
-               let first = spec.movies.first {
-                setRailFocus(.movie(scope + "|" + first.id))
-            }
-        case .up:
-            let rails = phimRails
-            if let idx = rails.firstIndex(where: { rail in
-                   if case .movie(let id) = rail.first {
-                       return id.hasPrefix(scope + "|")
-                   }
-                   return false
-               }), idx > 0, let last = rails[idx - 1].last {
-                setRailFocus(last)
-            } else {
-                headerFocused = true
-            }
-        default:
-            break
-        }
-    }
+    // The first-rail routing apparatus that lived here —
+    // RailItem, phimRails, firstRailScope, setRailFocus,
+    // handleFirstRailMove and bandMove — is DELETED. It existed
+    // only to serve the per-card .onMoveCommand handlers and
+    // the band header's .joeBoundaryMove, and an attached move
+    // handler owns every direction: the presses it did not
+    // declare were no-ops instead of geometric moves (the
+    // single-axis trap). All rail cards are plain buttons now;
+    // movement is the focus engine's geometric search over the
+    // rails' .focusSection()s, and the @FocusState declarations
+    // at the top of this view serve purely as focus memory for
+    // the return trip.
 
     @ViewBuilder
     private var cwRail: some View {
         if !movieProgress.isEmpty {
             Rail(title: "▶ Đang xem dở") {
                 ForEach(movieProgress) { entry in
-                    let card = Button { nav.movie = MovieRoute(
+                    Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year, preselectEp: entry.ep) } label: {
@@ -865,10 +846,11 @@ struct JoePhimHome: View {
                             Text("Xoá khỏi Đang xem dở")
                         }
                     }
-                    // This rail IS the first rail whenever it
-                    // renders, so its cards always carry the
-                    // first-rail move handler.
-                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
+                    // v2.0.8 (Phase 1): plain button — no move
+                    // handler. This rail is the first rail
+                    // whenever it renders; its cards used to carry
+                    // the first-rail .onMoveCommand, now retired
+                    // (see the focus-memory note above).
                 }
             }
         }
@@ -879,7 +861,7 @@ struct JoePhimHome: View {
         if !movieFavorites.isEmpty {
             Rail(title: "♥ Yêu thích") {
                 ForEach(movieFavorites) { entry in
-                    let card = Button { nav.movie = MovieRoute(
+                    Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
                         year: entry.year) } label: {
@@ -899,13 +881,11 @@ struct JoePhimHome: View {
                             Text("Bỏ yêu thích")
                         }
                     }
-                    // First rail only when Continue Watching is
-                    // empty (it precedes this rail when present).
-                    if movieProgress.isEmpty {
-                        card.onMoveCommand { dir in handleFirstRailMove(dir) }
-                    } else {
-                        card
-                    }
+                    // v2.0.8 (Phase 1): plain button — no move
+                    // handler (the conditional first-rail handler
+                    // this spot carried when Continue Watching was
+                    // empty is retired; see the focus-memory note
+                    // above).
                 }
             }
         }
@@ -917,7 +897,7 @@ struct JoePhimHome: View {
                            scope: String) -> some View {
         Rail(title: title) {
             ForEach(movies) { movie in
-                let card = Button { nav.movie = MovieRoute(
+                Button { nav.movie = MovieRoute(
                     provider: movie.provider, slug: movie.slug,
                     name: movie.name, poster: movie.poster, year: movie.year) } label: {
                     PosterCard(
@@ -932,15 +912,11 @@ struct JoePhimHome: View {
                 }
                 .joeCardButton()
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
-                // Only the FIRST catalogue rail's cards carry
-                // the first-rail move handler (see
-                // firstRailScope); the attachment follows the
-                // catalogue data, never the focus state.
-                if scope == firstRailScope {
-                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
-                } else {
-                    card
-                }
+                // v2.0.8 (Phase 1): plain button — no move
+                // handler on ANY catalogue rail's cards (the
+                // first rail's used to carry the retired
+                // first-rail handler; see the focus-memory note
+                // above).
             }
         }
     }
@@ -1056,3 +1032,8 @@ func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
 // JoeTVApp.swift. The header/Retry/first-rail traps it powered
 // are replaced by geometric focus movement plus the per-card
 // always-installed first-rail handler above.
+// v2.0.8 ADDENDUM (Phase 1): that first-rail handler is now
+// ALSO deleted, with the band header's .joeBoundaryMove —
+// this file carries no .onMoveCommand and no .joeBoundaryMove
+// at all; movement is geometric throughout (see the
+// focus-memory note at the @FocusState block).

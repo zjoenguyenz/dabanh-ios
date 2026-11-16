@@ -1,4 +1,5 @@
 import SwiftUI
+import Darwin
 
 /// Joe TV for Apple TV — one app for live TV, the aggregated Phim
 /// library (KKPhim + Film4K + VSMOV + Tủ Phim) and the debrid
@@ -17,7 +18,26 @@ struct JoeTVApp: App {
         // Posters come from slow overseas CDNs; give the shared
         // URL cache real room so rails stop repainting blank art
         // on every scroll and section switch.
-        URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024,
+        //
+        // v2.0.8 (Phase 7 — cache budget): the memory capacity
+        // is no longer a flat 64 MB picked without reference to
+        // the box. The floor box (owner decision) is the Apple
+        // TV 4K 1st gen (A10X, 3 GB RAM). Apple publishes NO
+        // per-app memory ceiling for that box — the real ceiling
+        // is device-measured-later — so the budget is derived
+        // at runtime from what the OS says this process may
+        // still use: one thirty-second of
+        // os_proc_available_memory(), clamped to
+        // [16 MB, 64 MB] (the old flat value survives as the
+        // ceiling, never exceeded; the 16 MB floor keeps the
+        // cache useful even if the probe reads low). The disk
+        // capacity stays 512 MB: the tvOS disk cache is
+        // purgeable under pressure, so it holds no resident
+        // memory and needs no derivation.
+        let availableMemory = Int(os_proc_available_memory())
+        let memoryCapacity = min(64 * 1024 * 1024,
+                                 max(16 * 1024 * 1024, availableMemory / 32))
+        URLCache.shared = URLCache(memoryCapacity: memoryCapacity,
                                    diskCapacity: 512 * 1024 * 1024,
                                    diskPath: "joetv-images")
         // CONVERGENCE (Team 7 D7, 2026-11-15): the proxy is NOT
@@ -116,6 +136,16 @@ final class JoeNavigator: ObservableObject {
     // blocks, the grids). The hub stays removed — no central
     // focus target, no nonce, and still no structure anywhere
     // depends on a focus value (law D4).
+    // v2.0.8 (Phase 1) SUPERSESSION for THIS shell and the Phim
+    // home: the pill row's arithmetic handlers are RETIRED, as
+    // are the Phim home's first-rail and band handlers — an
+    // attached .onMoveCommand owns every direction and
+    // swallows the rest, which is the single-axis trap itself.
+    // Routing here is geometric over the declared
+    // .focusSection()s, with .defaultFocus kept strictly as an
+    // ENTRY policy (the pill row's entry is the pill the user
+    // left — see the pillFocus note in JoeRootView). The hub
+    // stays removed and law D4 stands unchanged.
 
     /// Close the topmost layer; returns false when nothing is
     /// open (the caller then lets the system have the press).
@@ -187,17 +217,41 @@ struct JoeRootView: View {
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
     @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
-    /// v2.0.5 (N2): the pill row's own focus identity — the
-    /// five pills (four sections + Tìm phim) as one declared
-    /// order, so LEFT/RIGHT can chain arithmetically across
-    /// the Spacer void in front of Tìm phim (error 6: the
-    /// void defeated the focus engine's beam and stranded
-    /// the owner on that pill). A plain @FocusState on the
-    /// row, written only by the pills' own always-installed
-    /// move handler and by the engine itself — the grids'
-    /// device-proven shape, NOT the removed v1.5 hub (no
-    /// other view reads it, no structure depends on it).
+    /// The pill row's focus identity — the five pills (four
+    /// sections + Tìm phim) share this one @FocusState, written
+    /// ONLY by the focus engine itself.
+    ///
+    /// v2.0.5 (N2) history: this state also fed an arithmetic
+    /// move handler (pillMove, installed on every pill via
+    /// .joeBoundaryMove) that chained LEFT/RIGHT over a
+    /// declared order across the Spacer void in front of Tìm
+    /// phim, and whose DOWN branch RESIGNED this state
+    /// (pillFocus = nil) and trusted the content section's
+    /// .defaultFocus to land somewhere — the resign-and-pray
+    /// trap (audit T-C4).
+    ///
+    /// v2.0.8 (Phase 1): the handler is RETIRED and this state's
+    /// job is now focus MEMORY. LEFT/RIGHT along the row and
+    /// DOWN into the content are the engine's geometric moves
+    /// between the bar's .focusSection() and the content's
+    /// .focusSection(). Because a @FocusState reads nil while
+    /// focus sits outside its bindings, the memory itself is
+    /// kept in `lastFocusedPill` below (recorded by an
+    /// always-installed .onChange observer — it changes no
+    /// structure, so law D4 is untouched), and the top bar
+    /// declares its entry landing with
+    /// .defaultFocus($pillFocus, lastFocusedPill ??
+    /// nav.section.rawValue): focus returning UP into the bar
+    /// lands on the pill the user LEFT — or, before any pill
+    /// was ever focused, on the CURRENT section's pill — never
+    /// a fixed first pill.
     @FocusState private var pillFocus: String?
+    /// v2.0.8 (Phase 1): the last pill that actually held
+    /// focus — the pill row's focus memory (see the pillFocus
+    /// note above). Written only by the .onChange observer in
+    /// `body`; read only by the top bar's .defaultFocus entry
+    /// declaration. No view's structure depends on it.
+    @State private var lastFocusedPill: String?
 
     private var theme: ThemeTokens {
         ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .sourceBoard)
@@ -281,6 +335,15 @@ struct JoeRootView: View {
             if nav.searchOpen { nav.searchOpen = false }
             if nav.browseOpen { nav.browseOpen = false }
         }
+        .onChange(of: pillFocus) { _, focused in
+            // v2.0.8 (Phase 1): the pill row's focus-memory
+            // recorder (see the pillFocus note). Only landings
+            // are recorded — the nil the state reads while
+            // focus sits in the content must not erase the
+            // memory. This observer changes no structure; it
+            // feeds only the top bar's .defaultFocus value.
+            if let focused { lastFocusedPill = focused }
+        }
         // v2.0.5 (N2 item 3 + N3): the ROOT exit handler — the
         // shell state machine, always installed. Exit commands
         // travel to the NEAREST handler above the focused
@@ -324,22 +387,27 @@ struct JoeRootView: View {
         }
         .environment(\.joeTheme, theme)
         .environmentObject(nav)
-        // CONSTRUCTION LAW (v2.0.5, N4 — supersedes the v2.0.0
-        // absolute ban that stood here): NO .scaleEffect
-        // anywhere in the target, and the system card focus
-        // effect is disabled in exactly ONE place — centrally,
-        // inside .joeCardButton() (JoeTheme.swift), the only
-        // button construction the target uses. The v2.0.0 ban
-        // on .focusEffectDisabled rested on the 1.9.2 slab
-        // defect, whose mechanism was a BARE-TEXT label leaving
-        // the system platter exposed; that precondition no
-        // longer holds — every label in the target paints one
-        // full shape and draws its own JoeFocusRing — so the
-        // platter is now pure harm (owner errors 1+2: its
-        // scale + outset shadow stacked over the app ring,
-        // clipped card text and shoved chips off their rows).
+        // CONSTRUCTION LAW (v2.0.8 — supersedes the v2.0.5 N4
+        // text that stood here): NO .scaleEffect anywhere in
+        // the target. Buttons are built by ONE shared
+        // construction (.joeCardButton() in JoeTheme.swift),
+        // which installs a custom ButtonStyle defined centrally
+        // in JoeTheme.swift — the system .card style and its
+        // platter are GONE, so no system focus treatment exists
+        // to stack over the app's drawn rings. The
+        // .focusEffectDisabled disablement lives in the shared
+        // constructions and nowhere else: inside that shared
+        // button modifier AND inside the shared field chrome
+        // (both in JoeTheme.swift), so a text field's drawn
+        // outset ring is likewise the sole treatment on fields.
         // Per-site .focusEffectDisabled remains banned: the
-        // disablement lives in the shared modifier or nowhere.
+        // disablement lives in the shared constructions or
+        // nowhere. (The v2.0.5 text claimed the disablement
+        // lived in exactly ONE place, .joeCardButton() alone,
+        // back when .card still supplied the button style —
+        // both halves of that sentence stopped being true in
+        // the v2.0.8 programme; do not let it mislead the next
+        // round.)
     }
 
     // The top row stays well under ~1,800pt wide on purpose
@@ -375,6 +443,12 @@ struct JoeRootView: View {
             // the content below it the other — pill ↔ section
             // movement is section-to-section navigation.
             .focusSection()
+            // v2.0.8 (Phase 1): the bar's ENTRY landing — the
+            // pill the user left (lastFocusedPill), else the
+            // current section's pill; never a fixed first pill.
+            // An entry policy only: it steers no directional
+            // movement (the sections do that).
+            .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
         } else {
             HStack(alignment: .center, spacing: 20) {
                 wordmark
@@ -387,11 +461,10 @@ struct JoeRootView: View {
                 }
                 .joeCardButton()
                 .focused($pillFocus, equals: "search")
-                .joeBoundaryMove(
-                    up: { pillMove(.up, from: "search") },
-                    down: { pillMove(.down, from: "search") },
-                    left: { pillMove(.left, from: "search") },
-                    right: { pillMove(.right, from: "search") })
+                // v2.0.8 (Phase 1): plain button — the pillMove
+                // handler that owned this pill's four directions
+                // (and resigned focus on DOWN) is retired; see
+                // the pillFocus note.
                 Text("Joe TV v\(Self.appVersion)")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
@@ -400,63 +473,27 @@ struct JoeRootView: View {
             }
             .frame(height: 76)
             .focusSection()
+            // v2.0.8 (Phase 1): the bar's ENTRY landing — the
+            // pill the user left (lastFocusedPill), else the
+            // current section's pill; never a fixed first pill.
+            // An entry policy only: it steers no directional
+            // movement (the sections do that).
+            .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
         }
     }
 
-    /// The pill row's declared order, left to right, in BOTH
-    /// bar variants (design D renders the same five controls
-    /// as text links at the bar's right; the order is the
-    /// same). LEFT/RIGHT chain arithmetically over this list.
-    private static let pillOrder = ["tv", "phim", "torrent",
-                                    "settings", "search"]
-
-    /// The pill row's move handler (v2.0.5, N2 — error 6).
-    /// Installed on every pill via the shared joeBoundaryMove
-    /// construction, so it owns every direction:
-    ///  - LEFT/RIGHT: arithmetic over pillOrder. This is the
-    ///    void crossing: LEFT from Tìm phim and RIGHT from
-    ///    Cài đặt step over the Spacer gap by declaration,
-    ///    where the engine's beam dropped both presses.
-    ///  - UP: a defined no-op — the bar is the screen's top
-    ///    edge; nothing exists above it.
-    ///  - DOWN: the declared landing into the active section.
-    ///    The handler cannot write the section's own focus
-    ///    state (each section owns its @FocusState), so it
-    ///    RESIGNS the row's focus instead: with the press
-    ///    answered, the engine re-resolves focus into the
-    ///    content focus section, whose active section root
-    ///    declares its top element via .defaultFocus
-    ///    (JoeTVSection's first group chip, JoePhimHome's
-    ///    hero play / header browse button, JoeTorrentHome's
-    ///    search field, JoeSettingsView's first theme chip,
-    ///    JoeSearchView's field while search is open) — that
-    ///    declaration is the landing. The reciprocal UP out
-    ///    of a section's top elements is the same section
-    ///    mechanism in reverse (the bar is the neighbouring
-    ///    focus section), served by each section's own UP
-    ///    handlers where they exist (first-rail → header,
-    ///    grid → chips) and by section-guided geometry for
-    ///    the last hop, which is a full-width row directly
-    ///    above the content — the reliable geometric case.
-    private func pillMove(_ direction: MoveCommandDirection, from id: String) {
-        switch direction {
-        case .left:
-            if let i = Self.pillOrder.firstIndex(of: id), i > 0 {
-                pillFocus = Self.pillOrder[i - 1]
-            }
-        case .right:
-            if let i = Self.pillOrder.firstIndex(of: id),
-               i + 1 < Self.pillOrder.count {
-                pillFocus = Self.pillOrder[i + 1]
-            }
-        case .down:
-            pillFocus = nil
-        case .up:
-            break
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): pillOrder and pillMove — the pill row's
+    // declared order and its arithmetic move handler — are
+    // DELETED from here. The handler owned every direction on
+    // every pill (LEFT/RIGHT arithmetic over the order, UP a
+    // declared no-op, DOWN a resign of pillFocus that trusted
+    // the content's .defaultFocus to land somewhere — the
+    // resign-and-pray trap, audit T-C4). The pills are plain
+    // buttons in the bar's .focusSection() now: the engine's
+    // geometric search moves along the row and down into the
+    // content's .focusSection(), and the bar's entry landing
+    // is declared by .defaultFocus on the bar itself (see the
+    // pillFocus note in this view).
 
     /// Open the Phim search layer from any section. When the
     /// section changes in the same action, the search flag is
@@ -479,11 +516,8 @@ struct JoeRootView: View {
         }
         .joeCardButton()
         .focused($pillFocus, equals: id)
-        .joeBoundaryMove(
-            up: { pillMove(.up, from: id) },
-            down: { pillMove(.down, from: id) },
-            left: { pillMove(.left, from: id) },
-            right: { pillMove(.right, from: id) })
+        // v2.0.8 (Phase 1): plain button — no move handler (see
+        // the pillFocus note).
     }
 
     /// v1.8: the real Joe TV wordmark (the approved master, the
@@ -519,19 +553,22 @@ struct JoeRootView: View {
     /// on focus.
     /// v2.0.0 (UI-5): the label's look is theme-tokenised; no
     /// scale on focus (construction law).
-    /// v2.0.5 (N2/N4): two measured changes on top of that
-    /// base. The style is .joeCardButton() — the card style
-    /// with the system focus effect disabled centrally (the
-    /// label paints the full capsule and draws the app's ring,
-    /// so the platter is never needed and never shows). And
-    /// the row carries a plain @FocusState + an always-
-    /// installed arithmetic move handler after all: pure
-    /// geometry device-failed on this shell (error 6 — the
-    /// Tìm phim void and the Settings DOWN dead end), and the
-    /// handler is the grids' own device-proven shape (a local
-    /// binding written only by the row's handler and the
-    /// engine; nothing's structure depends on it). See
-    /// pillMove for the four declared exits.
+    /// v2.0.5 (N2/N4): the style is .joeCardButton() (v2.0.8:
+    /// the custom ButtonStyle installed centrally by that
+    /// construction — see the CONSTRUCTION LAW in `body`). The
+    /// row also carried a plain @FocusState + an always-
+    /// installed arithmetic move handler (pillMove): pure
+    /// geometry had device-failed on this shell (error 6 — the
+    /// Tìm phim void and the Settings DOWN dead end).
+    /// v2.0.8 (Phase 1): that handler is RETIRED — it owned
+    /// every direction on every pill and its DOWN branch
+    /// resigned focus (the T-C4 trap). The pills are plain
+    /// Buttons in the bar's .focusSection(); movement along
+    /// the row and into the content is the engine's geometric
+    /// search between the two sections, and @FocusState
+    /// pillFocus remains only as the focus-memory record
+    /// behind the bar's .defaultFocus entry declaration (see
+    /// the pillFocus note).
     private func sectionPill(_ s: JoeNavigator.Section) -> some View {
         Button {
             nav.section = s
@@ -540,11 +577,8 @@ struct JoeRootView: View {
         }
         .joeCardButton()
         .focused($pillFocus, equals: s.rawValue)
-        .joeBoundaryMove(
-            up: { pillMove(.up, from: s.rawValue) },
-            down: { pillMove(.down, from: s.rawValue) },
-            left: { pillMove(.left, from: s.rawValue) },
-            right: { pillMove(.right, from: s.rawValue) })
+        // v2.0.8 (Phase 1): plain button — no move handler (see
+        // the pillFocus note).
     }
 
     @ViewBuilder
@@ -668,3 +702,10 @@ private struct TopLinkLabel: View {
 // handlers attached to the detail/search layers themselves.
 // Team 4 gate going forward: NO @FocusState-driven conditional
 // view modifier anywhere in this target.
+// v2.0.8 ADDENDUM (Phase 1): the always-installed per-element
+// handlers this record preserved are retired on THIS file's
+// surface — the pill row's .joeBoundaryMove/pillMove is
+// deleted; the pills are plain buttons whose movement is
+// geometric between the bar's and the content's
+// .focusSection()s, with .defaultFocus as the bar's entry
+// policy only (see the pillFocus note in JoeRootView).

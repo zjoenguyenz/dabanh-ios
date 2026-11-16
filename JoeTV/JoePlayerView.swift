@@ -108,6 +108,41 @@ final class PlayDirector: ObservableObject {
     private var lastDurMs: Int64 = 0
     private var started = false
 
+    // v2.0.8 (Phase 3): ONE stored resolution task + ONE
+    // end-to-end deadline for the ladder+failover sequence.
+    // Every resolution spawn (start, candidate exhaustion,
+    // manual retry) stores its handle in `resolutionTask`, so
+    // the deadline watchdog can cancel the whole chain; the
+    // in-task chain itself (loadLadder ↔ failoverStep) runs
+    // as direct awaits inside that one task. The watchdog is
+    // a second stored task, armed when the session's first
+    // resolution starts and re-armed by a manual retry; it
+    // STANDS DOWN the moment the torrent substitution rung
+    // starts (see failoverStep) — the debrid resolve is never
+    // cancelled mid-flight, hedged, or retried.
+    private var resolutionTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
+    /// The one Play budget: 60 s from the first resolution
+    /// start to a playing candidate or the exhausted slate.
+    private static let resolutionDeadline: TimeInterval = 60
+    /// PerfLog once-per-session guards (Phase 3 marks).
+    private var ladderReadyMarked = false
+    private var firstFrameMarked = false
+
+    /// Race box for the hedged failover pair (Phase 3): the
+    /// refresh branch and the hop branch each publish their
+    /// ladder (nil = still running) and a done flag; the
+    /// failover poll reads them. Both branches run as tasks
+    /// on the main actor, so the box is only ever touched
+    /// between awaits — no lock needed.
+    private final class HedgeBox {
+        var refreshLadder: [PlayCandidate]?
+        var refreshDone = false
+        var hopIdentity: PlayIdentity?
+        var hopLadder: [PlayCandidate]?
+        var hopDone = false
+    }
+
     init(store: WatchStore,
          identity: PlayIdentity,
          resumeMs: Int64,
@@ -125,16 +160,57 @@ final class PlayDirector: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        Task { await loadLadder() }
+        armResolutionDeadline()
+        resolutionTask = Task { await loadLadder() }
+    }
+
+    /// Arm (or re-arm) the 60 s Play deadline. When it fires
+    /// with the phase still .resolving, the stored resolution
+    /// task is cancelled and the session lands on the
+    /// exhausted slate with a timeout note — a resolution
+    /// chain that outlives its budget is a dead slate with a
+    /// reason, never an endless spinner. Firing in any other
+    /// phase is a no-op (playback started, or the slate is
+    /// already up), and the torrent rung cancels the watchdog
+    /// outright when it starts.
+    private func armResolutionDeadline() {
+        // Coordinator ruling (v2.0.8 close-out, protecting
+        // the torrent-tab baseline): the deadline governs
+        // the Phim play chain — the sessions that carry a
+        // hop/fallback structure. A torrent-tab session has
+        // neither closure and its resolveLadder IS the
+        // debrid resolve, so no watchdog is armed for it
+        // and its behaviour stays exactly the pre-v2.0.8
+        // one (the debrid resolve is never cancelled).
+        guard hopIdentity != nil || fallbackCandidates != nil else { return }
+        deadlineTask?.cancel()
+        deadlineTask = Task {
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.resolutionDeadline * 1_000_000_000))
+            guard !Task.isCancelled, phase == .resolving else { return }
+            resolutionTask?.cancel()
+            lastFailure = "Quá 60 giây chưa tìm được nguồn phát"
+            phase = .exhausted
+        }
+    }
+
+    private func markLadderReadyIfFirst() {
+        guard !ladderReadyMarked else { return }
+        ladderReadyMarked = true
+        PerfLog.mark("play.ladderReady")
     }
 
     private func loadLadder() async {
         phase = .resolving
         let ladder = await resolveLadder(identity)
+        // A deadline-cancelled chain must not resurrect the
+        // session over the exhausted slate the watchdog set.
+        if Task.isCancelled { return }
         if ladder.isEmpty {
             await failoverStep()
             return
         }
+        markLadderReadyIfFirst()
         candidates = ladder
         candidateIndex = 0
         beginCandidate()
@@ -142,7 +218,7 @@ final class PlayDirector: ObservableObject {
 
     private func beginCandidate() {
         guard candidates.indices.contains(candidateIndex) else {
-            Task { await failoverStep() }
+            resolutionTask = Task { await failoverStep() }
             return
         }
         let c = candidates[candidateIndex]
@@ -171,35 +247,149 @@ final class PlayDirector: ObservableObject {
         if candidateIndex < candidates.count {
             beginCandidate()
         } else {
-            Task { await failoverStep() }
+            resolutionTask = Task { await failoverStep() }
         }
     }
 
-    /// Refresh once → hop once → substitution rung once →
-    /// exhausted. The first two steps mirror the Android player
-    /// exactly (PlayerActivity.beginFailoverStep); the rung is
-    /// the v1.9 owner-law extension behind them, reached from
-    /// every exhaustion path (an empty ladder, a failed item,
-    /// the stall watchdog advancing past the last candidate).
+    /// Failover: hedged refresh+hop → substitution rung once →
+    /// exhausted, all inside the one Play deadline (see the
+    /// stored-task/deadline note at the properties).
+    ///
+    /// v2.0.8 (Phase 3) design — read before touching:
+    /// • The first two rungs used to run strictly one after
+    ///   the other (refresh the whole chain, THEN one
+    ///   cross-provider hop), so a dead incumbent taxed the
+    ///   tap twice in series. They are now a HEDGED PAIR: on
+    ///   the first exhaustion, the refresh (resolveLadder for
+    ///   the current identity) and the hop (hopIdentity →
+    ///   resolveLadder under the new identity) run
+    ///   CONCURRENTLY, and the first NON-EMPTY candidate list
+    ///   wins — a refresh win leaves the identity unchanged, a
+    ///   hop win adopts the new identity and shows the
+    ///   existing "Đổi nguồn: …" notice; the loser is
+    ///   cancelled. Neither branch touches session state
+    ///   while racing (both publish into the HedgeBox); the
+    ///   winner is committed here, once.
+    /// • After the hedge resolves either way, BOTH `refreshed`
+    ///   and `hopped` count as consumed — a later exhaustion
+    ///   goes to the torrent rung, never back into the hedge.
+    /// • Sessions with no hop (the torrent section builds its
+    ///   director with hopIdentity nil) degrade to the classic
+    ///   refresh-only rung, byte-identical to the pre-hedge
+    ///   behaviour.
+    /// • The torrent substitution rung is NEVER hedged and
+    ///   keeps its exact position and behaviour; the deadline
+    ///   watchdog stands down the moment it starts, so the
+    ///   debrid resolve is never cancelled mid-flight.
     private func failoverStep() async {
-        if !refreshed {
-            refreshed = true
-            notice = "Đang tải lại nguồn…"
-            await loadLadder()
-            return
-        }
-        if !hopped, let hopIdentity {
-            hopped = true
-            notice = "Đang đổi nguồn…"
-            if let next = await hopIdentity(identity) {
-                identity = next
-                notice = "Đổi nguồn: \(Providers.displayName(next.entry.source))"
+        if Task.isCancelled { return }
+        guard let hopIdentity else {
+            // No hop exists for this session: refresh once,
+            // then the substitution rung / exhausted, exactly
+            // as before the hedge.
+            if !refreshed {
+                refreshed = true
+                notice = "Đang tải lại nguồn…"
                 await loadLadder()
                 return
             }
+            await torrentRungOrExhausted()
+            return
         }
+        if !refreshed || !hopped {
+            let doRefresh = !refreshed
+            let doHop = !hopped
+            refreshed = true
+            hopped = true
+            phase = .resolving
+            notice = "Đang tải lại nguồn…"
+            let origin = identity
+            let box = HedgeBox()
+            var refreshTask: Task<Void, Never>?
+            var hopTask: Task<Void, Never>?
+            if doRefresh {
+                refreshTask = Task {
+                    let ladder = await resolveLadder(origin)
+                    box.refreshLadder = ladder
+                    box.refreshDone = true
+                }
+            } else {
+                box.refreshLadder = []
+                box.refreshDone = true
+            }
+            if doHop {
+                hopTask = Task {
+                    if let next = await hopIdentity(origin) {
+                        let ladder = await resolveLadder(next)
+                        box.hopIdentity = next
+                        box.hopLadder = ladder
+                    }
+                    box.hopDone = true
+                }
+            } else {
+                box.hopDone = true
+            }
+            // Poll for the first non-empty ladder (the house
+            // race pattern — cf. the KK host race and the
+            // alternatives search box). Refresh is checked
+            // first within a tick: on a simultaneous landing
+            // the incumbent wins and the identity stays put.
+            var winner: (identity: PlayIdentity,
+                         ladder: [PlayCandidate], isHop: Bool)?
+            while winner == nil {
+                if let ladder = box.refreshLadder, !ladder.isEmpty {
+                    winner = (origin, ladder, false)
+                    break
+                }
+                if let ladder = box.hopLadder, !ladder.isEmpty,
+                   let next = box.hopIdentity {
+                    winner = (next, ladder, true)
+                    break
+                }
+                if box.refreshDone && box.hopDone { break }
+                if Task.isCancelled {
+                    refreshTask?.cancel()
+                    hopTask?.cancel()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            refreshTask?.cancel()
+            hopTask?.cancel()
+            if Task.isCancelled { return }
+            if let winner {
+                if winner.isHop {
+                    identity = winner.identity
+                    notice = "Đổi nguồn: \(Providers.displayName(winner.identity.entry.source))"
+                }
+                markLadderReadyIfFirst()
+                candidates = winner.ladder
+                candidateIndex = 0
+                beginCandidate()
+                return
+            }
+            // Both branches produced nothing: fall through to
+            // the torrent rung, as the serial ladder did after
+            // its hop came back empty.
+        }
+        await torrentRungOrExhausted()
+    }
+
+    /// The substitution rung (owner law, v1.9) and the
+    /// exhausted end state, shared by the hedged path and the
+    /// no-hop path. Reached from every exhaustion path (an
+    /// empty ladder, a failed item, the stall watchdog
+    /// advancing past the last candidate). The rung's own
+    /// behaviour is byte-identical to the pre-v2.0.8 inline
+    /// version; the one addition is the deadline stand-down
+    /// at its head.
+    private func torrentRungOrExhausted() async {
         if !fallbackTried, let fallbackCandidates {
             fallbackTried = true
+            // The deadline watchdog stands down NOW: the
+            // debrid resolve inside the rung is never
+            // cancelled mid-flight, hedged, or retried.
+            deadlineTask?.cancel()
             notice = "Đang tìm nguồn thay thế…"
             let extra = await fallbackCandidates(identity)
             if !extra.isEmpty {
@@ -217,6 +407,8 @@ final class PlayDirector: ObservableObject {
     /// failover bookkeeping and run the whole ladder again —
     /// sources that were down may have recovered, and the owner
     /// must never be stranded on a dead slate with only Menu.
+    /// v2.0.8: the retry also re-arms the Play deadline and
+    /// re-stores the resolution task, like start().
     func retryFromExhausted() {
         guard phase == .exhausted else { return }
         refreshed = false
@@ -225,7 +417,8 @@ final class PlayDirector: ObservableObject {
         seekApplied = false
         lastFailure = nil
         notice = "Đang thử lại…"
-        Task { await loadLadder() }
+        armResolutionDeadline()
+        resolutionTask = Task { await loadLadder() }
     }
 
     /// Item is ready: apply the resume seek once (the view's
@@ -246,6 +439,13 @@ final class PlayDirector: ObservableObject {
     /// and performs the seek itself. One rule, two engines —
     /// the >20 s / last-30 s window is identical.
     func itemReady(durationMs: Int64, seek: (Int64) -> Void) {
+        // Phase 3 mark: the session's first ready item, once
+        // per session, from this shared core so both engines
+        // (AVPlayer above, KSPlayer via durationMs) report it.
+        if !firstFrameMarked {
+            firstFrameMarked = true
+            PerfLog.mark("play.firstFrame")
+        }
         guard !seekApplied else { return }
         seekApplied = true
         // The Android rule, checked with the real duration in

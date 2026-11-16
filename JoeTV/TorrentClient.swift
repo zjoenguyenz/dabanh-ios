@@ -642,46 +642,91 @@ enum TorrentClient {
 /// against a server that would otherwise stream the file).
 /// Redirects are followed by the session's default policy;
 /// the delegate only observes the final response.
-private final class RedirectProbe: NSObject, URLSessionDataDelegate {
-    private var continuation: CheckedContinuation<URL?, Never>?
-    private var finalURL: URL?
+///
+/// v2.0.8 (P3f): ONE shared session is reused across all
+/// probes (pre-fix, every probe built a new ephemeral
+/// session, defeating connection reuse). The probe's
+/// semantics are unchanged — 8 s request/resource budgets,
+/// the same headers, the same cancel-on-headers behaviour.
+/// Because the session (and therefore its delegate) is now
+/// shared, no per-probe state lives on the delegate: each
+/// task's continuation and captured final URL are held in
+/// the delegate's registry keyed by taskIdentifier, and the
+/// shared session is NEVER invalidated (the per-probe
+/// invalidateAndCancel is gone — it would kill the pool).
+private final class RedirectProbe: NSObject {
+    /// The shared session's delegate: a registry of in-flight
+    /// probes keyed by taskIdentifier. It holds no state of
+    /// its own beyond that per-task registry.
+    private final class SessionDelegate: NSObject, URLSessionDataDelegate {
+        private struct ProbeState {
+            var continuation: CheckedContinuation<URL?, Never>
+            var finalURL: URL?
+        }
+
+        private let lock = NSLock()
+        private var states: [Int: ProbeState] = [:]
+
+        func register(taskIdentifier: Int,
+                      continuation: CheckedContinuation<URL?, Never>) {
+            lock.lock()
+            states[taskIdentifier] = ProbeState(
+                continuation: continuation, finalURL: nil)
+            lock.unlock()
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            lock.lock()
+            states[dataTask.taskIdentifier]?.finalURL = response.url
+            lock.unlock()
+            completionHandler(.cancel)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didCompleteWithError error: Error?) {
+            // Fires for every ending — the cancel above, a
+            // timeout, a network error. Whatever response URL
+            // was captured for THIS task (nil when none
+            // arrived) is the answer. The shared session is
+            // deliberately NOT invalidated here.
+            lock.lock()
+            let state = states.removeValue(forKey: task.taskIdentifier)
+            lock.unlock()
+            state?.continuation.resume(returning: state?.finalURL)
+        }
+    }
+
+    private static let sharedDelegate = SessionDelegate()
+    private static let sharedSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        // The probe's budgets, exactly as the per-probe
+        // sessions carried them: the sole call site
+        // (preResolved) probes with timeout 8, and the
+        // per-request timeoutInterval in run() still carries
+        // the caller's `timeout` on every request.
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 8
+        return URLSession(configuration: config,
+                          delegate: RedirectProbe.sharedDelegate, delegateQueue: nil)
+    }()
 
     /// The chain's final URL, or nil on any failure (DNS,
     /// TLS, timeout — the session's request/resource budgets
-    /// are both `timeout`, so the probe is bounded end to
-    /// end, the house JoeHTTP discipline).
+    /// bound the probe end to end, the house JoeHTTP
+    /// discipline).
     func run(url: URL, timeout: TimeInterval) async -> URL? {
         await withCheckedContinuation { cont in
-            self.continuation = cont
-            let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = timeout
-            config.timeoutIntervalForResource = timeout
-            let session = URLSession(configuration: config,
-                                     delegate: self, delegateQueue: nil)
             var req = URLRequest(url: url)
             req.timeoutInterval = timeout
             req.setValue(JoeHTTP.userAgent, forHTTPHeaderField: "User-Agent")
             req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-            session.dataTask(with: req).resume()
+            let task = RedirectProbe.sharedSession.dataTask(with: req)
+            RedirectProbe.sharedDelegate.register(
+                taskIdentifier: task.taskIdentifier, continuation: cont)
+            task.resume()
         }
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        finalURL = response.url
-        completionHandler(.cancel)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    didCompleteWithError error: Error?) {
-        // Fires for every ending — the cancel above, a
-        // timeout, a network error. Whatever response URL was
-        // captured (nil when none arrived) is the answer.
-        session.invalidateAndCancel()
-        let cont = continuation
-        continuation = nil
-        cont?.resume(returning: finalURL)
     }
 }
 

@@ -113,16 +113,21 @@ struct JoeTorrentHome: View {
             // (enabled by searchFocus / firstRailFocusIndex /
             // torRetryFocused / searchRetryFocused) are REMOVED —
             // each flip rebuilt the ENTIRE ScrollView subtree
-            // under the focus engine. Routing now: the search
-            // row, the Retry buttons and the rails are plain
-            // focusable elements in one stack, so UP/DOWN/LEFT/
-            // RIGHT between them is geometric (the search row's
-            // LEFT/RIGHT order — field → Tìm → Xoá — is its
-            // visual order; a disabled Tìm during search is
-            // skipped by the engine, which the old arithmetic
-            // walk did not do); the first rail's exact arithmetic
-            // survives as an ALWAYS-installed .onMoveCommand on
-            // the first rail's own cards (handleFirstRailMove).
+            // under the focus engine.
+            // v2.0.8 (Phase 1): the first rail's surviving
+            // arithmetic handler (handleFirstRailMove) is now
+            // REMOVED too, with the search grid's handler. An
+            // attached .onMoveCommand owns EVERY direction and
+            // undeclared directions die instead of falling
+            // through to the focus engine, so routing is now
+            // entirely the engine's geometric search: the
+            // search row, the Retry buttons and the rails are
+            // plain focusable elements in one stack, each rail
+            // a .focusSection() via the shared Rail view, so
+            // UP/DOWN/LEFT/RIGHT between them is geometric
+            // (the search row's LEFT/RIGHT order — field → Tìm
+            // → Xoá — is its visual order; a disabled Tìm
+            // during search is skipped by the engine).
         .task {
             torAttempted = true
             store.loadIfNeeded()
@@ -186,9 +191,10 @@ struct JoeTorrentHome: View {
         }
         // v2.0.5 (N1, pair g): the search row is a declared
         // focus region; the rails below are regions of their
-        // own (the shared Rail carries .focusSection()), and
-        // the first rail's handler already declares the UP
-        // landing back onto this row's field.
+        // own (the shared Rail carries .focusSection()).
+        // v2.0.8: no handler declares an UP landing back onto
+        // this row any more — the engine's geometric search
+        // finds this region from the rails below on its own.
         .focusSection()
     }
 
@@ -226,10 +232,10 @@ struct JoeTorrentHome: View {
                             Text("Xoá khỏi Đang xem dở")
                         }
                     }
-                    // This rail IS the first rail whenever it
-                    // renders, so its cards always carry the
-                    // first-rail move handler.
-                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
+                    // v2.0.8 (Phase 1): no move handler — the
+                    // card is a plain focusable in its rail's
+                    // .focusSection(); movement is geometric.
+                    card
                 }
             }
         }
@@ -266,57 +272,22 @@ struct JoeTorrentHome: View {
                             Text("Bỏ yêu thích")
                         }
                     }
-                    // First rail only when Continue Watching is
-                    // empty (it precedes this rail when present).
-                    if torProgress.isEmpty {
-                        card.onMoveCommand { dir in handleFirstRailMove(dir) }
-                    } else {
-                        card
-                    }
+                    // v2.0.8 (Phase 1): no move handler (the
+                    // first-rail arithmetic that used to attach
+                    // here when Continue Watching was empty is
+                    // removed) — movement is geometric.
+                    card
                 }
             }
         }
     }
 
-    // MARK: - Focus traversal (first-rail routing)
-
-    /// One focusable card in a rail, whichever FocusState owns it.
-    private enum TorRailItem: Equatable {
-        case entry(String)
-        case meta(TorMeta.ID)
-    }
-
-    /// Every rail in on-screen order, empty rails skipped. In
-    /// search mode the single "rail" is the results grid. The
-    /// first element is the section's first rail: the
-    /// Continue-Watching entry rail when non-empty, else the
-    /// ♥ Yêu thích entry rail, else the first catalog rail.
-    private var torRails: [[TorRailItem]] {
-        // Browse rails only. Search results are a GRID and are
-        // routed geometrically by searchResultMove — v1.8 modelled
-        // them as one flat rail here, which swallowed every DOWN
-        // press inside the results (C-2).
-        var rails: [[TorRailItem]] = []
-        if !torProgress.isEmpty {
-            rails.append(torProgress.map { .entry("cw|" + $0.key) })
-        }
-        if !torFavorites.isEmpty {
-            rails.append(torFavorites.map { .entry("fav|" + $0.key) })
-        }
-        for cat in store.catalogs {
-            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
-                rails.append(metas.map {
-                    .meta("torCat:\(cat.id)|\(cat.type)|" + $0.id) })
-            }
-        }
-        for rail in store.genreRails {
-            if !rail.metas.isEmpty {
-                rails.append(rail.metas.map {
-                    .meta("torGenre:\(rail.type):\(rail.genre)|" + $0.id) })
-            }
-        }
-        return rails
-    }
+    // v2.0.8 (Phase 1): the first-rail routing model that
+    // lived here (TorRailItem / torRails, under a "Focus
+    // traversal" mark) is DELETED with its handler — nothing
+    // in this file routes focus by hand any more; the
+    // engine's geometric search over the declared
+    // .focusSection() regions owns all movement.
 
     /// True when NO catalogue rail has anything — the catalogue
     /// rails dict and the genre rails are both empty. (The
@@ -420,53 +391,13 @@ struct JoeTorrentHome: View {
         }
     }
 
-    private var currentTorRailItem: TorRailItem? {
-        if let focusedEntry { return .entry(focusedEntry) }
-        if let focusedMeta { return .meta(focusedMeta) }
-        return nil
-    }
-
-    /// Non-nil only while focus sits in the FIRST rail — the
-    /// cards of that rail carry the always-installed
-    /// .onMoveCommand whose handler (handleFirstRailMove)
-    /// reads this.
-    private var firstRailFocusIndex: Int? {
-        guard let item = currentTorRailItem,
-              let first = torRails.first,
-              let idx = first.firstIndex(of: item) else { return nil }
-        return idx
-    }
-
-    /// The scope of the first CATALOGUE rail on screen, or nil
-    /// when an entry rail (Continue Watching / Favourites)
-    /// leads. Mirrors torRails' order exactly; metaRail
-    /// compares its own scope against this to decide whether
-    /// its cards carry the first-rail move handler. A pure
-    /// function of catalogue data — the attachment changes
-    /// only when the DATA changes, never when focus moves.
-    private var firstTorScope: String? {
-        if !torProgress.isEmpty || !torFavorites.isEmpty { return nil }
-        for cat in store.catalogs {
-            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
-                return "torCat:\(cat.id)|\(cat.type)"
-            }
-        }
-        for rail in store.genreRails where !rail.metas.isEmpty {
-            return "torGenre:\(rail.type):\(rail.genre)"
-        }
-        return nil
-    }
-
-    private func setTorRailFocus(_ item: TorRailItem) {
-        switch item {
-        case .entry(let key):
-            focusedMeta = nil
-            focusedEntry = key
-        case .meta(let id):
-            focusedEntry = nil
-            focusedMeta = id
-        }
-    }
+    // v2.0.8 (Phase 1): currentTorRailItem /
+    // firstRailFocusIndex / firstTorScope / setTorRailFocus
+    // are DELETED with handleFirstRailMove below — they
+    // existed only to feed the first-rail arithmetic. The
+    // @FocusState declarations themselves stay: their
+    // .focused bindings still give every card its focus
+    // identity for the engine (and its per-screen memory).
 
     // CONVERGENCE (2026-11-15): the search-row boundary
     // handler (handleSearchRowMove) is DELETED with its trap.
@@ -479,32 +410,14 @@ struct JoeTorrentHome: View {
     // The two Retry buttons' UP-to-field routing is likewise
     // geometric (the field is the nearest focusable above).
 
-    /// First-rail boundary: UP to the search row (the field),
-    /// LEFT/RIGHT arithmetic neighbours inside the rail (no-op
-    /// at its ends), DOWN to the same-index card (clamped) in
-    /// the next rail; with a single rail, DOWN lands on the
-    /// error surface's Retry when one is showing (Scope-3),
-    /// else a no-op. Installed per-card on the first rail's
-    /// cards only; deeper rails carry no handler — the focus
-    /// engine's geometry handles them.
-    private func handleFirstRailMove(_ dir: MoveCommandDirection) {
-        guard let idx = firstRailFocusIndex,
-              let first = torRails.first else { return }
-        if dir == .up {
-            searchFocus = .field
-        } else if dir == .left {
-            if idx > 0 { setTorRailFocus(first[idx - 1]) }
-        } else if dir == .right {
-            if idx < first.count - 1 { setTorRailFocus(first[idx + 1]) }
-        } else if dir == .down {
-            if torRails.count > 1 {
-                let next = torRails[1]
-                setTorRailFocus(next[min(idx, next.count - 1)])
-            } else if torErrorVisible {
-                torRetryFocused = true
-            }
-        }
-    }
+    // v2.0.8 (Phase 1): handleFirstRailMove is DELETED. Its
+    // UP landing (the search field), its LEFT/RIGHT rail
+    // neighbours and its DOWN same-index landing in the next
+    // rail are all moves the focus engine's geometric search
+    // makes unaided inside the rails' .focusSection()
+    // regions; the single-rail DOWN landing on the error
+    // surface's Retry is likewise the nearest focusable
+    // below. No direction is hand-routed in this file now.
 
     private func metaRail(_ title: String, _ metas: [TorMeta], base: String,
                           scope: String) -> some View {
@@ -519,22 +432,19 @@ struct JoeTorrentHome: View {
                 }
                 .joeCardButton()
                 .focused($focusedMeta, equals: scope + "|" + meta.id)
-                // Only the FIRST catalogue rail's cards carry
-                // the first-rail move handler (see
-                // firstTorScope); the attachment follows the
-                // catalogue data, never the focus state.
-                if scope == firstTorScope {
-                    card.onMoveCommand { dir in handleFirstRailMove(dir) }
-                } else {
-                    card
-                }
+                // v2.0.8 (Phase 1): no move handler on any
+                // catalogue rail (the first rail's used to
+                // attach here) — movement is geometric.
+                card
             }
         }
     }
 
     private var searchGrid: some View {
-        // Fixed 6 columns (§7.6: 6×264 + 5×28 = 1724 ≤ 1760) so
-        // result routing is exact arithmetic, like JoeSearch.
+        // Fixed 6 columns (§7.6: 6×264 + 5×28 = 1724 ≤ 1760).
+        // v2.0.8: the fixed columns now serve the focus
+        // engine's geometric search (a regular grid gives it
+        // clean candidates), not a hand-written router.
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28),
                                  count: 6),
                   alignment: .leading, spacing: 40) {
@@ -547,9 +457,10 @@ struct JoeTorrentHome: View {
                 }
                 .joeCardButton()
                 .focused($focusedMeta, equals: "torSearch|" + meta.id)
-                .onMoveCommand { direction in
-                    searchResultMove(direction, from: meta)
-                }
+                // v2.0.8 (Phase 1): no move handler — the
+                // grid's movement (including UP from the
+                // first row back to the search row) is the
+                // engine's geometric search.
             }
         }
         // Design D's wall ring is an OUTSET band around the
@@ -559,40 +470,13 @@ struct JoeTorrentHome: View {
         .padding(.horizontal, theme.id == .posterWall ? 8 : 0)
     }
 
-    /// Search-grid routing (C-2): the handler sits on each result,
-    /// so it is active exactly while that result holds focus.
-    /// Exact arithmetic over the fixed 6-column grid — UP from a
-    /// first-row result returns to the search row, LEFT/RIGHT stop
-    /// at row edges, DOWN past the last row is a defined no-op.
-    /// (v1.8 routed the grid as a flat rail whose handler required
-    /// a second rail for DOWN, so DOWN was swallowed everywhere.)
-    private func searchResultMove(_ dir: MoveCommandDirection, from meta: TorMeta) {
-        guard let idx = searchResults.firstIndex(where: { $0.id == meta.id })
-        else { return }
-        let columns = 6
-        switch dir {
-        case .left:
-            if idx % columns > 0 {
-                focusedMeta = "torSearch|" + searchResults[idx - 1].id
-            }
-        case .right:
-            if idx + 1 < searchResults.count, idx % columns < columns - 1 {
-                focusedMeta = "torSearch|" + searchResults[idx + 1].id
-            }
-        case .up:
-            if idx >= columns {
-                focusedMeta = "torSearch|" + searchResults[idx - columns].id
-            } else {
-                searchFocus = .field
-            }
-        case .down:
-            if idx + columns < searchResults.count {
-                focusedMeta = "torSearch|" + searchResults[idx + columns].id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): searchResultMove is DELETED (C-2's
+    // arithmetic grid router). It was NOT a composite
+    // control — it handled plain grid cards and coded DOWN
+    // past the last row as a no-op — so no exception
+    // applies: the grid's movement is geometric now, and
+    // UP from a first-row result reaches the search row as
+    // the nearest focusable above.
 
     private func runSearch() {
         let kw = query.trimmingCharacters(in: .whitespaces)
@@ -651,7 +535,11 @@ struct JoeTorrentDetail: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
+            // v2.0.8 (Phase 7d): LazyVStack — the eager VStack
+            // built the hero, episode block and stream block
+            // (and every stream row) up front; children,
+            // order and spacing are identical.
+            LazyVStack(alignment: .leading, spacing: 32) {
                 hero
                 if meta.type == "series" {
                     // v2.0.5 (N1, pair i): the episode block
@@ -790,29 +678,16 @@ struct JoeTorrentDetail: View {
         // landing is now this button (topmost action; one DOWN
         // reaches the stream rows) — accepted by the leader.
         .focused($focusedRow, equals: "fav")
-        // v2.0.5 (N1, pair i): the DOWN exit is DECLARED —
-        // the first episode chip (series), else the first
-        // stream row, else a visible Retry. UP/LEFT/RIGHT are
-        // declared no-ops: the button is the layer's top
-        // element and alone in its row (the subtitle capsule
-        // beside it is not focusable).
-        .joeBoundaryMove(down: { favDownLanding() })
-    }
-
-    /// The favourite button's DOWN landing (v2.0.5): the
-    /// first focusable element of the block below the hero,
-    /// in the page's own order — episodes before streams,
-    /// a failure surface's Retry before either.
-    private func favDownLanding() {
-        if videosFailed {
-            focusedRow = "retry|videos"
-        } else if meta.type == "series", let first = videos.first {
-            focusedRow = "ep|" + first.id
-        } else if streamsFailed {
-            focusedRow = "retry|streams"
-        } else if let first = streams.first {
-            focusedRow = "st|" + first.id.uuidString
-        }
+        // v2.0.8 (Phase 1): the declared DOWN exit
+        // (.joeBoundaryMove → favDownLanding) is REMOVED,
+        // and favDownLanding with it. The button is the
+        // layer's top element and alone in its row (the
+        // subtitle capsule beside it is not focusable); DOWN
+        // from it is the engine's geometric move to the
+        // nearest focusable below — the episode block's
+        // first chip, a failure surface's Retry, or the
+        // first stream row, each inside its declared
+        // .focusSection() region.
     }
 
     // MARK: - Episodes (series)
@@ -1065,5 +940,10 @@ struct JoeTorrentDetail: View {
 // CONVERGENCE RECORD (2026-11-15): this file's duplicated
 // JoeMoveTrap struct is DELETED — see the record at the end of
 // JoeTVApp.swift. The search-row/first-rail/Retry traps it
-// powered are replaced by geometric focus movement plus the
-// per-card always-installed first-rail handler above.
+// powered are replaced by geometric focus movement.
+// v2.0.8 (Phase 1): the per-card first-rail handler that
+// briefly survived that record, the search grid's handler
+// and the favourite button's boundary move are now deleted
+// too — this file carries no .onMoveCommand and no
+// .joeBoundaryMove; all movement is the engine's geometric
+// search over the declared .focusSection() regions.

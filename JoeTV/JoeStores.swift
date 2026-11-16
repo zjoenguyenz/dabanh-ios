@@ -594,7 +594,20 @@ private final class PhimLoadBox: @unchecked Sendable {
 /// save is reached from the load's child tasks and its
 /// payloads are small, so the load path never meaningfully
 /// blocks the main thread.
+///
+/// v2.0.8 (Phase 7c): the cache is now BOUNDED — a 16 MB
+/// total cap pruned oldest-first on every write (the
+/// JoeDetailCache.prune pattern, restricted to this cache's
+/// own "phim-rail-*.json" files: they live in the shared
+/// caches directory, so nothing else is counted or
+/// deleted), and a 7-day TTL: a file older than the TTL is
+/// a miss on hydrate and is deleted when met. The TTL
+/// governs the on-disk artefact only; the in-session reuse
+/// window stays PhimStore.loadIfNeeded's 900 s.
 private enum PhimRailCache {
+    private static let capBytes = 16 * 1024 * 1024
+    private static let ttl: TimeInterval = 7 * 24 * 3600
+
     static func fileURL(for key: String) -> URL {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let safe = key.replacingOccurrences(of: ":", with: "-")
@@ -605,17 +618,55 @@ private enum PhimRailCache {
         guard let data = try? JSONSerialization.data(withJSONObject: root)
         else { return }
         try? data.write(to: fileURL(for: key), options: .atomic)
+        prune()
+    }
+
+    /// Oldest-first prune to the size cap, on every write
+    /// (mirrors JoeDetailCache.prune).
+    private static func prune() {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        guard let files = try? FileManager.default
+            .contentsOfDirectory(at: dir, includingPropertiesForKeys:
+                [.fileSizeKey, .contentModificationDateKey])
+        else { return }
+        var entries: [(url: URL, size: Int, mtime: Date)] = []
+        var total = 0
+        for f in files where f.lastPathComponent.hasPrefix("phim-rail-")
+            && f.pathExtension == "json" {
+            let values = try? f.resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let size = values?.fileSize ?? 0
+            entries.append((f, size, values?.contentModificationDate ?? .distantPast))
+            total += size
+        }
+        if total <= capBytes { return }
+        for entry in entries.sorted(by: { $0.mtime < $1.mtime }) {
+            if total <= capBytes { break }
+            if (try? FileManager.default.removeItem(at: entry.url)) != nil {
+                total -= entry.size
+            }
+        }
     }
 
     /// Read + decode + parse every cached rail, in job order.
-    /// Rails whose cache is missing, corrupt or parses empty
-    /// are simply absent from the result.
+    /// Rails whose cache is missing, corrupt, older than the
+    /// TTL or parses empty are simply absent from the result.
     static func hydrate(
         _ jobs: [(key: String, provider: String, request: Providers.ListRequest)]
     ) async -> [(String, [Movie])] {
         var out: [(String, [Movie])] = []
         for job in jobs {
-            guard let data = try? Data(contentsOf: fileURL(for: job.key)),
+            let url = fileURL(for: job.key)
+            // TTL gate (v2.0.8): an expired file is a miss
+            // and is deleted, never parsed.
+            if let mtime = (try? url.resourceValues(
+                    forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate,
+               Date().timeIntervalSince(mtime) > ttl {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+            guard let data = try? Data(contentsOf: url),
                   let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
             let movies = Providers.parseList(job.provider, job.request, root)

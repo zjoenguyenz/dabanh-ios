@@ -16,7 +16,8 @@ import libwebp
 //    (the 64 MB / 512 MB "joetv-images" cache installed in JoeTVApp.init)
 //    and every request uses .returnCacheDataElseLoad, so a cached poster
 //    renders on cold open with no network wait
-//  - decoded-bitmap NSCache (~120 MB cost cap): decoded posters are kept
+//  - decoded-bitmap NSCache (cost cap derived from available
+//    memory at init, clamped 48–120 MB): decoded posters are kept
 //    downscaled, never as full-size originals (a 2000×3000 poster is
 //    ~24 MB decoded — it is decoded ONCE at display size via ImageIO)
 //  - rail-ordered prefetch: PhimStore warms each rail's posters as the rail
@@ -53,7 +54,28 @@ final class JoeImagePipeline: @unchecked Sendable {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
         session = URLSession(configuration: config)
-        decoded.totalCostLimit = 120 * 1024 * 1024
+        // v2.0.8 (Phase 7b): the decoded-cache budget is
+        // DERIVED from the memory actually available to the
+        // process at launch, not fixed: 6% of
+        // os_proc_available_memory(), clamped to
+        // [48 MB, 120 MB] — the old fixed 120 MB survives
+        // only as the ceiling. Derivation: the floor box is
+        // the Apple TV 4K 1st gen (A10X, 3 GB RAM, owner
+        // decision 2026-11-16); a poster's decoded cost is
+        // w×h×4 (1.32 MB at the 480×720 display size), so
+        // even the 48 MB floor holds ~36 display-size
+        // posters, and the clamp keeps the cache a small
+        // fraction of whatever the weakest box grants the
+        // app. The per-app memory ceiling on A10X is NOT
+        // published by Apple and is still to be
+        // device-measured — this fraction is an engineering
+        // budget under that unknown ceiling, not a claim
+        // about it. Count limit unchanged.
+        let available = os_proc_available_memory()
+        let derived = available > 0
+            ? Int(Double(available) * 0.06) : 120 * 1024 * 1024
+        decoded.totalCostLimit = min(120 * 1024 * 1024,
+                                     max(48 * 1024 * 1024, derived))
         decoded.countLimit = 600
     }
 
@@ -351,18 +373,153 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// ≤ maxPixel with the aspect untouched (proportional
     /// scale — never a stretch, never a crop), so the
     /// decoded cache and the slots' aspect gates see exactly
-    /// what they see for a JPEG. One honest difference:
-    /// libwebp's simple API decodes at native size first, so
-    /// the native bitmap exists transiently inside this call
-    /// only — never cached, never returned. (The decoder
-    /// config API could scale in-decoder, but its
-    /// initialiser is a static-inline C function the Swift
-    /// importer cannot call reliably, so it was rejected.)
-    /// A sanity cap keeps a pathological file from
-    /// materialising an unbounded bitmap. Any failure
-    /// returns nil: the load classifies, retries and falls
-    /// back exactly as it did before this path existed.
+    /// what they see for a JPEG.
+    ///
+    /// v2.0.8 (Phase 7a): the PRIMARY path is now libwebp's
+    /// ADVANCED decode API with in-decoder scaling
+    /// (decodeWebPScaled): the decoder writes the bitmap at
+    /// the target size directly, so the native-size bitmap
+    /// is never materialised — pre-fix this was the one
+    /// image path that built the full bitmap first and
+    /// scaled it down afterwards. The old simple-API path
+    /// survives VERBATIM as decodeWebPNative below, and any
+    /// failure of the scaled path falls back to it:
+    /// correctness first — the native path is device-proven
+    /// for Tủ Phim posters and this path must never regress
+    /// to no-image. A sanity cap (64,000,000 pixels) keeps a
+    /// pathological file from materialising an unbounded
+    /// bitmap on either path. Any failure of both returns
+    /// nil: the load classifies, retries and falls back
+    /// exactly as it did before this path existed.
     private static func decodeWebP(_ data: Data, maxPixel: Int) -> UIImage? {
+        if let scaled = decodeWebPScaled(data, maxPixel: maxPixel) {
+            return scaled
+        }
+        return decodeWebPNative(data, maxPixel: maxPixel)
+    }
+
+    /// The advanced-API scaled decode (v2.0.8, Phase 7a).
+    ///
+    /// PLAN CONFLICT, recorded plainly: the fix plan names
+    /// WebPInitDecoderConfig + WebPGetFeatures, but in
+    /// libwebp's decode.h both are `static WEBP_INLINE`
+    /// wrappers — there is no exported symbol for the Swift
+    /// importer to call (the pre-v2.0.8 comment on the old
+    /// path rejected the config API for exactly this
+    /// reason). Each wrapper's entire body is a call to its
+    /// exported, version-checked Internal twin with
+    /// WEBP_DECODER_ABI_VERSION, so this code calls those
+    /// twins directly — WebPInitDecoderConfigInternal and
+    /// WebPGetFeaturesInternal, passing the ABI-version
+    /// macro the wrappers themselves pass. WebPDecode (the
+    /// one-shot advanced decode) is a plain exported
+    /// function and is called as named.
+    ///
+    /// Shape: features first (the 64M-pixel sanity cap is
+    /// applied from the features' dimensions, before any
+    /// decode); the target size is the SAME proportional
+    /// size the old scale step computed (longest side =
+    /// maxPixel, aspect preserved, never cropped); when the
+    /// native size already fits the bucket, no scaling is
+    /// requested and the decode is a plain advanced decode
+    /// at native size. The output is an EXTERNAL RGBA buffer
+    /// allocated at the (possibly scaled) size: per the
+    /// advanced API's rules the buffer must outlive the
+    /// WebPDecode call only, so the CGImage is built from a
+    /// Data copy of it exactly as the native path builds its
+    /// image from a copy of its decode buffer — after this
+    /// function returns, nothing references the decoder's
+    /// buffer. No WebPFreeDecBuffer call: with an external
+    /// buffer there is no decoder-owned allocation to
+    /// release, and the buffer here is a Swift Data whose
+    /// storage the decoder must not free.
+    private static func decodeWebPScaled(_ data: Data, maxPixel: Int) -> UIImage? {
+        var config = WebPDecoderConfig()
+        guard WebPInitDecoderConfigInternal(&config,
+                Int32(WEBP_DECODER_ABI_VERSION)) != 0 else { return nil }
+
+        let featuresOK = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return WebPGetFeaturesInternal(
+                base.assumingMemoryBound(to: UInt8.self),
+                data.count, &config.input,
+                Int32(WEBP_DECODER_ABI_VERSION)) == VP8_STATUS_OK
+        }
+        guard featuresOK else { return nil }
+
+        let w = Int(config.input.width)
+        let h = Int(config.input.height)
+        guard w > 0, h > 0,
+              Int64(w) * Int64(h) <= 64_000_000 else { return nil }
+
+        // The same target dimensions the old scale step
+        // computed: proportional, longest side = maxPixel,
+        // aspect preserved, never cropped.
+        let longest = max(w, h)
+        var tw = w, th = h
+        if longest > maxPixel {
+            let scale = Double(maxPixel) / Double(longest)
+            tw = max(1, Int((Double(w) * scale).rounded()))
+            th = max(1, Int((Double(h) * scale).rounded()))
+            config.options.use_scaling = 1
+            config.options.scaled_width = Int32(tw)
+            config.options.scaled_height = Int32(th)
+        }
+
+        let bytesPerRow = tw * 4
+        let byteCount = bytesPerRow * th
+        var buffer = Data(count: byteCount)
+        config.output.colorspace = MODE_RGBA
+        config.output.width = Int32(tw)
+        config.output.height = Int32(th)
+        config.output.is_external_memory = 1
+
+        let status = data.withUnsafeBytes { src -> VP8StatusCode? in
+            guard let srcBase = src.baseAddress else { return nil }
+            return buffer.withUnsafeMutableBytes { raw -> VP8StatusCode? in
+                guard let base = raw.baseAddress else { return nil }
+                config.output.u.RGBA.rgba =
+                    base.assumingMemoryBound(to: UInt8.self)
+                config.output.u.RGBA.stride = Int32(bytesPerRow)
+                config.output.u.RGBA.size = byteCount
+                return WebPDecode(
+                    srcBase.assumingMemoryBound(to: UInt8.self),
+                    data.count, &config)
+            }
+        }
+        guard status == VP8_STATUS_OK,
+              Int(config.output.width) == tw,
+              Int(config.output.height) == th else { return nil }
+
+        // Copy out of the decode buffer before it goes away:
+        // the CGImage's provider retains this Data, so the
+        // bitmap stays valid for the decoded cache's
+        // lifetime. (The decoder wrote into `buffer` itself;
+        // the copy keeps the hand-off identical to the
+        // native path's — a provider-owned Data.)
+        let copy = Data(buffer)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)
+            ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(
+            rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let provider = CGDataProvider(data: copy as CFData),
+              let image = CGImage(width: tw, height: th,
+                                  bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: bytesPerRow, space: space,
+                                  bitmapInfo: bitmapInfo, provider: provider,
+                                  decode: nil, shouldInterpolate: true,
+                                  intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: image)
+    }
+
+    /// The pre-v2.0.8 simple-API path, kept VERBATIM as the
+    /// scaled path's fallback (see decodeWebP): WebPGetInfo
+    /// for the same 64M-pixel sanity cap, WebPDecodeRGBA at
+    /// native size, then a CGContext scale-down to the same
+    /// target dimensions. Device-proven for Tủ Phim posters;
+    /// any change here is a regression risk to a protected
+    /// baseline, so it is intentionally untouched.
+    private static func decodeWebPNative(_ data: Data, maxPixel: Int) -> UIImage? {
         var infoW: Int32 = 0
         var infoH: Int32 = 0
         let infoOK = data.withUnsafeBytes { raw -> Bool in

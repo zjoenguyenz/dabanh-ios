@@ -31,6 +31,17 @@ struct JoeSearchView: View {
     @State private var branchesFailed = 0
     @State private var firstPaintLogged = false
     @State private var pressStart = Date()
+    // v2.0.8 (Phase 6): the SAME facet model the browse
+    // layer uses — JoeBrowseFilter + JoeFilterBar, defined
+    // in JoeBrowse.swift (one filter model, two hosts; both
+    // types were already internal, not private, so no
+    // visibility change was needed). Facets combine with
+    // the name query by AND (see displayedResults); a
+    // facet-only query runs the model's apply() over
+    // PhimStore exactly as browse does. No new network:
+    // every input list is already loaded in the store.
+    @State private var filter = JoeBrowseFilter()
+    @FocusState private var chipFocus: String?
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
 
@@ -54,6 +65,26 @@ struct JoeSearchView: View {
                     Spacer()
                 }
             }
+            // v2.0.8 (Phase 6): the facet rows live INSIDE
+            // this screen, directly under the unchanged top
+            // row, as their own focus section — the shared
+            // JoeFilterBar over the shared JoeBrowseFilter,
+            // its visibility derived from the store's merged
+            // list exactly as browse derives it. The top row
+            // above and the results below keep their frame
+            // (owner ruling: "Khung search vẫn giữ y chang.
+            // Ko thay bố cục"). Focus travel field ↔ facets ↔
+            // results is section-to-section geometry (F1–F4);
+            // no handlers anywhere (Phase 1).
+            JoeFilterBar(filter: $filter,
+                         years: JoeBrowseFilter.yearBuckets(for: phim.merged),
+                         hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
+                         showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
+                         showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
+                         showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
+                         showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
+                         chipFocus: $chipFocus)
+                .focusSection()
             // CONVERGENCE (Team 7 D4, 2026-11-15): the
             // JoeSearchMoveTrap that wrapped this row (enabled:
             // topFocus != nil) is REMOVED — its flips rebuilt
@@ -102,6 +133,13 @@ struct JoeSearchView: View {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
                     .foregroundStyle(theme.meta)
+            } else if searched && !results.isEmpty && displayedResults.isEmpty {
+                // Phase 6: the name matched, but the facets
+                // filtered every hit away — a different state
+                // from "no such film" above (browse's wording).
+                Text("Không có phim nào khớp bộ lọc.")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.meta)
             } else if searching {
                 // Results are already on screen; branches are
                 // still merging (the visible settle — soft
@@ -110,6 +148,12 @@ struct JoeSearchView: View {
                     .font(.system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
+            } else if !searched && filter.filtersActive && displayedResults.isEmpty {
+                // Phase 6, facet-only with no match in the
+                // loaded store lists.
+                Text("Không có phim nào khớp bộ lọc.")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.meta)
             }
             // UI-6 defect D-19: the results carry the render's
             // heading naming the searched term — design D's
@@ -185,9 +229,11 @@ struct JoeSearchView: View {
             .focused($topFocus, equals: .back)
         }
         // v2.0.5 (N1, pair k): the query row is a declared
-        // focus region; the results area is another (see the
-        // body's resultsArea), and resultMove's UP already
-        // lands back on this row's field.
+        // focus region; the facet rows (Phase 6) and the
+        // results area are regions of their own. v2.0.8
+        // (Phase 1): movement between the regions is the
+        // engine's geometric search — resultMove's declared
+        // UP landing on this row's field is deleted.
         .focusSection()
     }
 
@@ -197,16 +243,16 @@ struct JoeSearchView: View {
     /// in wall anatomy via the shared PosterCard).
     @ViewBuilder
     private var resultsArea: some View {
-        if theme.id == .sourceBoard && !results.isEmpty {
+        if theme.id == .sourceBoard && !displayedResults.isEmpty {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     ForEach([Providers.KK, Providers.F4K, Providers.VS, Providers.TP],
                             id: \.self) { code in
-                        let list = results.filter { $0.provider == code }
+                        let list = displayedResults.filter { $0.provider == code }
                         if !list.isEmpty {
                             Rail(title: "\(Providers.displayName(code)) — \(list.count) kết quả") {
                                 ForEach(list) { movie in
-                                    resultCard(movie, routed: false)
+                                    resultCard(movie)
                                 }
                             }
                         }
@@ -214,19 +260,22 @@ struct JoeSearchView: View {
                 }
                 .padding(.vertical, 8)
             }
+            // v2.0.8 (Phase 4): focus rings are never clipped
+            // by the scroll container.
+            .scrollClipDisabled()
         } else {
             ScrollView(.vertical, showsIndicators: false) {
-                // Fixed 6 columns (was .adaptive(minimum: 240),
-                // whose column count the code cannot enumerate) so
-                // result focus routing is exact arithmetic — see
-                // resultMove.
+                // Fixed 6 columns (was .adaptive(minimum: 240)).
+                // v2.0.8 (Phase 1): no arithmetic routing any
+                // more — resultMove is deleted and the engine
+                // moves geometrically over this grid.
                 // Column gap = the theme's rail gap (design
                 // card pitch: A 26, D 24, F 28).
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
                                          count: 6),
                           alignment: .leading, spacing: 40) {
-                    ForEach(results) { movie in
-                        resultCard(movie, routed: true)
+                    ForEach(displayedResults) { movie in
+                        resultCard(movie)
                     }
                 }
                 .padding(.vertical, 8)
@@ -236,12 +285,65 @@ struct JoeSearchView: View {
                 // rings are never clipped by the scroll frame.
                 .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
             }
+            // v2.0.8 (Phase 4): focus rings are never clipped
+            // by the scroll container (design D's wall-art
+            // ring is an outset band around the art).
+            .scrollClipDisabled()
         }
     }
 
-    @ViewBuilder
-    private func resultCard(_ movie: Movie, routed: Bool) -> some View {
-        let card = Button { nav.movie = MovieRoute(
+    /// What the results area renders (Phase 6): the name
+    /// query AND the facets, combined.
+    ///  - After (or during) a name round: the round's pool
+    ///    run through the facet predicates (facetFiltered).
+    ///  - With no name round yet and facets active: the
+    ///    facet model's own apply() over PhimStore — the
+    ///    browse list, facet-only. (A typed-but-unsearched
+    ///    name does not suppress this; the name joins when
+    ///    Tìm runs the round.)
+    ///  - Otherwise: the raw pool (empty before any search).
+    private var displayedResults: [Movie] {
+        if searched || roundActive || !results.isEmpty {
+            return facetFiltered(results)
+        }
+        if filter.filtersActive {
+            return filter.apply(phim: phim)
+        }
+        return results
+    }
+
+    /// The facet predicates over an arbitrary pool (the name
+    /// round's results), mirroring JoeBrowseFilter.apply's
+    /// base-set logic: the genre facet and "Chiếu rạp"
+    /// intersect by movie id with the store lists apply()
+    /// would have used as its base; every other facet is the
+    /// model's own static predicate; the model's sort runs
+    /// last. Same missing-field rule as browse (an item
+    /// missing the faceted field never matches a
+    /// non-"Tất cả" selection).
+    private func facetFiltered(_ input: [Movie]) -> [Movie] {
+        var base = input
+        if filter.type == .chieuRap, let slug = filter.genre {
+            let ids = Set((phim.genreLists[slug] ?? []).map { $0.id })
+            base = base.filter { ids.contains($0.id) }
+        } else if filter.type == .chieuRap {
+            let ids = Set(phim.chieuRap.map { $0.id })
+            base = base.filter { ids.contains($0.id) }
+        } else if let slug = filter.genre {
+            let ids = Set((phim.genreLists[slug] ?? []).map { $0.id })
+            base = base.filter { ids.contains($0.id) }
+        }
+        let filtered = base.filter { m in
+            JoeBrowseFilter.matchesYear(m, filter.year)
+                && JoeBrowseFilter.matchesCountry(m, filter.country)
+                && JoeBrowseFilter.matchesType(m, filter.type)
+                && JoeBrowseFilter.matchesLang(m, filter.lang)
+        }
+        return JoeBrowseFilter.sorted(filtered, by: filter.sort)
+    }
+
+    private func resultCard(_ movie: Movie) -> some View {
+        Button { nav.movie = MovieRoute(
             provider: movie.provider, slug: movie.slug,
             name: movie.name, poster: movie.poster,
             year: movie.year) } label: {
@@ -256,52 +358,14 @@ struct JoeSearchView: View {
         }
         .joeCardButton()
         .focused($focusedMovie, equals: "search|" + movie.id)
-        // The arithmetic handler belongs to the GRID layout
-        // (resultMove counts 6 columns); F's grouped rails route
-        // geometrically. The attachment follows the LAYOUT (theme
-        // + result set), never focus state.
-        if routed {
-            card.onMoveCommand { direction in
-                resultMove(direction, from: movie)
-            }
-        } else {
-            card
-        }
     }
 
-    /// Result-grid routing: the handler sits on each result, so
-    /// it is active exactly while that result holds focus. Exact
-    /// arithmetic over the fixed 6-column grid — UP from a
-    /// first-row result returns focus to the query field,
-    /// LEFT/RIGHT stop at row edges, DOWN past the last row is a
-    /// defined no-op. (KEPT under convergence spec item 3: this
-    /// is a per-element handler inside the search layer; its
-    /// @FocusState writes are plain focus moves between stable
-    /// elements — no view's structure depends on them any more.)
-    private func resultMove(_ direction: MoveCommandDirection, from movie: Movie) {
-        guard let idx = results.firstIndex(where: { $0.id == movie.id }) else { return }
-        let columns = 6
-        switch direction {
-        case .left:
-            if idx % columns > 0 { focusedMovie = "search|" + results[idx - 1].id }
-        case .right:
-            if idx + 1 < results.count, idx % columns < columns - 1 {
-                focusedMovie = "search|" + results[idx + 1].id
-            }
-        case .up:
-            if idx >= columns {
-                focusedMovie = "search|" + results[idx - columns].id
-            } else {
-                topFocus = .field
-            }
-        case .down:
-            if idx + columns < results.count {
-                focusedMovie = "search|" + results[idx + columns].id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): resultMove is DELETED — result
+    // cards are plain buttons in the results focus section;
+    // the engine moves within the grid geometrically and UP
+    // out of it (to the facet rows / query row, from any
+    // column) the same way. No coded no-op directions remain
+    // in this view.
 
     // MARK: - Search round (v2.0.1 — Android FIX2 + FIX3 parity)
     //
@@ -338,9 +402,9 @@ struct JoeSearchView: View {
 
         // Snapshot restore: a clean earlier round for this
         // name replays instantly with zero network. (Facet
-        // state is not part of the key — on tvOS the facets
-        // live in the browse layer, where they re-apply at
-        // render over the store, so there is nothing to key.)
+        // state is not part of the key — the facets re-apply
+        // at render over the restored pool via
+        // displayedResults, so there is nothing to key.)
         if let snap = JoeSearchSession.shared.snapshot(for: kw) {
             roundID += 1
             roundActive = false
@@ -588,5 +652,9 @@ private final class JoeSearchSession: @unchecked Sendable {
 // file's copy of the conditional move-trap pattern — is
 // DELETED; see the record at the end of JoeTVApp.swift. The
 // top-row and Retry traps it powered are replaced by geometric
-// focus movement; the per-result grid handler (resultMove)
-// stays, as it was always per-element and unconditional.
+// focus movement.
+// v2.0.8 (Phase 1): the per-result grid handler (resultMove)
+// is DELETED too — an attached .onMoveCommand owned every
+// direction and made undeclared ones no-ops; result cards
+// are plain buttons and movement is the engine's throughout
+// this file.

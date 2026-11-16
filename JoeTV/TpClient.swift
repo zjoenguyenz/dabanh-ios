@@ -53,9 +53,11 @@ enum TpClient {
     /// Tuned detail budgets (LATENCY-AUDIT §6): the old single
     /// 20 s detail budget is SPLIT — the API call gets its own
     /// 10 s cap (healthy max 1.54) and the CacheVideo probe
-    /// inside detail() gets its own separate 10 s cap (in
+    /// gets its own separate 10 s cap (in
     /// CacheVideo.resolveCap; healthy max 5.40). Neither draws
     /// from the other. SourceHealth fuses tighten within both.
+    /// v2.0.8 (P2d): the probe no longer runs inside detail()
+    /// at all — see probeCacheVideoServer.
     private static let detailCap: TimeInterval = 10
     /// Tuned Gold embed cap (LATENCY-AUDIT §6): 20 s → 8 s
     /// (healthy max 1.68).
@@ -157,6 +159,29 @@ enum TpClient {
 
     // MARK: - Detail
 
+    /// Episode template stash (v2.0.8, P2d): detail()
+    /// computes the episode template (Gold episodes, or the
+    /// templateEpisodes fallback) and the CacheVideo probe —
+    /// now a SEPARATE call (probeCacheVideoServer) — needs
+    /// that same template later to rebuild the server.
+    /// Lock-guarded, keyed by slug, in-memory only; it holds
+    /// episode NAMES/templates, never stream URLs.
+    private static let templateLock = NSLock()
+    private static var templateStash: [String: [Episode]] = [:]
+
+    private static func stashTemplate(slug: String, template: [Episode]?) {
+        guard let template, !template.isEmpty else { return }
+        templateLock.lock()
+        templateStash[slug] = template
+        templateLock.unlock()
+    }
+
+    private static func stashedTemplate(slug: String) -> [Episode]? {
+        templateLock.lock()
+        defer { templateLock.unlock() }
+        return templateStash[slug]
+    }
+
     static func detail(_ slug: String) async throws -> Detail {
         let url = base + "/movies/\(slug)"
         let root = try await SourceHealth.run(
@@ -197,12 +222,38 @@ enum TpClient {
         }
         if template == nil { template = templateEpisodes(sources) }
 
-        // CacheVideo — backup server on the titles it carries.
-        if !d.movie.imdbId.isEmpty,
-           let cv = await cacheVideoServer(movie: d.movie, template: template) {
-            d.servers.append(cv)
-        }
+        // v2.0.8 (P2d): the CacheVideo probe NO LONGER rides
+        // the detail call — detail returns after the Gold
+        // episode pages, and the detail screen merges the
+        // probe result (probeCacheVideoServer) when it lands.
+        // The template computed here is stashed by slug so
+        // the probe can rebuild the server later.
+        stashTemplate(slug: slug, template: template)
         return d
+    }
+
+    /// The separated CacheVideo probe (v2.0.8, P2d): build
+    /// the "CacheVideo" backup server for a detail that has
+    /// already loaded, or nil when CacheVideo does not carry
+    /// the title. Guards exactly like the old in-detail call
+    /// site: nil when the movie's imdbId is empty, and
+    /// cacheVideoServer itself returns nil when the resolver
+    /// does not carry the title. The episode template comes
+    /// from the stash detail() left for this slug when
+    /// present, else from the Gold server's episodes in the
+    /// passed detail; a series with neither gets nil (the
+    /// movie case needs no template).
+    static func probeCacheVideoServer(detail: Detail, slug: String) async -> Server? {
+        guard !detail.movie.imdbId.isEmpty else { return nil }
+        let template: [Episode]?
+        if let stashed = stashedTemplate(slug: slug) {
+            template = stashed
+        } else if let gold = detail.servers.first(where: { $0.name == "Gold" }) {
+            template = gold.episodes
+        } else {
+            template = nil
+        }
+        return await cacheVideoServer(movie: detail.movie, template: template)
     }
 
     private static func findSource(_ sources: [[String: Any]], prefix: String) -> [String: Any]? {
@@ -211,6 +262,20 @@ enum TpClient {
 
     /// Gold episodes: detail page 1 + /episodes pages until the
     /// pagination total is collected (cap 20 pages).
+    ///
+    /// v2.0.8 (P2d): pages 2…N are fetched CONCURRENTLY in a
+    /// throwing task group and appended IN PAGE ORDER. The
+    /// stop conditions are preserved: no page beyond
+    /// totalPages, none beyond the 20-page cap, no fetch at
+    /// all when idx < 0 or page 1 already collected the
+    /// total, and appending stops in page order once the
+    /// total is collected (the serial loop's before-fetch
+    /// `out.count < total` check, applied at append time).
+    /// Every page keeps its SourceHealth wrapping and 10 s
+    /// stage cap, and failure semantics are unchanged: any
+    /// page error throws out of the group, goldEpisodes
+    /// throws, and detail() treats Gold as absent via its
+    /// `(try? …) ?? []`.
     private static func goldEpisodes(slug: String, gold: [String: Any]) async throws -> [Episode] {
         var out: [Episode] = []
         appendEpisodes(&out, JSON.arr(gold, "episodes"))
@@ -218,18 +283,33 @@ enum TpClient {
         let total = JSON.int(pg, "total", out.count)
         let totalPages = JSON.int(pg, "totalPages", 1)
         let idx = JSON.int(gold, "sourceIndex", -1)
-        var p = 2
-        while p <= totalPages && out.count < total && p <= 20 && idx >= 0 {
-            // Gold episode paging is part of the detail's API
-            // work — same 10 s stage cap as the detail call.
-            let pageURL = base + "/movies/\(slug)/episodes?sourceIndex=\(idx)&page=\(p)&limit=100"
-            let r = try await SourceHealth.run(
-                provider: Providers.TP, stage: .detail, url: pageURL, cap: detailCap
-            ) { budget in
-                try await JoeHTTP.getJSON(pageURL, timeout: budget)
+        guard idx >= 0, out.count < total else { return out }
+        let lastPage = min(totalPages, 20)
+        guard lastPage >= 2 else { return out }
+        let pages = Array(2...lastPage)
+        var byPage: [Int: [String: Any]] = [:]
+        try await withThrowingTaskGroup(of: (Int, [String: Any]).self) { group in
+            for p in pages {
+                group.addTask {
+                    // Gold episode paging is part of the detail's API
+                    // work — same 10 s stage cap as the detail call.
+                    let pageURL = TpClient.base
+                        + "/movies/\(slug)/episodes?sourceIndex=\(idx)&page=\(p)&limit=100"
+                    let r = try await SourceHealth.run(
+                        provider: Providers.TP, stage: .detail, url: pageURL, cap: TpClient.detailCap
+                    ) { budget in
+                        try await JoeHTTP.getJSON(pageURL, timeout: budget)
+                    }
+                    return (p, r)
+                }
             }
-            appendEpisodes(&out, JSON.arr(JSON.obj(r, "data"), "episodes"))
-            p += 1
+            for try await (p, r) in group {
+                byPage[p] = r
+            }
+        }
+        for p in pages {
+            if out.count >= total { break }
+            appendEpisodes(&out, JSON.arr(JSON.obj(byPage[p], "data"), "episodes"))
         }
         return out
     }
@@ -274,8 +354,10 @@ enum TpClient {
 
     /// Probe the CacheVideo resolver once (S1E1 for series, the
     /// movie otherwise); build the server only when it carries
-    /// the title.
-    private static func cacheVideoServer(movie: Movie, template: [Episode]?) async -> Server? {
+    /// the title. Internal (not private) so the separated
+    /// probeCacheVideoServer — and any other caller — reuses
+    /// this exact construction.
+    static func cacheVideoServer(movie: Movie, template: [Episode]?) async -> Server? {
         let series = movie.type == "phim-bo"
         let season = movie.tmdbSeason > 0 ? movie.tmdbSeason : 1
         let probe = await CacheVideo.resolve(

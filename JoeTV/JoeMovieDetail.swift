@@ -75,7 +75,11 @@ struct JoeMovieDetail: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
+            // v2.0.8 (Phase 7): lazy root — server groups and
+            // their episode chips build as they scroll into
+            // view instead of all up front. Children, order
+            // and the 32 gap are identical to the eager stack.
+            LazyVStack(alignment: .leading, spacing: 32) {
                 if let detail {
                     if let switchNotice {
                         // C-9: a failed provider switch reverted —
@@ -143,14 +147,23 @@ struct JoeMovieDetail: View {
             //
             // v2.0.1 (Android FIX2 parity): the task stays
             // decoupled from the detail fetch (it always was —
-            // a separate task) and now publishes in TWO stages:
-            // backdrop + overview land with the TMDB detail
-            // call; the cast merges when the credits call
-            // returns, so the band never waits behind credits.
-            // A film whose payload carries no TMDB id — or a
-            // record with no backdrop — is hunted by the
-            // name + year title search for a backdrop, exactly
-            // like the Android pipeline.
+            // a separate task) and publishes in stages, so the
+            // band never waits behind the credits call. A film
+            // whose payload carries no TMDB id — or a record
+            // with no backdrop — is hunted by the name + year
+            // title search for a backdrop, exactly like the
+            // Android pipeline.
+            //
+            // v2.0.8 (Phase 2): the staging is now literal —
+            // fetchInfo's result publishes the MOMENT it lands
+            // (before the backdrop hunt starts), then the
+            // backdrop hunt (only when still needed) and the
+            // cast fetch run as concurrent async lets, each
+            // merging into tmdb when it lands: the hunt fills
+            // backdropURL, the credits fill cast. Fail-soft
+            // everywhere, exactly as before: no info and no
+            // hunted backdrop leaves tmdb nil, and cast only
+            // ever merges onto a published info.
             guard let detail, !TMDBClient.apiKey.isEmpty else {
                 tmdb = nil
                 return
@@ -161,27 +174,43 @@ struct JoeMovieDetail: View {
                 info = await TMDBClient.fetchInfo(
                     tmdbId: movie.tmdbId, type: movie.tmdbType)
             }
-            if info?.backdropURL.isEmpty ?? true {
-                if let url = await TMDBClient.searchBackdrop(
-                    name: movie.name, origin: movie.originName,
-                    year: Providers.yearOf(movie)) {
-                    if info == nil { info = TMDBInfo() }
-                    info?.backdropURL = url
+            if let info {
+                tmdb = info
+            }
+            let needsBackdrop = info?.backdropURL.isEmpty ?? true
+            async let backdropFetch = backdropHunt(
+                needed: needsBackdrop, movie: movie)
+            async let castFetch = castIfAvailable(movie: movie)
+            let backdropURL = await backdropFetch
+            if let backdropURL {
+                if var current = tmdb {
+                    if current.backdropURL.isEmpty {
+                        current.backdropURL = backdropURL
+                        tmdb = current
+                    }
+                } else {
+                    var created = TMDBInfo()
+                    created.backdropURL = backdropURL
+                    tmdb = created
                 }
             }
-            guard let resolved = info else {
+            let cast = await castFetch
+            if !cast.isEmpty, var current = tmdb {
+                current.cast = cast
+                tmdb = current
+            }
+            if info == nil, backdropURL == nil {
                 tmdb = nil
-                return
             }
-            tmdb = resolved
-            if !movie.tmdbId.isEmpty {
-                let cast = await TMDBClient.fetchCast(
-                    tmdbId: movie.tmdbId, type: movie.tmdbType)
-                if !cast.isEmpty, var current = tmdb {
-                    current.cast = cast
-                    tmdb = current
-                }
-            }
+        }
+        .task(id: provider + "|" + slug + "|" + (focusedEp ?? "")
+              + "|" + (detail == nil ? "0" : "1")) {
+            // v2.0.8 (Phase 2/3): dwell pre-resolve — see
+            // dwellPreResolve(). SwiftUI cancels and restarts
+            // this task whenever the key changes (provider,
+            // slug, focused episode, detail arrival), so
+            // speculative work dies on exit/switch by itself.
+            await dwellPreResolve()
         }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
@@ -325,6 +354,10 @@ struct JoeMovieDetail: View {
                                                 tmdbURL: tmdbBackdropURL)
                              ? -168 : 0)
             }
+            // v2.0.8 (Phase 1): the header region (band +
+            // poster + Play/Favourite) joins the section
+            // system — composition and margins unchanged.
+            .focusSection()
             sourceChips
                 .padding(.top, 38)
             servers(d, heading: "Chọn tập", headingSize: 30)
@@ -362,6 +395,12 @@ struct JoeMovieDetail: View {
             .filter { !$0.isEmpty }
             .isEmpty
         return VStack(alignment: .center, spacing: 0) {
+            // v2.0.8 (Phase 1): the header region (poster
+            // through the Play/Favourite row) is its own
+            // focus section. The Group is layout-transparent,
+            // so the centred column's composition, spacing
+            // and per-element margins are unchanged.
+            Group {
             posterArt(d.movie)
             Text(d.movie.name)
                 .font(.system(size: 56, weight: .heavy))
@@ -409,6 +448,8 @@ struct JoeMovieDetail: View {
                 providerChip
             }
             .padding(.top, 26)
+            }
+            .focusSection()
             if let tmdb, !tmdb.cast.isEmpty {
                 castRow(tmdb.cast)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -476,6 +517,10 @@ struct JoeMovieDetail: View {
                 }
                 Spacer(minLength: 0)
             }
+            // v2.0.8 (Phase 1): the header region (poster +
+            // Play/Favourite block) joins the section
+            // system — composition and margins unchanged.
+            .focusSection()
             sourceRows(d)
                 .padding(.top, 30)
             // UI-6 defect D-11: in F the "Chọn tập" heading is
@@ -638,8 +683,9 @@ struct JoeMovieDetail: View {
     /// under the focus ring).
     /// v2.0.5 (N1, pair h): a row with an action AND a focusID
     /// joins the detail's focus system (focusedAlt, the same
-    /// binding the chip anatomies use) and carries the
-    /// vertical form of sourceMove; the status-only row
+    /// binding the chip anatomies use). v2.0.8 (Phase 1):
+    /// movement is the focus engine's geometric search — no
+    /// hand-written routing. The status-only row
     /// (action nil — "Cần token") stays non-focusable text.
     @ViewBuilder
     private func sourceRow(name: String, meta: String, state: String,
@@ -677,11 +723,6 @@ struct JoeMovieDetail: View {
             if let focusID {
                 button
                     .focused($focusedAlt, equals: focusID)
-                    .joeBoundaryMove(
-                        up: { sourceMove(.up, from: focusID, vertical: true) },
-                        down: { sourceMove(.down, from: focusID, vertical: true) },
-                        left: { sourceMove(.left, from: focusID, vertical: true) },
-                        right: { sourceMove(.right, from: focusID, vertical: true) })
             } else {
                 button
             }
@@ -922,11 +963,6 @@ struct JoeMovieDetail: View {
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "torrent")
-            .joeBoundaryMove(
-                up: { sourceMove(.up, from: "torrent", vertical: false) },
-                down: { sourceMove(.down, from: "torrent", vertical: false) },
-                left: { sourceMove(.left, from: "torrent", vertical: false) },
-                right: { sourceMove(.right, from: "torrent", vertical: false) })
         }
     }
 
@@ -945,11 +981,6 @@ struct JoeMovieDetail: View {
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "auto")
-            .joeBoundaryMove(
-                up: { sourceMove(.up, from: "auto", vertical: false) },
-                down: { sourceMove(.down, from: "auto", vertical: false) },
-                left: { sourceMove(.left, from: "auto", vertical: false) },
-                right: { sourceMove(.right, from: "auto", vertical: false) })
         case .current:
             Button {
                 autoSource = false
@@ -959,11 +990,6 @@ struct JoeMovieDetail: View {
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "current")
-            .joeBoundaryMove(
-                up: { sourceMove(.up, from: "current", vertical: false) },
-                down: { sourceMove(.down, from: "current", vertical: false) },
-                left: { sourceMove(.left, from: "current", vertical: false) },
-                right: { sourceMove(.right, from: "current", vertical: false) })
         case .alternative(let code, let altSlug):
             Button {
                 switchNotice = nil
@@ -975,11 +1001,6 @@ struct JoeMovieDetail: View {
             }
             .joeCardButton()
             .focused($focusedAlt, equals: code)
-            .joeBoundaryMove(
-                up: { sourceMove(.up, from: code, vertical: false) },
-                down: { sourceMove(.down, from: code, vertical: false) },
-                left: { sourceMove(.left, from: code, vertical: false) },
-                right: { sourceMove(.right, from: code, vertical: false) })
         case .torrent:
             torrentChip
         }
@@ -1241,128 +1262,6 @@ struct JoeMovieDetail: View {
             .foregroundStyle(.white.opacity(0.8))
     }
 
-    // MARK: - Boundary routing (v2.0.5, N1 pair h)
-
-    /// The source block's FOCUSABLE entry ids, in on-screen
-    /// order — the arithmetic both source anatomies route
-    /// over (A/D chips horizontally, F rows vertically; one
-    /// model, two orientations). The Torrent entry joins the
-    /// list only while it is a control: in the chip anatomies
-    /// it renders only when configured, and in F the
-    /// unconfigured state is the non-focusable "Cần token"
-    /// status row — in both, unconfigured ⟺ absent here.
-    private var sourceFocusIDs: [String] {
-        var ids = ["auto", "current"]
-        ids += alternatives.map { $0.code }
-        if TorrentSettings.isConfigured { ids.append("torrent") }
-        return ids
-    }
-
-    /// The episode block's entry: the first PLAYABLE
-    /// episode's focus key ("<serverIndex>|<name>", the
-    /// chips' F4 identity), or nil when nothing below the
-    /// source block can take focus.
-    private var firstEpisodeFocusKey: String? {
-        guard let d = detail else { return nil }
-        for (si, server) in d.servers.enumerated() {
-            for ep in server.episodes
-            where Providers.isPlayable(code: provider, episode: ep) {
-                return "\(si)|\(ep.name)"
-            }
-        }
-        return nil
-    }
-
-    /// Source-block routing, shared by the chips (A/D:
-    /// `vertical` false — LEFT/RIGHT are the row's own
-    /// arithmetic, UP exits to the play button, DOWN enters
-    /// the episode block) and by F's rows (`vertical` true —
-    /// UP/DOWN are the list's arithmetic, LEFT/RIGHT are
-    /// declared no-ops on full-width rows, the ends exit to
-    /// the play button / the episode block). The Dark Waters
-    /// case is the contract: from ANY source entry, the
-    /// Torrent entry is reachable by walking this list, and
-    /// from the episode block UP returns here (epMove).
-    private func sourceMove(_ direction: MoveCommandDirection,
-                            from id: String, vertical: Bool) {
-        let ids = sourceFocusIDs
-        guard let i = ids.firstIndex(of: id) else { return }
-        switch direction {
-        case .left:
-            if !vertical, i > 0 { focusedAlt = ids[i - 1] }
-        case .right:
-            if !vertical, i + 1 < ids.count { focusedAlt = ids[i + 1] }
-        case .up:
-            if vertical, i > 0 {
-                focusedAlt = ids[i - 1]
-            } else {
-                focusedPlay = true
-            }
-        case .down:
-            if vertical, i + 1 < ids.count {
-                focusedAlt = ids[i + 1]
-            } else if let key = firstEpisodeFocusKey {
-                focusedEp = key
-            }
-        @unknown default:
-            break
-        }
-    }
-
-    /// Episode-block routing. The chips live in wrapping
-    /// flow rows (FlowLayout), whose wrapped rows have no
-    /// enumerable column structure, so the block routes like
-    /// the homes' rails: LEFT/RIGHT step within the server
-    /// group (skipping unplayable chips, which are disabled
-    /// and cannot hold focus), UP/DOWN step between server
-    /// groups (previous group's last playable chip / next
-    /// group's first), and UP from the first group lands on
-    /// the source block's ACTIVE entry — the reciprocal of
-    /// sourceMove's DOWN. DOWN out of the last group is a
-    /// defined no-op: nothing focusable sits below the
-    /// episode block in any anatomy.
-    private func epMove(_ direction: MoveCommandDirection,
-                        detail d: Detail, serverIndex si: Int,
-                        episodeIndex ei: Int) {
-        guard !switching else { return }
-        let servers = d.servers
-        guard servers.indices.contains(si) else { return }
-        func playable(_ s: Int, _ e: Int) -> Bool {
-            Providers.isPlayable(code: provider,
-                                 episode: servers[s].episodes[e])
-        }
-        func land(_ s: Int, _ e: Int) {
-            focusedEp = "\(s)|\(servers[s].episodes[e].name)"
-        }
-        switch direction {
-        case .left, .right:
-            var idx = ei + (direction == .left ? -1 : 1)
-            while servers[si].episodes.indices.contains(idx) {
-                if playable(si, idx) { land(si, idx); return }
-                idx += (direction == .left ? -1 : 1)
-            }
-        case .up:
-            if si > 0 {
-                var e = servers[si - 1].episodes.count - 1
-                while e >= 0 {
-                    if playable(si - 1, e) { land(si - 1, e); return }
-                    e -= 1
-                }
-            }
-            focusedAlt = autoSource ? "auto" : "current"
-        case .down:
-            if si + 1 < servers.count {
-                var e = 0
-                while e < servers[si + 1].episodes.count {
-                    if playable(si + 1, e) { land(si + 1, e); return }
-                    e += 1
-                }
-            }
-        @unknown default:
-            break
-        }
-    }
-
     // MARK: - Play now
 
     /// The episode the big play button starts: the route's
@@ -1396,14 +1295,10 @@ struct JoeMovieDetail: View {
         .joeCardButton()
         .focused($focusedPlay)
         .disabled(startEpisode(d) == nil || switching)
-        // v2.0.5 (N1, pair h): the header pair's exits —
-        // RIGHT to the favourite button, DOWN to the source
-        // block's first entry. LEFT/UP are declared no-ops
-        // (the poster/band beside and above are decoration;
-        // the layer's top is here, Menu is the way out).
-        .joeBoundaryMove(
-            down: { focusedAlt = "auto" },
-            right: { focusedFav = true })
+        // v2.0.8 (Phase 1): no hand-written exits — the
+        // header sits in its own .focusSection() (see the
+        // themed compositions) and the focus engine moves
+        // geometrically from here.
     }
 
     private func favButton(_ d: Detail) -> some View {
@@ -1440,14 +1335,10 @@ struct JoeMovieDetail: View {
         }
         .joeCardButton()
         // v2.0.5 (N1, pair h): the favourite button's binding
-        // (new — see focusedFav) and its exits: LEFT back to
-        // play, DOWN to the source block's first entry.
-        // RIGHT/UP are declared no-ops (nothing focusable
-        // beside or above it in any anatomy).
+        // (see focusedFav). v2.0.8 (Phase 1): its exits are
+        // the focus engine's geometric moves — no
+        // hand-written routing.
         .focused($focusedFav)
-        .joeBoundaryMove(
-            down: { focusedAlt = "auto" },
-            left: { focusedPlay = true })
     }
 
     // MARK: - Nguồn phát chips (design D)
@@ -1577,22 +1468,10 @@ struct JoeMovieDetail: View {
         .joeCardButton()
         .focused($focusedEp, equals: focusKey)
         .disabled(!playable || switching)
-        // v2.0.5 (N1, pair h): the episode block's own
-        // routing (see epMove) — the detail's first
-        // onMoveCommand on its chips; pre-fix this file had
-        // none, so the block could only be crossed
-        // geometrically, which is exactly what failed on
-        // the owner's Dark Waters case (from the link list,
-        // UP never reached the source row).
-        .joeBoundaryMove(
-            up: { epMove(.up, detail: d, serverIndex: serverIndex,
-                         episodeIndex: episodeIndex) },
-            down: { epMove(.down, detail: d, serverIndex: serverIndex,
-                           episodeIndex: episodeIndex) },
-            left: { epMove(.left, detail: d, serverIndex: serverIndex,
-                           episodeIndex: episodeIndex) },
-            right: { epMove(.right, detail: d, serverIndex: serverIndex,
-                            episodeIndex: episodeIndex) })
+        // v2.0.8 (Phase 1): geometric movement only — the
+        // episode block is a .focusSection() and the engine
+        // crosses it (and leaves it in every direction)
+        // without hand-written routing.
     }
 
     // MARK: - Loading + playing
@@ -1607,93 +1486,279 @@ struct JoeMovieDetail: View {
         let attemptedSlug = slug
         if !hadDetail { loadFailed = false }
         switching = hadDetail
-        // v2.0.1 DetailCache (Android FIX2 parity): on a FIRST
-        // open, a cached payload paints the full detail
-        // immediately; the fetch below then runs as a
-        // background refresh — it repaints only when the
-        // payload actually changed (fingerprint), and a failed
-        // refresh never errors over the cache-filled screen.
-        // Switches keep the pre-cache behaviour exactly (the
-        // current detail already stays on screen through one).
-        var cachedPaint: Detail?
-        if !hadDetail,
-           let cached = JoeDetailCache.read(provider: attemptedProvider,
-                                            slug: attemptedSlug) {
-            detail = cached
-            cachedPaint = cached
+        // v2.0.8 (Phase 3g): warm the loopback proxy as the
+        // detail opens — a play tap from here is predictable,
+        // so the listener's port is ready before it. This is
+        // the SAME entry point the tap path uses (playlistURL
+        // calls start()); start() is idempotent. App launch
+        // stays unwarmed (the standing decision in JoeTVApp).
+        JoeProxy.shared.start()
+        if hadDetail {
+            // Provider switch: the pre-v2.0.8 behaviour,
+            // exactly — no cache read, the current detail
+            // stays on screen through the fetch, the
+            // alternatives/identity chain is awaited inline,
+            // and the C-9 revert below is unchanged in
+            // behaviour. (v2.0.8 adds only the TP probe merge
+            // and the PerfLog paint marks — diagnostics, not
+            // behaviour.)
+            do {
+                let d = try await Providers.detail(provider, slug: slug)
+                JoeDetailCache.write(d, provider: attemptedProvider,
+                                     slug: attemptedSlug)
+                detail = d
+                PerfLog.mark("detail.networkPaint")
+                switching = false
+                lastGoodProvider = provider
+                lastGoodSlug = slug
+                launchTPProbe(painted: d,
+                              paintedProvider: attemptedProvider,
+                              paintedSlug: attemptedSlug)
+                alternatives = await Providers.findAlternatives(
+                    fromCode: provider, name: d.movie.name,
+                    origin: d.movie.originName, year: d.movie.year)
+                PerfLog.mark("detail.alternativesPaint")
+                // v2.0.5 (D3): the detail-time identity ladder
+                // runs alongside the alternatives lookup and lands
+                // in view state, so the source row re-renders with
+                // the Torrent entry's state the moment it resolves.
+                filmIdentity = await Providers.resolveIdentity(
+                    movie: d.movie, fromCode: provider,
+                    alternatives: alternatives)
+                PerfLog.mark("detail.identityPaint")
+            } catch {
+                switching = false
+                if attemptedProvider != lastGoodProvider
+                    || attemptedSlug != lastGoodSlug {
+                    // C-9: the switch failed — REVERT to the provider
+                    // whose detail is actually on screen and say so.
+                    // (v1.8 left provider/slug pointing at the new
+                    // source over the old source's data: a silent
+                    // hybrid page whose favourite key and playability
+                    // checks belonged to a different film.) The
+                    // revert re-fires this task for the good provider;
+                    // its success path leaves switchNotice standing.
+                    provider = lastGoodProvider
+                    slug = lastGoodSlug
+                    switchNotice = "Không tải được nguồn \(Providers.displayName(attemptedProvider)) — vẫn dùng nguồn \(Providers.displayName(lastGoodProvider))"
+                }
+            }
+            return
+        }
+        // First open (v2.0.8, Phase 2): the cache read and the
+        // network fetch RACE. v2.0.1 DetailCache (Android FIX2
+        // parity): a cached payload paints the full detail as
+        // soon as the read lands — now via readAsync, off the
+        // view's synchronous path, and only if the fetch has
+        // not painted first. The fetch then acts as a refresh:
+        // it writes the cache as always and repaints only when
+        // the payload actually changed (fingerprint); a failed
+        // fetch never errors over a cache-filled screen.
+        // The race bookkeeping lives in a reference box
+        // (DetailLoadRace): both racers run on the main actor,
+        // so each paint block executes atomically between
+        // awaits and the flags can never tear.
+        let race = DetailLoadRace()
+        let cacheTask = Task {
+            if let cached = await JoeDetailCache.readAsync(
+                provider: attemptedProvider, slug: attemptedSlug),
+               !race.networkPainted {
+                detail = cached
+                race.cachedPaint = cached
+                PerfLog.mark("detail.cachePaint")
+                launchTPProbe(painted: cached,
+                              paintedProvider: attemptedProvider,
+                              paintedSlug: attemptedSlug)
+            }
         }
         do {
             let d = try await Providers.detail(provider, slug: slug)
             JoeDetailCache.write(d, provider: attemptedProvider,
                                  slug: attemptedSlug)
-            if let cachedPaint {
+            race.networkPainted = true
+            if let cachedPaint = race.cachedPaint {
                 if JoeDetailCache.fingerprint(d)
                     != JoeDetailCache.fingerprint(cachedPaint) {
                     detail = d
+                    PerfLog.mark("detail.networkPaint")
+                    launchTPProbe(painted: d,
+                                  paintedProvider: attemptedProvider,
+                                  paintedSlug: attemptedSlug)
                 }
                 // Same payload: the cached render stands. The
                 // fresh copy's stream URLs are NOT needed —
                 // the play path re-resolves them fresh at tap
-                // time (makeDirector's ladder re-fetches the
-                // detail), so nothing stale can reach the
-                // player from either copy.
+                // time (makeDirector's ladder resolves stream
+                // URLs through the memoised resolver), so
+                // nothing stale can reach the player from
+                // either copy.
             } else {
                 detail = d
+                PerfLog.mark("detail.networkPaint")
+                launchTPProbe(painted: d,
+                              paintedProvider: attemptedProvider,
+                              paintedSlug: attemptedSlug)
             }
             switching = false
             lastGoodProvider = provider
             lastGoodSlug = slug
-            alternatives = await Providers.findAlternatives(
-                fromCode: provider, name: d.movie.name,
-                origin: d.movie.originName, year: d.movie.year)
-            // v2.0.5 (D3): the detail-time identity ladder
-            // runs alongside the alternatives lookup and lands
-            // in view state, so the source row re-renders with
-            // the Torrent entry's state the moment it resolves.
-            filmIdentity = await Providers.resolveIdentity(
-                movie: d.movie, fromCode: provider,
-                alternatives: alternatives)
+            // Progressive alternatives + identity (Phase 2):
+            // launched, not awaited — the source row and the
+            // Torrent entry's state fill in as they land, and
+            // neither blocks this return, the paint above, or
+            // the switching transition.
+            launchAlternativesAndIdentity(movie: d.movie,
+                                          fromCode: provider,
+                                          forSlug: slug)
         } catch {
             switching = false
-            if let cachedPaint {
+            // The fetch failed: if the cache read is still in
+            // flight, wait for its verdict before deciding —
+            // its paint (if any) runs inside cacheTask before
+            // the value lands here.
+            if race.cachedPaint == nil {
+                _ = await cacheTask.value
+            }
+            if let cachedPaint = race.cachedPaint {
                 // The cache-filled screen stays — no error
                 // surface, no revert (the painted detail IS
                 // the attempted provider's own). Alternatives
-                // still run: the source row must not wait on a
+                // and identity still run off the cached
+                // payload: the source row must not wait on a
                 // detail fetch that already failed once.
-                alternatives = await Providers.findAlternatives(
+                launchAlternativesAndIdentity(
+                    movie: cachedPaint.movie,
                     fromCode: attemptedProvider,
-                    name: cachedPaint.movie.name,
-                    origin: cachedPaint.movie.originName,
-                    year: cachedPaint.movie.year)
-                // v2.0.5 (D3): the identity ladder runs here
-                // too — the painted film's Torrent entry must
-                // not wait on a detail fetch that already
-                // failed once either.
-                filmIdentity = await Providers.resolveIdentity(
-                    movie: cachedPaint.movie, fromCode: attemptedProvider,
-                    alternatives: alternatives)
-            } else if !hadDetail {
+                    forSlug: attemptedSlug)
+            } else {
                 loadFailed = true
                 focusedRetry = true
-            } else if attemptedProvider != lastGoodProvider
-                        || attemptedSlug != lastGoodSlug {
-                // C-9: the switch failed — REVERT to the provider
-                // whose detail is actually on screen and say so.
-                // (v1.8 left provider/slug pointing at the new
-                // source over the old source's data: a silent
-                // hybrid page whose favourite key and playability
-                // checks belonged to a different film.) The
-                // revert re-fires this task for the good provider;
-                // its success path leaves switchNotice standing.
-                provider = lastGoodProvider
-                slug = lastGoodSlug
-                switchNotice = "Không tải được nguồn \(Providers.displayName(attemptedProvider)) — vẫn dùng nguồn \(Providers.displayName(lastGoodProvider))"
             }
         }
     }
 
+    /// The TP CacheVideo probe merge (v2.0.8, Phase 2):
+    /// Providers.detail for TP now returns WITHOUT the
+    /// CacheVideo server (the probe is TpClient
+    /// .probeCacheVideoServer, a separate call), so after any
+    /// successful paint of a TP detail — fresh, cache-painted
+    /// or failure-path cache paint — the probe runs as its
+    /// own task and its server is appended to the CURRENT
+    /// detail when it lands, provided the view still shows
+    /// the painted provider/slug and no server of that name
+    /// is present yet (a second paint's probe therefore
+    /// cannot duplicate the row).
+    private func launchTPProbe(painted: Detail, paintedProvider: String,
+                               paintedSlug: String) {
+        guard paintedProvider == Providers.TP else { return }
+        Task {
+            guard let server = await TpClient.probeCacheVideoServer(
+                detail: painted, slug: paintedSlug) else { return }
+            guard provider == paintedProvider, slug == paintedSlug,
+                  let current = detail,
+                  !current.servers.contains(where: { $0.name == server.name })
+            else { return }
+            var updated = current
+            updated.servers.append(server)
+            detail = updated
+        }
+    }
+
+    /// Progressive alternatives + identity (v2.0.8, Phase 2):
+    /// findAlternatives assigns `alternatives` the moment it
+    /// lands; resolveIdentity runs after it (it consumes the
+    /// alternatives — a true data dependency) and assigns
+    /// `filmIdentity` when it lands. The task is detached
+    /// from load()'s return; the provider/slug guards keep a
+    /// late landing from a previous film (or a switched
+    /// provider) from overwriting the current screen's state.
+    private func launchAlternativesAndIdentity(movie: Movie,
+                                               fromCode: String,
+                                               forSlug: String) {
+        Task {
+            let alts = await Providers.findAlternatives(
+                fromCode: fromCode, name: movie.name,
+                origin: movie.originName, year: movie.year)
+            guard provider == fromCode, slug == forSlug else { return }
+            alternatives = alts
+            PerfLog.mark("detail.alternativesPaint")
+            // v2.0.5 (D3): the identity ladder's result lands
+            // in view state, so the source row re-renders with
+            // the Torrent entry's state the moment it resolves.
+            let identity = await Providers.resolveIdentity(
+                movie: movie, fromCode: fromCode, alternatives: alts)
+            guard provider == fromCode, slug == forSlug else { return }
+            filmIdentity = identity
+            PerfLog.mark("detail.identityPaint")
+        }
+    }
+
+    /// TMDB backdrop hunt for the staged TMDB task (Phase 2):
+    /// the search runs only when a backdrop is still needed
+    /// after fetchInfo; the async-let gate keeps the call
+    /// itself inside the concurrent leg.
+    private func backdropHunt(needed: Bool, movie: Movie) async -> String? {
+        guard needed else { return nil }
+        return await TMDBClient.searchBackdrop(
+            name: movie.name, origin: movie.originName,
+            year: Providers.yearOf(movie))
+    }
+
+    /// TMDB cast for the staged TMDB task (Phase 2): cast
+    /// exists only when a TMDB id exists — the same rule the
+    /// serial chain applied.
+    private func castIfAvailable(movie: Movie) async -> [TMDBCastMember] {
+        guard !movie.tmdbId.isEmpty else { return [] }
+        return await TMDBClient.fetchCast(
+            tmdbId: movie.tmdbId, type: movie.tmdbType)
+    }
+
+    /// Dwell pre-resolve (v2.0.8, Phase 2/3): after ~1.5 s
+    /// resting on one episode context, speculatively resolve
+    /// that episode's first server through Providers
+    /// .preResolve — the result lands in the resolver memo,
+    /// so the Play tap that follows starts from a warm
+    /// ladder. The driving .task(id:) is keyed on
+    /// provider|slug|focusedEp|detail-arrival, so SwiftUI
+    /// cancels this and restarts it as focus moves, the
+    /// provider switches, or the view exits — speculative
+    /// work never outlives its context. preResolve is cheap
+    /// when nothing needs the network (direct-m3u8 providers
+    /// resolve instantly; a memo hit is a dictionary read).
+    private func dwellPreResolve() async {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        guard !Task.isCancelled, let d = detail,
+              let target = dwellTarget(detail: d) else { return }
+        await Providers.preResolve(code: provider, detail: d,
+                                   epName: target.name,
+                                   epNum: target.num)
+    }
+
+    /// The dwell target: the focused episode when focus rests
+    /// on an episode chip (the focus key is
+    /// "<serverIndex>|<name>", matched back against the
+    /// servers exactly), else the default first playable
+    /// episode in server order.
+    private func dwellTarget(detail d: Detail) -> (name: String, num: Int)? {
+        if let focusedEp {
+            for (si, server) in d.servers.enumerated() {
+                for ep in server.episodes
+                where "\(si)|\(ep.name)" == focusedEp {
+                    return (ep.name, Providers.episodeNumber(ep.name))
+                }
+            }
+        }
+        for server in d.servers {
+            for ep in server.episodes
+            where Providers.isPlayable(code: provider, episode: ep) {
+                return (ep.name, Providers.episodeNumber(ep.name))
+            }
+        }
+        return nil
+    }
+
     private func play(_ d: Detail, epName: String) {
+        PerfLog.mark("play.tap")
         // Owner source-priority policy: in Tự động mode a US
         // theatrical film probes the torrent rung FIRST (the
         // probe itself decides — only a high-quality release
@@ -1745,6 +1810,20 @@ struct JoeMovieDetail: View {
         entry.slug = m.slug
         entry.source = provider
         let resume = watch.progressFor(key: entry.key)?.pos ?? 0
+        // v2.0.8 (Phase 3): the resolveLadder closure's FIRST
+        // invocation for the origin identity builds its ladder
+        // from the detail already on screen (the `detail`
+        // value captured here) instead of re-fetching the
+        // metadata — the screen paid for that payload once.
+        // Only the stream-URL resolve inside ladderFor runs at
+        // tap time, through the memoised resolver, so the
+        // fresh-resolution rule's substance (URLs resolved at
+        // tap, never stored) is untouched. Every later
+        // invocation — the failover refresh rung, post-hop
+        // identities — fetches fresh exactly as before. The
+        // flag lives in a reference box because the closure is
+        // escaping and called many times over the session.
+        let originBox = LadderFirstCallBox()
         return PlayDirector(
             store: watch,
             identity: PlayIdentity(entry: entry),
@@ -1766,9 +1845,24 @@ struct JoeMovieDetail: View {
                         identity: identity, originDetail: detail,
                         originProvider: provider, highQualityOnly: true)
                 }
-                guard let d = try? await Providers.detail(
-                    identity.entry.source, slug: identity.entry.slug)
-                else { return first }
+                // First call for the ORIGIN identity: the
+                // on-screen detail IS the metadata (see the
+                // originBox note at the factory head). Any
+                // other call — refresh rung, post-hop identity,
+                // or an identity that is not the origin — takes
+                // the fresh fetch exactly as before.
+                let d: Detail
+                if !originBox.consumed,
+                   identity.entry.source == provider,
+                   identity.entry.slug == detail.movie.slug {
+                    originBox.consumed = true
+                    d = detail
+                } else if let fresh = try? await Providers.detail(
+                    identity.entry.source, slug: identity.entry.slug) {
+                    d = fresh
+                } else {
+                    return first
+                }
                 let ladder = await Providers.ladderFor(
                     code: identity.entry.source, detail: d,
                     filmTitle: identity.entry.title,
@@ -1970,4 +2064,28 @@ struct JoeMovieDetail: View {
         return await TorrentClient.playCandidates(
             streams: usable, preferred: nil, labelPrefix: "Torrent")
     }
+}
+
+/// Shared state for load()'s first-open cache/network race
+/// (v2.0.8, Phase 2). Both racers run on the main actor, so
+/// the flags are only ever touched between awaits; the box
+/// exists because the cache racer is an escaping Task
+/// closure and needs a reference to write back through.
+/// `networkPainted` flips the moment the fetch lands (win or
+/// lose the paint decision, the fetch has spoken);
+/// `cachedPaint` records the payload the cache racer
+/// actually painted, for the fingerprint comparison and the
+/// failure path.
+private final class DetailLoadRace {
+    var cachedPaint: Detail?
+    var networkPainted = false
+}
+
+/// First-call flag for makeDirector's resolveLadder closure
+/// (v2.0.8, Phase 3): reference type because the escaping
+/// closure must mutate it across invocations. `consumed`
+/// flips on the first origin-identity invocation; every
+/// later invocation fetches its detail fresh.
+private final class LadderFirstCallBox {
+    var consumed = false
 }

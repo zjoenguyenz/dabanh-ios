@@ -301,15 +301,15 @@ struct JoeFilterBar: View {
     let showType: Bool
     let showLang: Bool
     var chipFocus: FocusState<String?>.Binding
-    /// The landing of a DOWN press on a sort-row chip — the
-    /// surface's first focusable below the bar (browse: the
-    /// results grid's first item, the reciprocal of the
-    /// grid's UP → sort-chip landing, JoeBrowseView.gridMove;
-    /// wall: the first owner rail entry or the wall grid's
-    /// first item). Both surfaces pass it since v2.0.6: the
-    /// wall used to pass nil, which left its whole bar —
-    /// Đặt lại included — on geometric routing.
-    var onSortChipDown: (() -> Void)? = nil
+    // v2.0.8 (Phase 1): no move handlers anywhere in the bar
+    // and no DOWN landing callback — every chip is a plain
+    // button in the bar's focus section and the engine's
+    // geometric search moves focus between rows, out the
+    // top, and into the grid/shelves below, from any side.
+    // The v2.0.6 declared row chain (chipRowMove) and the
+    // sort row's onSortChipDown landing are deleted: an
+    // attached .onMoveCommand owned EVERY direction and
+    // turned undeclared ones into no-ops (audit T-C3/T-C4).
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -326,24 +326,18 @@ struct JoeFilterBar: View {
             if showYear {
                 facetRow("Năm") {
                     chip(id: JoeYearBucket.all.chipID, title: "Tất cả",
-                         selected: filter.year == .all,
-                         onMove: rowMoveHandler(rowKey: "year",
-                                                id: JoeYearBucket.all.chipID)) {
+                         selected: filter.year == .all) {
                         filter.year = .all
                     }
                     ForEach(years, id: \.self) { y in
                         chip(id: JoeYearBucket.year(y).chipID, title: "\(y)",
-                             selected: filter.year == .year(y),
-                             onMove: rowMoveHandler(rowKey: "year",
-                                                    id: JoeYearBucket.year(y).chipID)) {
+                             selected: filter.year == .year(y)) {
                             filter.year = .year(y)
                         }
                     }
                     if hasBefore2020 {
                         chip(id: JoeYearBucket.before2020.chipID, title: "Trước 2020",
-                             selected: filter.year == .before2020,
-                             onMove: rowMoveHandler(rowKey: "year",
-                                                    id: JoeYearBucket.before2020.chipID)) {
+                             selected: filter.year == .before2020) {
                             filter.year = .before2020
                         }
                     }
@@ -352,16 +346,12 @@ struct JoeFilterBar: View {
             if showCountry {
                 facetRow("Quốc gia") {
                     chip(id: "country:all", title: "Tất cả",
-                         selected: filter.country == nil,
-                         onMove: rowMoveHandler(rowKey: "country",
-                                                id: "country:all")) {
+                         selected: filter.country == nil) {
                         filter.country = nil
                     }
                     ForEach(JoeCountryBucket.allCases, id: \.self) { bucket in
                         chip(id: bucket.chipID, title: bucket.title,
-                             selected: filter.country == bucket,
-                             onMove: rowMoveHandler(rowKey: "country",
-                                                    id: bucket.chipID)) {
+                             selected: filter.country == bucket) {
                             filter.country = bucket
                         }
                     }
@@ -372,9 +362,7 @@ struct JoeFilterBar: View {
                     ForEach([JoeTypeFacet.all, .series, .single, .anime, .chieuRap],
                             id: \.self) { facet in
                         chip(id: facet.chipID, title: facet.title,
-                             selected: filter.type == facet,
-                             onMove: rowMoveHandler(rowKey: "type",
-                                                    id: facet.chipID)) {
+                             selected: filter.type == facet) {
                             filter.type = facet
                         }
                     }
@@ -383,16 +371,12 @@ struct JoeFilterBar: View {
             if showLang {
                 facetRow("Ngôn ngữ") {
                     chip(id: "lang:all", title: "Tất cả",
-                         selected: filter.lang == nil,
-                         onMove: rowMoveHandler(rowKey: "lang",
-                                                id: "lang:all")) {
+                         selected: filter.lang == nil) {
                         filter.lang = nil
                     }
                     ForEach(JoeBrowseFilter.langNeedles, id: \.self) { needle in
                         chip(id: "lang:" + needle, title: needle,
-                             selected: filter.lang == needle,
-                             onMove: rowMoveHandler(rowKey: "lang",
-                                                    id: "lang:" + needle)) {
+                             selected: filter.lang == needle) {
                             filter.lang = needle
                         }
                     }
@@ -401,9 +385,7 @@ struct JoeFilterBar: View {
             facetRow("Sắp xếp") {
                 ForEach([JoeSortOrder.updated, .newest, .oldest], id: \.self) { order in
                     chip(id: order.chipID, title: order.title,
-                         selected: filter.sort == order,
-                         onMove: rowMoveHandler(rowKey: "sort",
-                                                id: order.chipID)) {
+                         selected: filter.sort == order) {
                         filter.sort = order
                     }
                 }
@@ -415,9 +397,7 @@ struct JoeFilterBar: View {
                 // row's end and the row's focus system like
                 // any chip; it is never "selected".
                 chip(id: "sort:reset", title: "Đặt lại",
-                     selected: false,
-                     onMove: rowMoveHandler(rowKey: "sort",
-                                            id: "sort:reset")) {
+                     selected: false) {
                     filter = JoeBrowseFilter()
                 }
             }
@@ -441,162 +421,22 @@ struct JoeFilterBar: View {
         }
     }
 
-    @ViewBuilder
     private func chip(id: String, title: String, selected: Bool,
-                      onMove: ((MoveCommandDirection) -> Void)? = nil,
                       action: @escaping () -> Void) -> some View {
-        let button = Button(action: action) {
+        Button(action: action) {
             JoeChipLabel(title: title, selected: selected)
         }
         .joeCardButton()
         .focused(chipFocus, equals: id)
-        // The attachment follows the SURFACE (browse vs wall —
-        // see onSortChipDown), never focus state: the
-        // JoeSearchView.resultCard construction.
-        if let onMove {
-            button.onMoveCommand(perform: onMove)
-        } else {
-            button
-        }
     }
 
-    /// The sort row's chip ids in visual order — the three
-    /// sort chips plus Đặt lại riding last.
-    private var sortRowChipIDs: [String] {
-        [JoeSortOrder.updated, .newest, .oldest].map { $0.chipID } + ["sort:reset"]
-    }
-
-    /// One facet row's routing record: its chip ids in
-    /// visual order and the id of its ACTIVE chip (the
-    /// landing a vertical move from a neighbouring row
-    /// targets — the same active-chip convention gridMove /
-    /// wallMove use in reverse).
-    private struct FilterRow {
-        let key: String
-        let ids: [String]
-        let active: String
-    }
-
-    /// The bar's VISIBLE rows, top to bottom. A hidden facet
-    /// row (its show* flag off — a function of catalogue
-    /// data, never of focus) is absent, so a vertical move
-    /// can never target a chip that is not on screen. (The
-    /// pre-v2.0.6 sort-row UP hardcoded the type row as its
-    /// landing whenever the language row was hidden — with
-    /// the type row ALSO hidden, e.g. a sparse year-only
-    /// catalogue, the write named a chip that does not
-    /// exist and the press landed nowhere.)
-    private var filterRows: [FilterRow] {
-        var rows: [FilterRow] = [
-            FilterRow(key: "genre",
-                      ids: ["genre:all"]
-                        + PhimStore.genreSpec.map { "genre:" + $0.slug },
-                      active: filter.genre.map { "genre:" + $0 } ?? "genre:all"),
-        ]
-        if showYear {
-            rows.append(FilterRow(
-                key: "year",
-                ids: [JoeYearBucket.all.chipID]
-                    + years.map { JoeYearBucket.year($0).chipID }
-                    + (hasBefore2020 ? [JoeYearBucket.before2020.chipID] : []),
-                active: filter.year.chipID))
-        }
-        if showCountry {
-            rows.append(FilterRow(
-                key: "country",
-                ids: ["country:all"]
-                    + JoeCountryBucket.allCases.map { $0.chipID },
-                active: filter.country?.chipID ?? "country:all"))
-        }
-        if showType {
-            rows.append(FilterRow(
-                key: "type",
-                ids: [JoeTypeFacet.all, .series, .single, .anime, .chieuRap]
-                    .map { $0.chipID },
-                active: filter.type.chipID))
-        }
-        if showLang {
-            rows.append(FilterRow(
-                key: "lang",
-                ids: ["lang:all"]
-                    + JoeBrowseFilter.langNeedles.map { "lang:" + $0 },
-                active: filter.lang.map { "lang:" + $0 } ?? "lang:all"))
-        }
-        rows.append(FilterRow(key: "sort",
-                              ids: sortRowChipIDs,
-                              active: filter.sortChipID))
-        return rows
-    }
-
-    /// A facet chip's move handler (v2.0.6): every row BELOW
-    /// the genre row carries one, on both surfaces. Before
-    /// this round only the browse surface's sort row had a
-    /// handler; every other step of the walk down to Đặt
-    /// lại — genre → year → country → type → language →
-    /// sort, five consecutive row-to-row drops between
-    /// sibling horizontal ScrollViews — was geometric, and
-    /// on the wall the sort row itself was geometric too.
-    /// That geometry is the one routing class this codebase
-    /// has convicted on device three times (Settings pill
-    /// DOWN, the search top row, the detail source row);
-    /// REWORK-LOOP.md's own v2.0.0 record lists "the facet
-    /// bar's focus geometry between rows" as never
-    /// device-verified. The walk is declared now.
-    ///
-    /// The GENRE row keeps no handler, deliberately: it is
-    /// the bar's top edge, and its UP must leave the bar
-    /// (the pill row on the wall home) — a handler would own
-    /// UP and swallow that exit, and resigning chipFocus
-    /// would only bounce to the bar's own .defaultFocus
-    /// (genre:all). Its LEFT/RIGHT/DOWN stay geometric —
-    /// same-row adjacency and the single first drop, the
-    /// strongest form of geometric movement; every landing
-    /// BELOW it is declared, and the sort row is also
-    /// reachable from below by the grids' declared UP
-    /// (gridMove / wallMove → the active sort chip).
-    private func rowMoveHandler(rowKey: String, id: String)
-        -> ((MoveCommandDirection) -> Void)? {
-        guard rowKey != "genre" else { return nil }
-        return { direction in chipRowMove(direction, rowKey: rowKey, from: id) }
-    }
-
-    /// Row-chain routing: LEFT/RIGHT are the row's own
-    /// arithmetic (stopping at the row's ends, the file's
-    /// chip convention); UP lands on the ACTIVE chip of the
-    /// nearest visible row above; DOWN lands on the ACTIVE
-    /// chip of the nearest visible row below — except on
-    /// the sort row (always the last row), where DOWN is
-    /// the surface's declared landing below the bar
-    /// (onSortChipDown).
-    private func chipRowMove(_ direction: MoveCommandDirection,
-                             rowKey: String, from id: String) {
-        let rows = filterRows
-        guard let r = rows.firstIndex(where: { $0.key == rowKey })
-        else { return }
-        let ids = rows[r].ids
-        switch direction {
-        case .left:
-            if let i = ids.firstIndex(of: id), i > 0 {
-                chipFocus.wrappedValue = ids[i - 1]
-            }
-        case .right:
-            if let i = ids.firstIndex(of: id), i + 1 < ids.count {
-                chipFocus.wrappedValue = ids[i + 1]
-            }
-        case .up:
-            if r > 0 {
-                chipFocus.wrappedValue = rows[r - 1].active
-            }
-        case .down:
-            if r + 1 < rows.count {
-                chipFocus.wrappedValue = rows[r + 1].active
-            } else {
-                onSortChipDown?()
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): the bar's declared routing record
+    // (sortRowChipIDs / FilterRow / filterRows /
+    // rowMoveHandler / chipRowMove) is DELETED with the
+    // .onMoveCommand it fed. The facet rows are sibling
+    // horizontal scrolls inside this one focus section; the
+    // engine moves between rows geometrically, and the
+    // surfaces below the bar are reached the same way.
 }
 
 // MARK: - Browse / grid layer (designs A and F)
@@ -616,6 +456,7 @@ struct JoeBrowseView: View {
     @State private var filter = JoeBrowseFilter()
     @FocusState private var chipFocus: String?
     @FocusState private var gridFocus: Movie.ID?
+    @FocusState private var closeFocused: Bool
 
     private var movies: [Movie] { filter.apply(phim: phim) }
 
@@ -633,9 +474,35 @@ struct JoeBrowseView: View {
         // the screen. The title stays the fixed header above
         // the scroll.
         VStack(alignment: .leading, spacing: 26) {
-            Text("Tất cả phim")
-                .font(.system(size: 44, weight: .heavy))
-                .foregroundStyle(theme.text)
+            // v2.0.8 (Phase 5): the header row carries the
+            // owner's close control — one focusable "Đóng"
+            // button that folds this expanded browse back to
+            // the collapsed single "Tất cả phim" box on the
+            // home (nav.browseOpen = false — the same state
+            // the Menu handlers clear). It is a plain button
+            // in its own focus section, reachable from the bar
+            // and grid by the engine's geometry. Menu/Back
+            // from this layer already returns to the
+            // collapsed box first: JoePhimHome's own exit
+            // handler closes browse before the exit
+            // confirmation, and the root shell's handler
+            // closes browse before leaving the Phim section
+            // (verified in JoePhimHome.swift / JoeTVApp.swift,
+            // read-only for this worker).
+            HStack(alignment: .center, spacing: 28) {
+                Text("Tất cả phim")
+                    .font(.system(size: 44, weight: .heavy))
+                    .foregroundStyle(theme.text)
+                Spacer()
+                Button {
+                    nav.browseOpen = false
+                } label: {
+                    JoeSecondaryLabel(title: "Đóng", systemImage: "xmark")
+                }
+                .joeCardButton()
+                .focused($closeFocused)
+            }
+            .focusSection()
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 26) {
                     JoeFilterBar(filter: $filter,
@@ -645,18 +512,16 @@ struct JoeBrowseView: View {
                                  showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
                                  showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
                                  showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
-                                 chipFocus: $chipFocus,
-                                 onSortChipDown: {
-                                     if let first = movies.first {
-                                         gridFocus = "browse|" + first.id
-                                     }
-                                 })
+                                 chipFocus: $chipFocus)
                         // v2.0.5 (N1, pair e): the bar is a
                         // declared focus region, the grid
-                        // below it another; the Wave-1 pair
-                        // (chipRowMove DOWN → first item, gridMove
-                        // UP → active sort chip) routes between
-                        // them.
+                        // below it another. v2.0.8 (Phase 1):
+                        // movement between them is the engine's
+                        // geometric search — the declared pair
+                        // (chipRowMove DOWN / gridMove UP) is
+                        // deleted with its .onMoveCommand, so
+                        // the grid is enterable from any side
+                        // and UP leaves from any column.
                         .focusSection()
                     if movies.isEmpty {
                         if phim.loading && !phim.loadTimedOut {
@@ -691,9 +556,6 @@ struct JoeBrowseView: View {
                                 }
                                 .joeCardButton()
                                 .focused($gridFocus, equals: "browse|" + movie.id)
-                                .onMoveCommand { direction in
-                                    gridMove(direction, from: movie)
-                                }
                             }
                         }
                         .padding(.vertical, 8)
@@ -707,6 +569,10 @@ struct JoeBrowseView: View {
                     }
                 }
             }
+            // v2.0.8 (Phase 4): focus rings are never clipped
+            // by the scroll container (design D's wall-art
+            // ring is an outset band around the art).
+            .scrollClipDisabled()
         }
         // v2.0.5 (N1): the layer's DECLARED top element — the
         // filter bar's first chip. The browse layer swaps in
@@ -720,38 +586,11 @@ struct JoeBrowseView: View {
         }
     }
 
-    /// Grid routing, the JoeSearchView.resultMove shape: UP from
-    /// the first row lands on the sort row's ACTIVE chip (the
-    /// facet row nearest the grid); LEFT/RIGHT stop at row
-    /// edges; DOWN past the end is a defined no-op. The
-    /// reciprocal DOWN from the sort row is declared by the
-    /// bar (JoeFilterBar.chipRowMove → this view's onSortChipDown
-    /// → gridFocus on the grid's first item), so the
-    /// bar ↔ grid pair is explicit in both directions.
-    private func gridMove(_ direction: MoveCommandDirection, from movie: Movie) {
-        guard let idx = movies.firstIndex(where: { $0.id == movie.id }) else { return }
-        let columns = 6
-        switch direction {
-        case .left:
-            if idx % columns > 0 { gridFocus = "browse|" + movies[idx - 1].id }
-        case .right:
-            if idx + 1 < movies.count, idx % columns < columns - 1 {
-                gridFocus = "browse|" + movies[idx + 1].id
-            }
-        case .up:
-            if idx >= columns {
-                gridFocus = "browse|" + movies[idx - columns].id
-            } else {
-                chipFocus = filter.sortChipID
-            }
-        case .down:
-            if idx + columns < movies.count {
-                gridFocus = "browse|" + movies[idx + columns].id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): gridMove is DELETED — grid cards
+    // are plain buttons in the grid's focus section; the
+    // engine moves within the grid geometrically and out of
+    // it (UP to the filter bar, from any column) the same
+    // way. No coded no-op directions remain in this view.
 }
 
 // MARK: - Design D home: the poster wall (UI-5; D-1/D-20 UI-5-FIXUP)
@@ -825,32 +664,16 @@ struct JoeWallHomeView: View {
                              showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
                              showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
                              showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
-                             chipFocus: $chipFocus,
-                             // v2.0.6: the wall's sort row now
-                             // carries the bar's move handlers
-                             // too (previously nil — the whole
-                             // bar routed geometrically here),
-                             // so its DOWN needs the declared
-                             // landing below the bar: the first
-                             // element in visual order — the
-                             // Continue Watching rail, else
-                             // Favourites, else the wall grid.
-                             onSortChipDown: {
-                                 if !filter.filtersActive,
-                                    let cw = movieProgress.first {
-                                     entryFocus = "cw|" + cw.key
-                                 } else if !filter.filtersActive,
-                                           let fav = movieFavorites.first {
-                                     entryFocus = "fav|" + fav.key
-                                 } else if let first = wallMovies.first {
-                                     wallFocus = "wall|" + first.id
-                                 }
-                             })
+                             chipFocus: $chipFocus)
                     // v2.0.5 (N1, pair d): the wall's facet
                     // chain is a declared focus region; the
                     // owner rails and the wall grid below are
                     // regions of their own (rails via the
-                    // shared Rail, the grid below).
+                    // shared Rail, the grid below). v2.0.8
+                    // (Phase 1): movement between the regions
+                    // is the engine's geometric search — the
+                    // bar's declared DOWN landing below it is
+                    // deleted with the bar's handlers.
                     .focusSection()
                 if !filter.filtersActive {
                     cwWallRail
@@ -876,9 +699,6 @@ struct JoeWallHomeView: View {
                             }
                             .joeCardButton()
                             .focused($wallFocus, equals: "wall|" + movie.id)
-                            .onMoveCommand { direction in
-                                wallMove(direction, from: movie)
-                            }
                         }
                     }
                     // The wall grid is a D-only surface: its
@@ -899,6 +719,11 @@ struct JoeWallHomeView: View {
                 }
             }
         }
+        // v2.0.8 (Phase 4): this one scroll container holds
+        // the wall grid AND its shelves; design D's wall-art
+        // focus ring is an OUTSET band (6 pt outside the
+        // art), so the container never clips it.
+        .scrollClipDisabled()
         // v2.0.5 (N1/N2): the wall home's DECLARED top element
         // — the filter bar's first chip, the landing the pill
         // row's DOWN resigns focus to while the Poster Wall
@@ -1107,45 +932,10 @@ struct JoeWallHomeView: View {
         }
     }
 
-    /// Wall routing: exact 6-column arithmetic; UP from the
-    /// first wall row lands on the nearest owner rail above
-    /// (Favourites, else Continue Watching) while no filter is
-    /// active, else on the sort row's active chip (the facet
-    /// row nearest the wall).
-    private func wallMove(_ direction: MoveCommandDirection, from movie: Movie) {
-        guard let idx = wallMovies.firstIndex(where: { $0.id == movie.id }) else { return }
-        let columns = 6
-        switch direction {
-        case .left:
-            if idx % columns > 0 { wallFocus = "wall|" + wallMovies[idx - 1].id }
-        case .right:
-            if idx + 1 < wallMovies.count, idx % columns < columns - 1 {
-                wallFocus = "wall|" + wallMovies[idx + 1].id
-            }
-        case .up:
-            if idx >= columns {
-                wallFocus = "wall|" + wallMovies[idx - columns].id
-            } else if !filter.filtersActive, let fav = movieFavorites.first {
-                entryFocus = "fav|" + fav.key
-            } else if !filter.filtersActive, let cw = movieProgress.first {
-                entryFocus = "cw|" + cw.key
-            } else {
-                chipFocus = filter.sortChipID
-            }
-        case .down:
-            if idx + columns < wallMovies.count {
-                wallFocus = "wall|" + wallMovies[idx + columns].id
-            } else if !filter.filtersActive,
-                      let first = wallSections.first,
-                      let firstMovie = first.movies.first {
-                // UI-7 F-1: last grid row with the category
-                // sections on screen below — hand focus to the
-                // first section's first card instead of
-                // consuming the press with no landing.
-                entryFocus = "sec|" + first.scope + "|" + firstMovie.id
-            }
-        @unknown default:
-            break
-        }
-    }
+    // v2.0.8 (Phase 1): wallMove is DELETED — wall cards
+    // are plain buttons in the grid's focus section; the
+    // engine moves within the grid geometrically and out of
+    // it (UP to the owner rails / filter bar, DOWN to the
+    // category shelves) the same way. No coded no-op
+    // directions remain in this view.
 }

@@ -62,8 +62,20 @@ struct ThemeTokens {
     let scrimFloor: Double
 
     var surfaceGradient: LinearGradient {
-        LinearGradient(colors: [surfaceTop, surfaceBottom],
-                       startPoint: .top, endPoint: .bottom)
+        // The gradient DIRECTION is part of the drawing:
+        // design-A's faces run 180deg (top to bottom) and
+        // design-D's are solid, but design-F's card/row faces
+        // run linear-gradient(135deg, ...) — a diagonal from
+        // the top-left. The stops were always per-theme; the
+        // direction now is too (v2.0.8 Phase 4d, coordinator
+        // correction on Worker 1's flagged observation).
+        if id == .sourceBoard {
+            return LinearGradient(colors: [surfaceTop, surfaceBottom],
+                                  startPoint: .topLeading,
+                                  endPoint: .bottomTrailing)
+        }
+        return LinearGradient(colors: [surfaceTop, surfaceBottom],
+                              startPoint: .top, endPoint: .bottom)
     }
     var cardWidth: CGFloat { cardArtW + artInset * 2 }
     var cardArtH: CGFloat { cardArtW * 1.5 }
@@ -308,7 +320,16 @@ struct JoeFieldChrome: ViewModifier {
         // = theme.accent2 (design caret: A #D9232E, D #FFD60A,
         // F #0E7A64 — accent2 carries exactly that colour in all
         // three themes).
+        // v2.0.8 (Phase 4b): the system field focus treatment
+        // is disabled HERE, in the shared field construction,
+        // so every field site inherits it centrally (per-site
+        // disables are banned by the construction law). The
+        // drawn outset ring below is then the SOLE field focus
+        // treatment — before this, fields ran the system
+        // treatment AND the outset ring at once (the double
+        // box in the owner's photos; Round-1 report §4.5).
         content
+            .focusEffectDisabled()
             .foregroundStyle(ThemeTokens.fieldText)
             .tint(theme.accent2)
             .padding(.horizontal, 28)
@@ -327,85 +348,69 @@ extension View {
     }
 }
 
-// MARK: - Card button (the system focus effect, disabled ONCE, centrally)
+// MARK: - Card button (custom style, centrally — v2.0.8 Phase 4a)
 //
-// v2.0.5 (owner errors 1+2): every Button in the app used the
-// bare .card style, so TWO focus visuals stacked — the app's
-// JoeFocusRing (drawn inside the label's own bounds) AND the
-// tvOS system card effect (a scale + outset shadow platter
-// larger than the button), which is what clipped the "2026"
-// line on Poster Wall cards, threw grey silhouettes around
-// inset art, and pushed neighbouring chips off their row.
-// The cure is central, not per-site: this ONE modifier keeps
-// the .card style's press/focus behaviour and disables its
-// system focus effect, so JoeFocusRing is the only visible
-// focus treatment in the app. It is safe now for the reason
-// the old 1.9.2 ban's precondition no longer holds: every
-// label in the target paints one full shape (the slab defect
-// came from bare-text labels over the platter), so nothing
-// needs the platter to read as a surface. (focusEffectDisabled
-// is tvOS 17+; the target's minimum is 17.0.)
+// ROUND-1 VERDICT (tvos-training/TRAINING-REPORT.md §3–§4.1,
+// replacing the wrong belief this comment recorded through
+// v2.0.5–v2.0.7): the pale plate behind every focused element
+// in the owner's device photos is the `.card` button style's
+// OWN platter — a style-layer rendering ("A Card-Button
+// creates a platter that raises and looks highlighted when
+// it's focused", WWDC20-10042). `.focusEffectDisabled()`
+// disables a DIFFERENT layer (the focus/hover effect); it
+// does NOT strip the .card style's platter, and no redraw of
+// the app's rings could ever fix a plate that lives in the
+// style layer underneath them — that is why the pixel-faithful
+// v2.0.7 rebuild changed nothing the owner could see.
+//
+// Apple's documented cure (WWDC20, same session): replace the
+// preexisting style with a custom ButtonStyle, which "adds no
+// existing effects for pressing and focused states". That is
+// what JoeCardButtonStyle is: it returns the label untouched —
+// no background, no scale, no highlight, no press animation —
+// so the label paints everything and the app's drawn rings
+// (JoeFocusRing and the faceBody/wallBody/railBody overlays)
+// are now the ONLY focus treatment, as originally intended.
+// `.focusEffectDisabled()` is KEPT alongside it: button style
+// and focus effect are distinct layers, and both are now off.
+// The construction remains central, not per-site: this ONE
+// modifier is the app's only button construction, so every
+// button inherits the same decision. (focusEffectDisabled is
+// tvOS 17+; the target's minimum is 17.0.)
+struct JoeCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+    }
+}
+
 struct JoeCardButton: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .buttonStyle(.card)
+            .buttonStyle(JoeCardButtonStyle())
             .focusEffectDisabled()
     }
 }
 
 extension View {
     /// The app's only card-button construction — see
-    /// JoeCardButton above. Every `.card` call site in the
+    /// JoeCardButton above. Every card-button call site in the
     /// target goes through here.
     func joeCardButton() -> some View {
         modifier(JoeCardButton())
     }
 }
 
-// MARK: - Boundary routing (v2.0.5, N1 — one shared construction)
+// MARK: - Boundary routing — REMOVED in v2.0.8 (Phase 1)
 //
-// The shared boundary-routing helper. The repo's standing
-// rule, learned from every handler that device-proves
-// (JoeTVSection.moveInGrid, JoeSearch.resultMove,
-// JoeBrowse.gridMove): an attached .onMoveCommand owns EVERY
-// direction — the engine delivers the press to the handler
-// INSTEAD of moving focus geometrically. So a call site that
-// attaches this helper declares all four exits: a direction
-// with a closure performs that closure's landing (in-region
-// arithmetic or a boundary landing — the call site's own
-// knowledge), and a direction left nil is a DECLARED no-op
-// (the element sits at a region edge with nothing beyond it
-// in that direction — the screen's top edge, a full-width
-// row's sides), never an accidental swallow. Handlers are
-// always installed where the helper is applied; attachment
-// follows the surface, never focus state (law D4).
-struct JoeBoundaryMove: ViewModifier {
-    var up: (() -> Void)? = nil
-    var down: (() -> Void)? = nil
-    var left: (() -> Void)? = nil
-    var right: (() -> Void)? = nil
-
-    func body(content: Content) -> some View {
-        content.onMoveCommand { direction in
-            switch direction {
-            case .up: up?()
-            case .down: down?()
-            case .left: left?()
-            case .right: right?()
-            @unknown default: break
-            }
-        }
-    }
-}
-
-extension View {
-    func joeBoundaryMove(up: (() -> Void)? = nil,
-                         down: (() -> Void)? = nil,
-                         left: (() -> Void)? = nil,
-                         right: (() -> Void)? = nil) -> some View {
-        modifier(JoeBoundaryMove(up: up, down: down, left: left, right: right))
-    }
-}
+// The v2.0.5 JoeBoundaryMove helper (an .onMoveCommand
+// wrapper whose house contract made an attached handler
+// own EVERY direction, undeclared directions becoming
+// coded no-ops) was deleted together with its last call
+// sites: it routed away the focus engine's free 2-D
+// geometric movement — the owner's "thiếu freedom"
+// verdict on v2.0.7. Do not reintroduce handler-owned
+// movement; movement belongs to the engine, structured
+// by .focusSection() regions.
 
 // MARK: - Wrapping flow layout (UI-6 defect D-4)
 
@@ -776,6 +781,11 @@ struct Rail<Content: View>: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 14)
             }
+            // v2.0.8 (Phase 4c): a focused card's outset
+            // elements must never be clipped by the rail
+            // container — Apple's own samples disable scroll
+            // clipping on shelves for exactly this reason.
+            .scrollClipDisabled()
         }
         // v2.0.5 (N1): every rail is a declared focus region.
         // Between-region movement (rail ↔ rail, header ↔ rail)
