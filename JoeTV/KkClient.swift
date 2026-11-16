@@ -306,7 +306,14 @@ enum KkClient {
         m.originName = JSON.str(o, "origin_name")
         m.poster = absImage(JSON.str(o, "poster_url"), cdn: cdn)
         m.thumb = absImage(JSON.str(o, "thumb_url"), cdn: cdn)
-        if m.poster.isEmpty { m.poster = m.thumb }
+        // NO silent thumb→poster substitution (removed
+        // 2026-11-16): the old `if poster.isEmpty { poster =
+        // thumb }` smuggled a LANDSCAPE url into the portrait
+        // field, where nothing downstream could tell it apart
+        // — the card then letterboxed it into a band. An empty
+        // poster stays empty so the slot's declared fallback
+        // ladder (TMDB poster → placeholder, JoeRemoteImage
+        // slot-class gate) runs visibly instead.
         m.year = cleanField(JSON.str(o, "year"))
         m.type = JSON.str(o, "type")
         m.episodeCurrent = cleanField(JSON.str(o, "episode_current"))

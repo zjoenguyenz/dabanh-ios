@@ -90,7 +90,7 @@ struct JoeSearchView: View {
                     Button { runSearch() } label: {
                         JoePrimaryLabel(title: "Thử lại")
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($retryFocused)
                     // (Its UP-to-field routing is geometric:
                     // the field is the nearest focusable above.
@@ -118,7 +118,11 @@ struct JoeSearchView: View {
                     .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(theme.text)
             }
+            // v2.0.5 (N1, pair k): the results area is a
+            // declared focus region, paired with the query
+            // row's own section above.
             resultsArea
+                .focusSection()
         }
         // Menu closes the search layer (convergence, Team 7):
         // the handler is unconditional and lives on the layer
@@ -165,7 +169,7 @@ struct JoeSearchView: View {
             } label: {
                 JoeSecondaryLabel(title: searching ? "Đang tìm…" : "Tìm")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($topFocus, equals: .search)
             .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
             Button {
@@ -173,9 +177,14 @@ struct JoeSearchView: View {
             } label: {
                 JoeSecondaryLabel(title: "⟵ Quay lại")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($topFocus, equals: .back)
         }
+        // v2.0.5 (N1, pair k): the query row is a declared
+        // focus region; the results area is another (see the
+        // body's resultsArea), and resultMove's UP already
+        // lands back on this row's field.
+        .focusSection()
     }
 
     /// Results: design F groups them by source (one rail per
@@ -229,12 +238,13 @@ struct JoeSearchView: View {
             PosterCard(
                 title: movie.name,
                 posterURL: movie.posterURL,
+                tmdbId: movie.tmdbId,
+                tmdbType: movie.tmdbType,
                 meta: movie.cardMeta,
                 badge: Providers.badge(movie.provider),
-                quality: movie.quality,
-                focused: focusedMovie == "search|" + movie.id)
+                quality: movie.quality)
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedMovie, equals: "search|" + movie.id)
         // The arithmetic handler belongs to the GRID layout
         // (resultMove counts 6 columns); F's grouped rails route

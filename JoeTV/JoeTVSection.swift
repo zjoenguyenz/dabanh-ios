@@ -69,6 +69,13 @@ struct JoeTVSection: View {
         // cover above this view carries its own handler and is
         // the nearer consumer while it is up.
         .onExitCommand { nav.section = .phim }
+        // v2.0.5 (N1/N2): the chip row's first group chip is
+        // the section's DECLARED top element — the landing
+        // the pill row's DOWN resigns focus to (the hero above
+        // the chips is decoration, not focusable). The value
+        // tracks the store's first visible group; with no
+        // groups loaded it is nil and declares nothing.
+        .defaultFocus($focusedChip, store.visibleGroups.first)
         .task { await store.start() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await store.refreshIfStale() } }
@@ -192,6 +199,12 @@ struct JoeTVSection: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 4)
         }
+        // v2.0.5 (N1, pair f): the chip row is a declared
+        // focus region, the grid below it another — chip ↔
+        // grid movement is section-to-section, with the
+        // grid's own handler (moveInGrid) declaring the UP
+        // landing back onto the active group's chip.
+        .focusSection()
     }
 
     private func chip(_ group: String) -> some View {
@@ -205,7 +218,7 @@ struct JoeTVSection: View {
             // values only inside one painted capsule.
             JoeChipLabel(title: group, selected: selected)
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedChip, equals: group)
     }
 
@@ -213,7 +226,7 @@ struct JoeTVSection: View {
         Button(action: action) {
             JoeChipLabel(title: title, selected: false)
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedChip, equals: id)
         .disabled(store.isLoading || store.isValidating)
     }
@@ -274,6 +287,11 @@ struct JoeTVSection: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
                 }
+                // v2.0.5 (N1, pair f): the grid's focus region
+                // (see chipRow) — entering it from the chips is
+                // section-to-section navigation; within it,
+                // moveInGrid's exact arithmetic rules.
+                .focusSection()
             }
         } else {
             Spacer()
@@ -333,7 +351,7 @@ struct JoeTVSection: View {
                 .strokeBorder(focused ? theme.focus : theme.stroke,
                               lineWidth: focused ? theme.ringWidth : 2))
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedChannel, equals: channel.id)
         .onMoveCommand { direction in
             moveInGrid(direction, from: channel)

@@ -133,13 +133,30 @@ struct JoeSettingsView: View {
         // settings ScrollView; its routing — UP from the first
         // field to the pills, DOWN to the second field — is
         // what geometric focus movement does on this
-        // single-column layout unaided, and pill DOWN lands on
-        // the first field geometrically.
+        // single-column layout unaided.
+        // v2.0.5 CORRECTION (N2 — error 6): the sentence that
+        // stood here claimed "pill DOWN lands on the first
+        // field geometrically". On device it did NOT: the
+        // fields end at x ≤ 1330 while the Tìm phim pill sits
+        // at x ≈ 1450–1670, so its DOWN column is empty, and
+        // the topBar and this section are sibling subtrees
+        // with no bridge — the pill was a complete dead end.
+        // The route is DECLARED now, not assumed: the pill
+        // row's handler owns the pill exits (JoeTVApp.pillMove),
+        // its DOWN resigns focus into the content focus
+        // section, and this view declares its top element —
+        // the first theme chip — as the section's landing
+        // (below). Inside the column, movement stays geometric
+        // (one column, the reliable case); the first chip's UP
+        // exits to the pill row as section-to-section movement.
         // 1.9.2 (Team 9 item 4): Menu in this SECTION returns
         // to the Phim section — the app's main menu — instead
         // of exiting the app (the owner's Android model).
         // Unconditional, on this section's own root.
         .onExitCommand { nav.section = .phim }
+        // v2.0.5 (N1/N2): the section's DECLARED top element —
+        // the first theme chip (the column's first focusable).
+        .defaultFocus($themeChipFocused, JoeThemeID.billboard.rawValue)
         // Item 5: the KK route probe runs when Settings opens.
         .task { await runKKProbe() }
         .onDisappear { save(silent: true) }
@@ -168,7 +185,7 @@ struct JoeSettingsView: View {
                         JoeChipLabel(title: id.pickerLabel,
                                      selected: themeIDRaw == id.rawValue)
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($themeChipFocused, equals: id.rawValue)
                 }
             }
@@ -261,7 +278,7 @@ struct JoeSettingsView: View {
         } label: {
             JoePrimaryLabel(title: "Nhập từ iPhone")
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedField, equals: "paste|" + id)
     }
 
@@ -290,7 +307,7 @@ struct JoeSettingsView: View {
             } label: {
                 JoePrimaryLabel(title: "Kiểm tra lại")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($kkProbeFocused)
             .disabled(kkProbing)
         }
@@ -384,7 +401,7 @@ struct JoeSettingsView: View {
             } label: {
                 JoePrimaryLabel(title: "Kiểm tra ngay")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($probeFocused)
             .disabled(probing)
         }

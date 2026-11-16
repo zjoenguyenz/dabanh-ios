@@ -155,7 +155,12 @@ enum VsClient {
         m.originName = JSON.str(o, "origin_name")
         m.poster = JSON.str(o, "poster_url")
         m.thumb = JSON.str(o, "thumb_url")
-        if m.poster.isEmpty { m.poster = m.thumb }
+        // NO silent thumb→poster substitution (removed
+        // 2026-11-16, same law as KkClient): a landscape thumb
+        // copied into the portrait field letterboxes into a
+        // band in the card and is indistinguishable downstream.
+        // An empty poster stays empty so the slot's declared
+        // fallback ladder (JoeRemoteImage slot-class gate) runs.
         m.year = cleanField(JSON.str(o, "year"))
         m.type = JSON.str(o, "type")
         m.episodeCurrent = cleanField(JSON.str(o, "episode_current"))

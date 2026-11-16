@@ -168,7 +168,7 @@ struct JoeTorrentHome: View {
             } label: {
                 JoeSecondaryLabel(title: searching ? "Đang tìm…" : "Tìm")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($searchFocus, equals: .search)
             .disabled(searching)
             if !searchResults.isEmpty {
@@ -180,10 +180,16 @@ struct JoeTorrentHome: View {
                 } label: {
                     JoeSecondaryLabel(title: "Xoá tìm kiếm")
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($searchFocus, equals: .clear)
             }
         }
+        // v2.0.5 (N1, pair g): the search row is a declared
+        // focus region; the rails below are regions of their
+        // own (the shared Rail carries .focusSection()), and
+        // the first rail's handler already declares the UP
+        // landing back onto this row's field.
+        .focusSection()
     }
 
     private var torProgress: [WatchStore.Entry] {
@@ -208,10 +214,9 @@ struct JoeTorrentHome: View {
                             posterURL: entry.posterURL,
                             meta: entry.epLabel,
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
-                            focused: focusedEntry == "cw|" + entry.key)
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -248,10 +253,9 @@ struct JoeTorrentHome: View {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
-                            meta: entry.year,
-                            focused: focusedEntry == "fav|" + entry.key)
+                            meta: entry.year)
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -387,7 +391,7 @@ struct JoeTorrentHome: View {
             Button { store.reload() } label: {
                 JoePrimaryLabel(title: "Thử lại")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($torRetryFocused)
         }
     }
@@ -404,7 +408,7 @@ struct JoeTorrentHome: View {
                 Button { runSearch() } label: {
                     JoePrimaryLabel(title: "Thử lại")
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($searchRetryFocused)
             }
         } else {
@@ -508,10 +512,9 @@ struct JoeTorrentHome: View {
                     PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
-                        meta: meta.year,
-                        focused: focusedMeta == scope + "|" + meta.id)
+                        meta: meta.year)
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($focusedMeta, equals: scope + "|" + meta.id)
                 // Only the FIRST catalogue rail's cards carry
                 // the first-rail move handler (see
@@ -537,10 +540,9 @@ struct JoeTorrentHome: View {
                     PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
-                        meta: meta.year,
-                        focused: focusedMeta == "torSearch|" + meta.id)
+                        meta: meta.year)
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($focusedMeta, equals: "torSearch|" + meta.id)
                 .onMoveCommand { direction in
                     searchResultMove(direction, from: meta)
@@ -644,9 +646,14 @@ struct JoeTorrentDetail: View {
             VStack(alignment: .leading, spacing: 32) {
                 hero
                 if meta.type == "series" {
+                    // v2.0.5 (N1, pair i): the episode block
+                    // and the stream block are declared focus
+                    // regions inside the detail's single column.
                     episodeSection
+                        .focusSection()
                 }
                 streamSection
+                    .focusSection()
             }
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
@@ -673,7 +680,15 @@ struct JoeTorrentDetail: View {
             ZStack {
                 RoundedRectangle(cornerRadius: theme.rCard).fill(Color.black.opacity(0.45))
                 if let url = meta.posterURL {
-                    JoeRemoteImage(url: url, targetPixels: 720, fit: true) {
+                    // v2.0.5 (N6): the portrait aspect gate, as
+                    // on every other 2:3 slot — a landscape
+                    // bitmap in this frame is rejected instead
+                    // of letterboxing into a band. TorMeta
+                    // carries no TMDB identity (its id is the
+                    // Cinemeta/IMDb id), so there is no TMDB
+                    // fallback leg here; the placeholder stands.
+                    JoeRemoteImage(url: url, targetPixels: 720, fit: true,
+                                   slotClass: .portrait) {
                         Text(meta.name)
                             .font(.system(size: 24, weight: .semibold))
                             .foregroundStyle(theme.text.opacity(0.8))
@@ -749,7 +764,7 @@ struct JoeTorrentDetail: View {
                 .background(Capsule().fill(theme.surface2))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         // 1.9.2 (Team 9 item 9): the button joins the detail's
         // FocusState and is its declared default focus. It was
         // the ONLY unbound focusable on this screen: for an
@@ -761,6 +776,29 @@ struct JoeTorrentDetail: View {
         // landing is now this button (topmost action; one DOWN
         // reaches the stream rows) — accepted by the leader.
         .focused($focusedRow, equals: "fav")
+        // v2.0.5 (N1, pair i): the DOWN exit is DECLARED —
+        // the first episode chip (series), else the first
+        // stream row, else a visible Retry. UP/LEFT/RIGHT are
+        // declared no-ops: the button is the layer's top
+        // element and alone in its row (the subtitle capsule
+        // beside it is not focusable).
+        .joeBoundaryMove(down: { favDownLanding() })
+    }
+
+    /// The favourite button's DOWN landing (v2.0.5): the
+    /// first focusable element of the block below the hero,
+    /// in the page's own order — episodes before streams,
+    /// a failure surface's Retry before either.
+    private func favDownLanding() {
+        if videosFailed {
+            focusedRow = "retry|videos"
+        } else if meta.type == "series", let first = videos.first {
+            focusedRow = "ep|" + first.id
+        } else if streamsFailed {
+            focusedRow = "retry|streams"
+        } else if let first = streams.first {
+            focusedRow = "st|" + first.id.uuidString
+        }
     }
 
     // MARK: - Episodes (series)
@@ -789,7 +827,7 @@ struct JoeTorrentDetail: View {
         Button(action: action) {
             JoePrimaryLabel(title: "Thử lại")
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedRow, equals: focusKey)
     }
 
@@ -820,7 +858,7 @@ struct JoeTorrentDetail: View {
                                           : theme.surface2))
                                 .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
                         }
-                        .buttonStyle(.card)
+                        .joeCardButton()
                         .focused($focusedRow, equals: "ep|" + video.id)
                     }
                 }
@@ -913,7 +951,7 @@ struct JoeTorrentDetail: View {
                 .fill(theme.surface2))
             .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
     }
 

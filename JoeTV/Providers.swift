@@ -620,4 +620,136 @@ enum Providers {
         }
         return nil
     }
+
+    // MARK: - Identity resolution (detail-time, session-cached)
+
+    /// The resolved cross-service identity of one film: the
+    /// IMDb id Torrentio streams are indexed by, plus the
+    /// TMDB coordinates it was derived from (kept so the
+    /// substitution rung's series addressing — type, season —
+    /// survives the trip). A resolved NEGATIVE is a value
+    /// too: imdbId empty in a CACHED identity means the
+    /// ladder ran to completion and the title carries no
+    /// reachable IMDb identity this session — consumers must
+    /// not re-derive a weaker answer behind its back.
+    struct FilmIdentity {
+        var imdbId = ""
+        var tmdbId = ""
+        var tmdbType = ""
+        var tmdbSeason = 0
+        var resolved: Bool { !imdbId.isEmpty }
+    }
+
+    /// filmKey + "@" + provider code → FilmIdentity (the
+    /// Android ID_CACHE key shape). Session-scoped: ids are
+    /// catalogue identity, not stream URLs, so caching them
+    /// does not violate the fresh-resolution rule.
+    /// Lock-guarded like the alt cache above (C-15).
+    private static let idCacheLock = NSLock()
+    private static var idCache: [String: FilmIdentity] = [:]
+
+    static func identityKey(name: String, year: String, fromCode: String) -> String {
+        filmKey(name: name, year: year) + "@" + fromCode
+    }
+
+    static func identityCacheGet(_ key: String) -> FilmIdentity? {
+        idCacheLock.lock()
+        defer { idCacheLock.unlock() }
+        return idCache[key]
+    }
+
+    private static func identityCacheSet(_ key: String, _ value: FilmIdentity) {
+        idCacheLock.lock()
+        idCache[key] = value
+        idCacheLock.unlock()
+    }
+
+    /// The detail-time identity ladder (v2.0.5 — Android
+    /// FIX5 placement + depth; until now tvOS had only the
+    /// play-time derivation inside torrentFallbackCandidates,
+    /// a reduced subset). Runs when a detail page loads,
+    /// alongside findAlternatives, and lands in the detail's
+    /// view state so the source row can carry the Torrent
+    /// entry's state. Rungs, in order:
+    ///   1. the opened record's own IMDb id;
+    ///   2. its TMDB id → TMDB external_ids → IMDb id;
+    ///   3. the details of ALL located alternatives (every
+    ///      provider findAlternatives returned — for a film
+    ///      opened from KK these are the OTHER providers,
+    ///      exactly the rescue the old KK-only rung could
+    ///      never reach: findAlternatives excludes the origin
+    ///      provider by construction);
+    ///   4. a strict TMDB title search (exact normalised
+    ///      title + exact year; skipped when the year is
+    ///      unknown — never a guess), then external_ids on
+    ///      the hit.
+    /// Caching mirrors the alt cache's discipline: a positive
+    /// is always cached; a NEGATIVE is cached only when the
+    /// alternative search behind rung 3 actually COMPLETED
+    /// (its completed map sits in the alt cache under the
+    /// same key shape) — a deadline-cut search leaves the
+    /// film "unsearched", not "id-less", and the next open
+    /// retries the ladder.
+    static func resolveIdentity(movie m: Movie, fromCode: String,
+                                alternatives: [(code: String, slug: String)]) async -> FilmIdentity {
+        let key = identityKey(name: m.name, year: m.year, fromCode: fromCode)
+        if let hit = identityCacheGet(key) { return hit }
+        var id = FilmIdentity(imdbId: m.imdbId, tmdbId: m.tmdbId,
+                              tmdbType: m.tmdbType, tmdbSeason: m.tmdbSeason)
+        // Rung 2: the record's own TMDB id → external_ids.
+        if id.imdbId.isEmpty, !id.tmdbId.isEmpty {
+            id.imdbId = await TMDBClient.imdbId(
+                tmdbId: id.tmdbId, type: id.tmdbType) ?? ""
+        }
+        // Rung 3: every alternative's detail, in failover
+        // order — first IMDb id wins; the first TMDB id found
+        // is converted through rung 2's bridge before moving
+        // on, so a shallower carrier is preferred over a
+        // deeper one.
+        if id.imdbId.isEmpty {
+            for alt in alternatives {
+                guard let d = try? await detail(alt.code, slug: alt.slug)
+                else { continue }
+                let am = d.movie
+                if !am.imdbId.isEmpty {
+                    id.imdbId = am.imdbId
+                    if id.tmdbId.isEmpty { id.tmdbId = am.tmdbId }
+                    if id.tmdbType.isEmpty { id.tmdbType = am.tmdbType }
+                    if id.tmdbSeason <= 0 { id.tmdbSeason = am.tmdbSeason }
+                    break
+                }
+                if id.tmdbId.isEmpty, !am.tmdbId.isEmpty {
+                    id.tmdbId = am.tmdbId
+                    if id.tmdbType.isEmpty { id.tmdbType = am.tmdbType }
+                    if id.tmdbSeason <= 0 { id.tmdbSeason = am.tmdbSeason }
+                    id.imdbId = await TMDBClient.imdbId(
+                        tmdbId: id.tmdbId, type: id.tmdbType) ?? ""
+                    if !id.imdbId.isEmpty { break }
+                }
+            }
+        }
+        // Rung 4: the strict TMDB title search. A verified
+        // hit whose external_ids carry an IMDb id is adopted
+        // wholesale (the Android step-3 arbitration); a hit
+        // without one still donates its TMDB coordinates when
+        // the record had none.
+        if id.imdbId.isEmpty {
+            if let hit = await TMDBClient.searchIdentity(
+                name: m.name, originName: m.originName, year: yearOf(m)) {
+                if let found = await TMDBClient.imdbId(
+                    tmdbId: hit.tmdbId, type: hit.type), !found.isEmpty {
+                    id.imdbId = found
+                    id.tmdbId = hit.tmdbId
+                    id.tmdbType = hit.type
+                } else if id.tmdbId.isEmpty {
+                    id.tmdbId = hit.tmdbId
+                    id.tmdbType = hit.type
+                }
+            }
+        }
+        if id.resolved || altCacheGet(key) != nil {
+            identityCacheSet(key, id)
+        }
+        return id
+    }
 }

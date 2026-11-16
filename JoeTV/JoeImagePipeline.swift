@@ -91,6 +91,38 @@ final class JoeImagePipeline: @unchecked Sendable {
         return nil
     }
 
+    /// TMDB poster-path resolutions for the slot fallback
+    /// ladder (JoeRemoteImage): tmdbId|type → poster path,
+    /// cached for the session, NEGATIVES included ("" = TMDB
+    /// has no poster for this identity — a card must not
+    /// re-ask on every appearance). Guarded by `lock`, like
+    /// the rest of the pipeline's mutable state.
+    private var tmdbPosterPaths: [String: String] = [:]
+
+    /// The record's TMDB poster as a w500 URL (the house
+    /// poster size — F4K posters already ARE TMDB w500), or
+    /// nil when TMDB carries no poster for the identity.
+    /// The path lookup rides TMDBClient.posterPath; the
+    /// bitmap itself then loads through the normal pipeline
+    /// (dedupe + both caches) at the caller's bucket.
+    func tmdbPosterURL(tmdbId: String, type: String) async -> URL? {
+        guard !tmdbId.isEmpty else { return nil }
+        let k = "\(tmdbId)|\(type)"
+        lock.lock()
+        let hit = tmdbPosterPaths[k]
+        lock.unlock()
+        if let hit {
+            return hit.isEmpty ? nil
+                : URL(string: "https://image.tmdb.org/t/p/w500" + hit)
+        }
+        let path = await TMDBClient.posterPath(tmdbId: tmdbId, type: type)
+        lock.lock()
+        if tmdbPosterPaths[k] == nil { tmdbPosterPaths[k] = path ?? "" }
+        lock.unlock()
+        guard let path, !path.isEmpty else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/w500" + path)
+    }
+
     func image(for url: URL?, targetPixels: Int) async -> UIImage? {
         guard let url else { return nil }
         let bucket = Self.bucket(forPixels: targetPixels)
@@ -286,18 +318,74 @@ final class JoeImagePipeline: @unchecked Sendable {
 /// hero/backdrop slots use the default fill from the 16:9 thumb.
 /// The placeholder is a painted surface, so a missing image is a
 /// clean painted slot, never a broken hole.
+/// The shape a slot can paint (v2.0.5 aspect gate). A slot
+/// declares its class; a decoded bitmap of the WRONG shape
+/// is a failed load for that slot — never painted, never
+/// letterboxed into a band. This is the slot-side twin of
+/// JoeBandImage's chooser, which has always branched on the
+/// bitmap's own aspect; every other slot used to trust the
+/// field NAME the bitmap arrived under (the Tủ Phim
+/// poster/thumb name swap put a 16:9 still in every 2:3
+/// card). Thresholds leave a grey zone (0.85…1.2) that only
+/// .any accepts, so near-square art can't flip a gated slot
+/// either way.
+enum JoeImageSlotClass {
+    case any
+    case portrait
+    case landscape
+
+    func accepts(_ image: UIImage) -> Bool {
+        let w = image.size.width, h = image.size.height
+        guard w > 0, h > 0 else { return true }
+        switch self {
+        case .any: return true
+        case .portrait: return w / h <= 0.85
+        case .landscape: return w / h >= 1.2
+        }
+    }
+}
+
 struct JoeRemoteImage<Placeholder: View>: View {
     let url: URL?
     var targetPixels: Int = 480
     /// Logos and other non-poster art letterbox instead of cropping.
     var fit: Bool = false
+    /// Aspect gate: the shape this slot can paint (default
+    /// .any = the pre-gate behaviour, so untouched call sites
+    /// are unchanged). A primary bitmap that fails the gate —
+    /// or fails to load at all — runs the ONE-LEVEL fallback
+    /// chain below instead of being displayed.
+    var slotClass: JoeImageSlotClass = .any
+    /// Fallback level 1a: a fixed alternate URL.
+    var fallbackURL: URL? = nil
+    /// Fallback level 1b: an async alternate-URL provider
+    /// (the TMDB poster leg — the path lookup is cached per
+    /// identity in the pipeline). Consulted only when
+    /// fallbackURL is nil. The fallback bitmap must ALSO pass
+    /// the gate; there is no second level — after that the
+    /// placeholder paints.
+    var fallbackProvider: (() async -> URL?)? = nil
     @ViewBuilder var placeholder: () -> Placeholder
 
     @State private var loaded: UIImage?
 
+    /// What paints now: the resolved bitmap, else a warm
+    /// cached primary — but only when it passes the gate, so
+    /// a cached wrong-shape bitmap can never flash the band
+    /// for one frame before the task resolves the fallback.
+    private var shown: UIImage? {
+        if let loaded { return loaded }
+        if let cached = JoeImagePipeline.shared.cachedImage(
+               for: url, targetPixels: targetPixels),
+           slotClass.accepts(cached) {
+            return cached
+        }
+        return nil
+    }
+
     var body: some View {
         ZStack {
-            if let image = loaded ?? JoeImagePipeline.shared.cachedImage(for: url, targetPixels: targetPixels) {
+            if let image = shown {
                 if fit {
                     Image(uiImage: image)
                         .resizable()
@@ -313,8 +401,29 @@ struct JoeRemoteImage<Placeholder: View>: View {
         }
         .task(id: url) {
             loaded = nil
-            loaded = await JoeImagePipeline.shared.image(for: url, targetPixels: targetPixels)
+            loaded = await resolve()
         }
+    }
+
+    /// Primary → gate → one fallback level → gate. The first
+    /// paint is never blocked on the fallback: until an
+    /// accepted bitmap exists the placeholder paints, and an
+    /// accepted fallback swaps in when it lands.
+    private func resolve() async -> UIImage? {
+        if let img = await JoeImagePipeline.shared.image(
+               for: url, targetPixels: targetPixels),
+           slotClass.accepts(img) {
+            return img
+        }
+        var fb = fallbackURL
+        if fb == nil { fb = await fallbackProvider?() }
+        guard let fb, fb != url else { return nil }
+        if let img = await JoeImagePipeline.shared.image(
+               for: fb, targetPixels: targetPixels),
+           slotClass.accepts(img) {
+            return img
+        }
+        return nil
     }
 }
 

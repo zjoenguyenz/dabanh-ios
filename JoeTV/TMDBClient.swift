@@ -149,4 +149,77 @@ enum TMDBClient {
         let id = JSON.str(root, "imdb_id")
         return id.isEmpty ? nil : id
     }
+
+    /// Strict identity search (v2.0.5 — the Android FIX5
+    /// step-3 parity the tvOS ladder never had): find the
+    /// film's TMDB entry by title when NO provider record
+    /// carries any id at all. Acceptance is deliberately
+    /// strict — the backdrop hunt above can afford "year
+    /// matches when both years are known", an identity
+    /// cannot: the normalised title must match EXACTLY (one
+    /// of the film's two names against one of the hit's
+    /// title fields — the sameFilm normalisation discipline)
+    /// AND the hit's year must equal the film's year
+    /// exactly. An unknown film year skips the search
+    /// entirely (never guess an identity). Origin name is
+    /// queried first (TMDB indexes original titles best),
+    /// the Vietnamese name second. Returns the TMDB id +
+    /// kind ("movie" / "tv") or nil; fail-soft throughout.
+    static func searchIdentity(name: String, originName: String,
+                               year: String) async -> (tmdbId: String, type: String)? {
+        let key = apiKey
+        let wantYear = Providers.yearOf(year)
+        guard !key.isEmpty, !wantYear.isEmpty else { return nil }
+        var queries: [String] = []
+        for q in [originName, name] {
+            let t = q.trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty, !queries.contains(t) { queries.append(t) }
+        }
+        let wantNames = [Providers.normalizeTitle(name),
+                         Providers.normalizeTitle(originName)]
+            .filter { !$0.isEmpty }
+        guard !queries.isEmpty, !wantNames.isEmpty else { return nil }
+        for q in queries {
+            guard let root = try? await JoeHTTP.getJSON(
+                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false")
+            else { continue }
+            for item in JSON.arr(root, "results") ?? [] {
+                let mediaType = JSON.str(item, "media_type")
+                guard mediaType == "movie" || mediaType == "tv"
+                else { continue }
+                let candidates = ["title", "name", "original_title", "original_name"]
+                    .map { Providers.normalizeTitle(JSON.str(item, $0)) }
+                guard candidates.contains(where: {
+                    !$0.isEmpty && wantNames.contains($0)
+                }) else { continue }
+                let release = JSON.str(item, "release_date")
+                let dateStr = release.isEmpty
+                    ? JSON.str(item, "first_air_date") : release
+                guard Providers.yearOf(dateStr) == wantYear
+                else { continue }
+                let id = JSON.int(item, "id")
+                guard id > 0 else { continue }
+                return (String(id), mediaType)
+            }
+        }
+        return nil
+    }
+
+    /// The title's poster_path (v2.0.5): the image pipeline's
+    /// TMDB poster fallback leg builds the w500 URL from it
+    /// ("https://image.tmdb.org/t/p/w500" + path — the house
+    /// poster size). Same detail endpoint fetchInfo reads,
+    /// minus the language pin (a path is language-free).
+    /// Fail-soft: nil on no key, no id, a failed call, or no
+    /// poster on record.
+    static func posterPath(tmdbId: String, type: String) async -> String? {
+        let key = apiKey
+        guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
+        let kind = (type == "tv") ? "tv" : "movie"
+        guard let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)")
+        else { return nil }
+        let path = JSON.str(root, "poster_path")
+        return path.isEmpty ? nil : path
+    }
 }

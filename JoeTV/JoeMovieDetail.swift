@@ -16,6 +16,14 @@ struct JoeMovieDetail: View {
     @State private var detail: Detail?
     @State private var tmdb: TMDBInfo?
     @State private var alternatives: [(code: String, slug: String)] = []
+    /// The film's resolved cross-service identity (v2.0.5,
+    /// D3): the detail-time ladder's result (Providers
+    /// .resolveIdentity, run in load() alongside
+    /// findAlternatives). nil = the ladder has not landed
+    /// for this record yet; a landed value with an empty
+    /// imdbId is a resolved NEGATIVE — the Torrent entry's
+    /// honest state, not a loading state.
+    @State private var filmIdentity: Providers.FilmIdentity?
     @State private var loadFailed = false
     @State private var playerHolder: DirectorHolder?
     @State private var switching = false
@@ -33,6 +41,11 @@ struct JoeMovieDetail: View {
     @State private var autoSource = true
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
+    /// v2.0.5 (N1, pair h): the favourite button joins the
+    /// detail's focus system — pre-fix it was the one header
+    /// control with NO binding, so the play ↔ favourite pair
+    /// had no declared route at all.
+    @FocusState private var focusedFav: Bool
     @FocusState private var focusedAlt: String?
     @FocusState private var focusedRetry: Bool
 
@@ -99,7 +112,7 @@ struct JoeMovieDetail: View {
                         Button { Task { await load() } } label: {
                             JoePrimaryLabel(title: "Thử lại")
                         }
-                        .buttonStyle(.card)
+                        .joeCardButton()
                         .focused($focusedRetry)
                     }
                     .padding(.top, 60)
@@ -428,49 +441,27 @@ struct JoeMovieDetail: View {
         }
     }
 
-    /// F's source rows: one row per source family. The
-    /// policy's Tự động row leads (owner source-priority
-    /// policy, 2026-11-15); the current provider's row pins
-    /// that source when tapped; alternative rows are Buttons
+    /// F's source rows: one row per source family, over the
+    /// shared membership model (v2.0.5, D1). The policy's
+    /// Tự động row leads (owner source-priority policy,
+    /// 2026-11-15); the current provider's row pins that
+    /// source when tapped; alternative rows are Buttons
     /// performing the same provider switch the alt chips
     /// perform in A/D (with the C-9 revert behind load()) —
-    /// every specific-source tap PINS (autoSource off); the
-    /// torrent row reports the substitution rung's readiness
-    /// (it fires automatically inside the director — the row
-    /// is status, not a control).
+    /// every specific-source tap PINS (autoSource off). The
+    /// Torrent row (v2.0.5, D2) is a control now, like the
+    /// chip anatomies' Torrent chip: pressing it in the
+    /// .ready state opens the film's torrent detail; the
+    /// substitution rung still fires automatically inside
+    /// the director exactly as before.
     private func sourceRows(_ d: Detail) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Nguồn phát — chọn là xem")
                 .font(.system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
-            sourceRow(name: "Tự động",
-                      meta: "Phim Âu Mỹ chiếu rạp: ưu tiên Torrent chất lượng cao · còn lại theo thứ tự nguồn",
-                      state: autoSource ? "● Đang chọn" : "Sẵn sàng",
-                      stateColor: autoSource ? JoeTheme.okGreen : theme.meta) {
-                autoSource = true
+            ForEach(sourceEntries) { entry in
+                sourceRowEntry(entry, detail: d)
             }
-            sourceRow(name: Providers.displayName(provider),
-                      meta: d.servers.map { $0.name }.filter { !$0.isEmpty }
-                        .joined(separator: " · "),
-                      state: autoSource ? "Sẵn sàng" : "● Đang phát",
-                      stateColor: autoSource ? theme.meta : JoeTheme.okGreen) {
-                autoSource = false
-            }
-            ForEach(alternatives, id: \.code) { alt in
-                sourceRow(name: Providers.displayName(alt.code),
-                          meta: "Nguồn khác của phim này",
-                          state: "Sẵn sàng", stateColor: theme.meta) {
-                    switchNotice = nil
-                    autoSource = false
-                    provider = alt.code
-                    slug = alt.slug
-                }
-            }
-            sourceRow(name: "Torrent",
-                      meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
-                      state: TorrentSettings.isConfigured ? "Sẵn sàng" : "Cần token",
-                      stateColor: TorrentSettings.isConfigured ? theme.meta : .orange,
-                      action: nil)
             if switching {
                 HStack(spacing: 12) {
                     ProgressView().tint(theme.text)
@@ -480,14 +471,100 @@ struct JoeMovieDetail: View {
                 }
             }
         }
+        // v2.0.5 (N1, pair h): F's source block — the same
+        // declared region as the chip anatomies'.
+        .focusSection()
+    }
+
+    /// One row-anatomy entry (F's half of the shared
+    /// membership model).
+    @ViewBuilder
+    private func sourceRowEntry(_ entry: SourceEntry, detail d: Detail) -> some View {
+        switch entry {
+        case .auto:
+            sourceRow(name: "Tự động",
+                      meta: "Phim Âu Mỹ chiếu rạp: ưu tiên Torrent chất lượng cao · còn lại theo thứ tự nguồn",
+                      state: autoSource ? "● Đang chọn" : "Sẵn sàng",
+                      stateColor: autoSource ? JoeTheme.okGreen : theme.meta,
+                      focusID: "auto") {
+                autoSource = true
+            }
+        case .current:
+            sourceRow(name: Providers.displayName(provider),
+                      meta: d.servers.map { $0.name }.filter { !$0.isEmpty }
+                        .joined(separator: " · "),
+                      state: autoSource ? "Sẵn sàng" : "● Đang phát",
+                      stateColor: autoSource ? theme.meta : JoeTheme.okGreen,
+                      focusID: "current") {
+                autoSource = false
+            }
+        case .alternative(let code, let altSlug):
+            sourceRow(name: Providers.displayName(code),
+                      meta: "Nguồn khác của phim này",
+                      state: "Sẵn sàng", stateColor: theme.meta,
+                      focusID: code) {
+                switchNotice = nil
+                autoSource = false
+                provider = code
+                slug = altSlug
+            }
+        case .torrent:
+            torrentRow
+        }
+    }
+
+    /// F's Torrent row, by entry state (v2.0.5, D2). The
+    /// meta line is unchanged (the rung still substitutes
+    /// automatically); what changed is the row's agency:
+    /// .ready → a Button opening the film's torrent detail;
+    /// .pending / .unresolved → a Button whose press is a
+    /// no-op, the state text saying why (never a vanished
+    /// row, never a dead press into nowhere); .notConfigured
+    /// keeps the shipped status-only "Cần token" row.
+    @ViewBuilder
+    private var torrentRow: some View {
+        switch torrentEntryState {
+        case .notConfigured:
+            sourceRow(name: "Torrent",
+                      meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
+                      state: "Cần token",
+                      stateColor: .orange,
+                      action: nil)
+        case .pending:
+            sourceRow(name: "Torrent",
+                      meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
+                      state: "Đang tìm mã IMDb…",
+                      stateColor: theme.meta,
+                      focusID: "torrent") { }
+        case .unresolved:
+            sourceRow(name: "Torrent",
+                      meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
+                      state: "Chưa tìm được mã IMDb",
+                      stateColor: .orange,
+                      focusID: "torrent") { }
+        case .ready:
+            sourceRow(name: "Torrent",
+                      meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
+                      state: "Sẵn sàng",
+                      stateColor: theme.meta,
+                      focusID: "torrent") {
+                openTorrentDetail()
+            }
+        }
     }
 
     /// One source row (UI-6 defect D-6): SINGLE line — name and
     /// meta inline on one row (the render's .srcrow), radius
     /// theme.rField, the theme's surface-gradient fill.
+    /// v2.0.5 (N1, pair h): a row with an action AND a focusID
+    /// joins the detail's focus system (focusedAlt, the same
+    /// binding the chip anatomies use) and carries the
+    /// vertical form of sourceMove; the status-only row
+    /// (action nil — "Cần token") stays non-focusable text.
     @ViewBuilder
     private func sourceRow(name: String, meta: String, state: String,
                            stateColor: Color,
+                           focusID: String? = nil,
                            action: (() -> Void)?) -> some View {
         let row = HStack(alignment: .center, spacing: 20) {
             Text(name)
@@ -510,10 +587,21 @@ struct JoeMovieDetail: View {
         .background(RoundedRectangle(cornerRadius: theme.rField)
             .fill(theme.surfaceGradient))
         if let action {
-            Button(action: action) {
+            let button = Button(action: action) {
                 row.overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
             }
-            .buttonStyle(.card)
+            .joeCardButton()
+            if let focusID {
+                button
+                    .focused($focusedAlt, equals: focusID)
+                    .joeBoundaryMove(
+                        up: { sourceMove(.up, from: focusID, vertical: true) },
+                        down: { sourceMove(.down, from: focusID, vertical: true) },
+                        left: { sourceMove(.left, from: focusID, vertical: true) },
+                        right: { sourceMove(.right, from: focusID, vertical: true) })
+            } else {
+                button
+            }
         } else {
             row
         }
@@ -604,16 +692,213 @@ struct JoeMovieDetail: View {
         }
     }
 
+    // MARK: - Nguồn phát membership (ONE shared model, v2.0.5)
+
+    /// ONE membership model for the Nguồn phát block
+    /// (v2.0.5, D1): the ordered source entries every detail
+    /// anatomy renders — Tự động, the current provider, one
+    /// entry per alternative provider, and the Torrent
+    /// entry LAST, always. Until now each anatomy kept a
+    /// private builder and D's never created a Torrent
+    /// element at all (the owner's yellow-theme photo: the
+    /// chip missing for every title); with membership
+    /// computed HERE, an anatomy owns only its layout (A/D
+    /// chips, F rows) and cannot silently drop an entry —
+    /// the Torrent entry's absence from a layout is now a
+    /// compile-visible choice, not an omission.
+    private enum SourceEntry: Identifiable {
+        case auto
+        case current
+        case alternative(code: String, slug: String)
+        case torrent
+
+        var id: String {
+            switch self {
+            case .auto: return "auto"
+            case .current: return "current"
+            case .alternative(let code, _): return "alt|" + code
+            case .torrent: return "torrent"
+            }
+        }
+    }
+
+    private var sourceEntries: [SourceEntry] {
+        var entries: [SourceEntry] = [.auto, .current]
+        entries += alternatives.map {
+            .alternative(code: $0.code, slug: $0.slug)
+        }
+        entries.append(.torrent)
+        return entries
+    }
+
+    /// The Torrent entry's state (D1/D2): configuration from
+    /// TorrentSettings, identity from the detail-time ladder
+    /// (filmIdentity). `.pending` = the ladder has not landed
+    /// for this record; `.unresolved` = it landed EMPTY — the
+    /// honest end state, rendered visibly, never a vanished
+    /// entry.
+    private enum TorrentEntryState {
+        case notConfigured
+        case pending
+        case ready(imdbId: String)
+        case unresolved
+    }
+
+    private var torrentEntryState: TorrentEntryState {
+        guard TorrentSettings.isConfigured else { return .notConfigured }
+        guard let filmIdentity else { return .pending }
+        return filmIdentity.imdbId.isEmpty
+            ? .unresolved : .ready(filmIdentity.imdbId)
+    }
+
+    /// The Torrent entry pressed in its .ready state (D2):
+    /// open THIS film's torrent detail — the torrent tab's
+    /// own screen (JoeTorrentDetail), layered over this
+    /// detail by the root (nav.tor, zIndex above the movie
+    /// layer), so its own-root Menu handler closes back to
+    /// this page with this page's state intact. The meta is
+    /// keyed by the resolved IMDb id and addressed through
+    /// Cinemeta (the FIX9b lesson: Torrentio serves no
+    /// metadata — its base must never be a meta base). Any
+    /// other state: the press is a no-op and the entry's
+    /// state stays on screen.
+    private func openTorrentDetail() {
+        guard case .ready(let imdbId) = torrentEntryState,
+              let d = detail else { return }
+        var meta = TorMeta()
+        meta.id = imdbId
+        meta.type = torrentMetaType(d)
+        meta.name = d.movie.name
+        meta.poster = d.movie.poster
+        meta.background = tmdb?.backdropURL ?? ""
+        meta.year = d.movie.year
+        meta.desc = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
+        nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta)
+    }
+
+    /// Movie vs series for the torrent meta: the TMDB type
+    /// when any record carries one (the detail's own first,
+    /// then the ladder's — the ladder may hold the type the
+    /// opened record lacked); with no type on record, a
+    /// multi-episode detail is a series (the substitution
+    /// rung's own test).
+    private func torrentMetaType(_ d: Detail) -> String {
+        var type = d.movie.tmdbType
+        if type.isEmpty, let resolved = filmIdentity?.tmdbType,
+           !resolved.isEmpty {
+            type = resolved
+        }
+        if type == "tv" { return "series" }
+        if type.isEmpty {
+            let episodeCount = d.servers.reduce(0) { $0 + $1.episodes.count }
+            if episodeCount > 1 { return "series" }
+        }
+        return "movie"
+    }
+
+    /// The Torrent entry in the chip anatomies (A + D),
+    /// v2.0.5 (D2): a real focusable control now — until now
+    /// A rendered a bare non-focusable label and D rendered
+    /// nothing. Configured → the button stands (press opens
+    /// the torrent detail when the identity is .ready; the
+    /// press is a no-op while .pending / .unresolved, with
+    /// the state note under the row saying why). Unconfigured
+    /// → no chip: design A's shipped treatment (F carries
+    /// the "Cần token" row for that state instead).
+    @ViewBuilder
+    private var torrentChip: some View {
+        if TorrentSettings.isConfigured {
+            Button {
+                openTorrentDetail()
+            } label: {
+                JoeChipLabel(title: "Torrent", selected: false)
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: "torrent")
+            .joeBoundaryMove(
+                up: { sourceMove(.up, from: "torrent", vertical: false) },
+                down: { sourceMove(.down, from: "torrent", vertical: false) },
+                left: { sourceMove(.left, from: "torrent", vertical: false) },
+                right: { sourceMove(.right, from: "torrent", vertical: false) })
+        }
+    }
+
+    /// One chip-anatomy entry (shared by A's sourceChips and
+    /// D's altChips — the two rows' buttons were byte-identical
+    /// copies; they are one builder now, over the shared
+    /// membership model).
+    @ViewBuilder
+    private func sourceChip(_ entry: SourceEntry) -> some View {
+        switch entry {
+        case .auto:
+            Button {
+                autoSource = true
+            } label: {
+                JoeChipLabel(title: "Tự động", selected: autoSource)
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: "auto")
+            .joeBoundaryMove(
+                up: { sourceMove(.up, from: "auto", vertical: false) },
+                down: { sourceMove(.down, from: "auto", vertical: false) },
+                left: { sourceMove(.left, from: "auto", vertical: false) },
+                right: { sourceMove(.right, from: "auto", vertical: false) })
+        case .current:
+            Button {
+                autoSource = false
+            } label: {
+                JoeChipLabel(title: Providers.displayName(provider),
+                             selected: !autoSource)
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: "current")
+            .joeBoundaryMove(
+                up: { sourceMove(.up, from: "current", vertical: false) },
+                down: { sourceMove(.down, from: "current", vertical: false) },
+                left: { sourceMove(.left, from: "current", vertical: false) },
+                right: { sourceMove(.right, from: "current", vertical: false) })
+        case .alternative(let code, let altSlug):
+            Button {
+                switchNotice = nil
+                autoSource = false
+                provider = code
+                slug = altSlug
+            } label: {
+                JoeChipLabel(title: Providers.displayName(code), selected: false)
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: code)
+            .joeBoundaryMove(
+                up: { sourceMove(.up, from: code, vertical: false) },
+                down: { sourceMove(.down, from: code, vertical: false) },
+                left: { sourceMove(.left, from: code, vertical: false) },
+                right: { sourceMove(.right, from: code, vertical: false) })
+        case .torrent:
+            torrentChip
+        }
+    }
+
+    /// The unresolved-identity note under a chip row: the
+    /// row's own meta text treatment (25 pt, theme.meta —
+    /// the size/style D's "Nguồn phát:" label already uses).
+    @ViewBuilder
+    private var torrentUnresolvedNote: some View {
+        if case .unresolved = torrentEntryState {
+            Text("Chưa tìm được mã IMDb")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+        }
+    }
+
     /// Design A's Nguồn phát block (UI-6 defects D-11 + D-12;
     /// owner source-priority policy): the render's bold
     /// "Nguồn phát" block heading over the chip row — Tự động
     /// FIRST (the policy's default), the current source's chip
     /// (tapping PINS it), one chip per alternative source
     /// (tapping switches AND pins — C-9 revert behind load()),
-    /// and the Torrent status chip when the torrent rung is
-    /// configured (status semantics, mirroring F's torrent
-    /// row: the rung fires inside the director, the chip is
-    /// not a control).
+    /// and the Torrent chip (v2.0.5: a real control over the
+    /// shared membership model — see sourceChip/torrentChip).
     private var sourceChips: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Nguồn phát")
@@ -623,38 +908,16 @@ struct JoeMovieDetail: View {
                 if switching {
                     ProgressView().tint(theme.text)
                 }
-                Button {
-                    autoSource = true
-                } label: {
-                    JoeChipLabel(title: "Tự động", selected: autoSource)
-                }
-                .buttonStyle(.card)
-                .focused($focusedAlt, equals: "auto")
-                Button {
-                    autoSource = false
-                } label: {
-                    JoeChipLabel(title: Providers.displayName(provider),
-                                 selected: !autoSource)
-                }
-                .buttonStyle(.card)
-                .focused($focusedAlt, equals: "current")
-                ForEach(alternatives, id: \.code) { alt in
-                    Button {
-                        switchNotice = nil
-                        autoSource = false
-                        provider = alt.code
-                        slug = alt.slug
-                    } label: {
-                        JoeChipLabel(title: Providers.displayName(alt.code), selected: false)
-                    }
-                    .buttonStyle(.card)
-                    .focused($focusedAlt, equals: alt.code)
-                }
-                if TorrentSettings.isConfigured {
-                    JoeChipLabel(title: "Torrent", selected: false)
+                ForEach(sourceEntries) { entry in
+                    sourceChip(entry)
                 }
             }
+            torrentUnresolvedNote
         }
+        // v2.0.5 (N1, pair h): the source block is a declared
+        // focus region between the header pair and the
+        // episode block.
+        .focusSection()
     }
 
     /// Poster size per design (A frame 288×432, D 300×450,
@@ -683,7 +946,12 @@ struct JoeMovieDetail: View {
             Color.black.opacity(0.45)
             JoeRemoteImage(url: m.posterURL,
                            targetPixels: theme.id == .sourceBoard ? 480 : 960,
-                           fit: true) {
+                           fit: true,
+                           slotClass: .portrait,
+                           fallbackProvider: {
+                               await JoeImagePipeline.shared.tmdbPosterURL(
+                                   tmdbId: m.tmdbId, type: m.tmdbType)
+                           }) {
                 Text(m.name)
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.8))
@@ -781,7 +1049,21 @@ struct JoeMovieDetail: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: 430)
-            .clipped()
+            // v2.0.5 (N5 — design fidelity): DESIGN-SPEC-V19
+            // §7.4 specifies this strip with corner radius 18
+            // and a white @ 0.14 stroke at 2 pt, and
+            // acceptance shot 16 requires the radius VISIBLE;
+            // the shipped band was square-cornered (the
+            // owner's "Backdrop của theme ko có bo góc").
+            // Applied on the band's EXISTING geometry: the
+            // height stays 430 — §7.4's frozen 540 predates
+            // the approved composition this page was built
+            // from (the render + Android pipeline both run
+            // 430), so the dimension is flagged in the wave
+            // report rather than silently changed here.
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18)
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
         }
     }
 
@@ -845,6 +1127,128 @@ struct JoeMovieDetail: View {
             .foregroundStyle(.white.opacity(0.8))
     }
 
+    // MARK: - Boundary routing (v2.0.5, N1 pair h)
+
+    /// The source block's FOCUSABLE entry ids, in on-screen
+    /// order — the arithmetic both source anatomies route
+    /// over (A/D chips horizontally, F rows vertically; one
+    /// model, two orientations). The Torrent entry joins the
+    /// list only while it is a control: in the chip anatomies
+    /// it renders only when configured, and in F the
+    /// unconfigured state is the non-focusable "Cần token"
+    /// status row — in both, unconfigured ⟺ absent here.
+    private var sourceFocusIDs: [String] {
+        var ids = ["auto", "current"]
+        ids += alternatives.map { $0.code }
+        if TorrentSettings.isConfigured { ids.append("torrent") }
+        return ids
+    }
+
+    /// The episode block's entry: the first PLAYABLE
+    /// episode's focus key ("<serverIndex>|<name>", the
+    /// chips' F4 identity), or nil when nothing below the
+    /// source block can take focus.
+    private var firstEpisodeFocusKey: String? {
+        guard let d = detail else { return nil }
+        for (si, server) in d.servers.enumerated() {
+            for ep in server.episodes
+            where Providers.isPlayable(code: provider, episode: ep) {
+                return "\(si)|\(ep.name)"
+            }
+        }
+        return nil
+    }
+
+    /// Source-block routing, shared by the chips (A/D:
+    /// `vertical` false — LEFT/RIGHT are the row's own
+    /// arithmetic, UP exits to the play button, DOWN enters
+    /// the episode block) and by F's rows (`vertical` true —
+    /// UP/DOWN are the list's arithmetic, LEFT/RIGHT are
+    /// declared no-ops on full-width rows, the ends exit to
+    /// the play button / the episode block). The Dark Waters
+    /// case is the contract: from ANY source entry, the
+    /// Torrent entry is reachable by walking this list, and
+    /// from the episode block UP returns here (epMove).
+    private func sourceMove(_ direction: MoveCommandDirection,
+                            from id: String, vertical: Bool) {
+        let ids = sourceFocusIDs
+        guard let i = ids.firstIndex(of: id) else { return }
+        switch direction {
+        case .left:
+            if !vertical, i > 0 { focusedAlt = ids[i - 1] }
+        case .right:
+            if !vertical, i + 1 < ids.count { focusedAlt = ids[i + 1] }
+        case .up:
+            if vertical, i > 0 {
+                focusedAlt = ids[i - 1]
+            } else {
+                focusedPlay = true
+            }
+        case .down:
+            if vertical, i + 1 < ids.count {
+                focusedAlt = ids[i + 1]
+            } else if let key = firstEpisodeFocusKey {
+                focusedEp = key
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Episode-block routing. The chips live in wrapping
+    /// flow rows (FlowLayout), whose wrapped rows have no
+    /// enumerable column structure, so the block routes like
+    /// the homes' rails: LEFT/RIGHT step within the server
+    /// group (skipping unplayable chips, which are disabled
+    /// and cannot hold focus), UP/DOWN step between server
+    /// groups (previous group's last playable chip / next
+    /// group's first), and UP from the first group lands on
+    /// the source block's ACTIVE entry — the reciprocal of
+    /// sourceMove's DOWN. DOWN out of the last group is a
+    /// defined no-op: nothing focusable sits below the
+    /// episode block in any anatomy.
+    private func epMove(_ direction: MoveCommandDirection,
+                        detail d: Detail, serverIndex si: Int,
+                        episodeIndex ei: Int) {
+        guard !switching else { return }
+        let servers = d.servers
+        guard servers.indices.contains(si) else { return }
+        func playable(_ s: Int, _ e: Int) -> Bool {
+            Providers.isPlayable(code: provider,
+                                 episode: servers[s].episodes[e])
+        }
+        func land(_ s: Int, _ e: Int) {
+            focusedEp = "\(s)|\(servers[s].episodes[e].name)"
+        }
+        switch direction {
+        case .left, .right:
+            var idx = ei + (direction == .left ? -1 : 1)
+            while servers[si].episodes.indices.contains(idx) {
+                if playable(si, idx) { land(si, idx); return }
+                idx += (direction == .left ? -1 : 1)
+            }
+        case .up:
+            if si > 0 {
+                var e = servers[si - 1].episodes.count - 1
+                while e >= 0 {
+                    if playable(si - 1, e) { land(si - 1, e); return }
+                    e -= 1
+                }
+            }
+            focusedAlt = autoSource ? "auto" : "current"
+        case .down:
+            if si + 1 < servers.count {
+                var e = 0
+                while e < servers[si + 1].episodes.count {
+                    if playable(si + 1, e) { land(si + 1, e); return }
+                    e += 1
+                }
+            }
+        @unknown default:
+            break
+        }
+    }
+
     // MARK: - Play now
 
     /// The episode the big play button starts: the route's
@@ -875,9 +1279,17 @@ struct JoeMovieDetail: View {
             JoePrimaryLabel(title: isResume ? "Xem tiếp" : "Xem ngay",
                             systemImage: "play.fill")
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedPlay)
         .disabled(startEpisode(d) == nil || switching)
+        // v2.0.5 (N1, pair h): the header pair's exits —
+        // RIGHT to the favourite button, DOWN to the source
+        // block's first entry. LEFT/UP are declared no-ops
+        // (the poster/band beside and above are decoration;
+        // the layer's top is here, Menu is the way out).
+        .joeBoundaryMove(
+            down: { focusedAlt = "auto" },
+            right: { focusedFav = true })
     }
 
     private func favButton(_ d: Detail) -> some View {
@@ -906,50 +1318,48 @@ struct JoeMovieDetail: View {
                 .background(Capsule().fill(theme.surface2))
                 .overlay(JoeFocusRing(shape: Capsule()))
         }
-        .buttonStyle(.card)
+        .joeCardButton()
+        // v2.0.5 (N1, pair h): the favourite button's binding
+        // (new — see focusedFav) and its exits: LEFT back to
+        // play, DOWN to the source block's first entry.
+        // RIGHT/UP are declared no-ops (nothing focusable
+        // beside or above it in any anatomy).
+        .focused($focusedFav)
+        .joeBoundaryMove(
+            down: { focusedAlt = "auto" },
+            left: { focusedPlay = true })
     }
 
     // MARK: - Nguồn phát chips (design D)
 
     /// Design D's Nguồn phát row (owner source-priority
     /// policy): Tự động first, the current source (tap pins),
-    /// then the alternative sources (tap switches + pins).
+    /// then the alternative sources (tap switches + pins) —
+    /// and, since v2.0.5, the Torrent chip: D's private
+    /// builder used to end at the alternatives, so the chip
+    /// was missing here for EVERY title (the owner's
+    /// yellow-theme photo). Membership comes from the shared
+    /// model now (sourceEntries/sourceChip); D keeps only
+    /// its inline "Nguồn phát:" label and the centred
+    /// composition around the row.
     private var altChips: some View {
-        HStack(spacing: 14) {
-            if switching {
-                ProgressView().tint(theme.text)
-            }
-            Text("Nguồn phát:")
-                .font(.system(size: 25, weight: .medium))
-                .foregroundStyle(theme.meta)
-            Button {
-                autoSource = true
-            } label: {
-                JoeChipLabel(title: "Tự động", selected: autoSource)
-            }
-            .buttonStyle(.card)
-            .focused($focusedAlt, equals: "auto")
-            Button {
-                autoSource = false
-            } label: {
-                JoeChipLabel(title: Providers.displayName(provider),
-                             selected: !autoSource)
-            }
-            .buttonStyle(.card)
-            .focused($focusedAlt, equals: "current")
-            ForEach(alternatives, id: \.code) { alt in
-                Button {
-                    switchNotice = nil
-                    autoSource = false
-                    provider = alt.code
-                    slug = alt.slug
-                } label: {
-                    JoeChipLabel(title: Providers.displayName(alt.code), selected: false)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                if switching {
+                    ProgressView().tint(theme.text)
                 }
-                .buttonStyle(.card)
-                .focused($focusedAlt, equals: alt.code)
+                Text("Nguồn phát:")
+                    .font(.system(size: 25, weight: .medium))
+                    .foregroundStyle(theme.meta)
+                ForEach(sourceEntries) { entry in
+                    sourceChip(entry)
+                }
             }
+            torrentUnresolvedNote
         }
+        // v2.0.5 (N1, pair h): D's source block — the same
+        // declared region as A's (see sourceChips).
+        .focusSection()
     }
 
     // MARK: - Servers & episodes
@@ -984,16 +1394,24 @@ struct JoeMovieDetail: View {
                             .foregroundStyle(theme.meta)
                     }
                     FlowLayout(spacing: 16) {
-                        ForEach(Array(server.episodes.enumerated()), id: \.offset) { _, ep in
-                            epChip(d, ep: ep, focusKey: "\(serverIndex)|\(ep.name)")
+                        ForEach(Array(server.episodes.enumerated()), id: \.offset) { epIndex, ep in
+                            epChip(d, ep: ep, serverIndex: serverIndex,
+                                   episodeIndex: epIndex)
                         }
                     }
                 }
             }
         }
+        // v2.0.5 (N1, pair h): the episode block is a
+        // declared focus region in every anatomy (it is the
+        // Dark Waters "link list" the owner's video starts
+        // from).
+        .focusSection()
     }
 
-    private func epChip(_ d: Detail, ep: Episode, focusKey: String) -> some View {
+    private func epChip(_ d: Detail, ep: Episode, serverIndex: Int,
+                        episodeIndex: Int) -> some View {
+        let focusKey = "\(serverIndex)|\(ep.name)"
         let playable = Providers.isPlayable(code: provider, episode: ep)
         let storedEp = watch.progress().first(where: {
             $0.slug == slug && $0.source == provider })?.ep
@@ -1026,9 +1444,25 @@ struct JoeMovieDetail: View {
                                   : (preselected ? Color.clear : theme.stroke),
                                   lineWidth: focused ? theme.ringWidth : 1.5))
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($focusedEp, equals: focusKey)
         .disabled(!playable || switching)
+        // v2.0.5 (N1, pair h): the episode block's own
+        // routing (see epMove) — the detail's first
+        // onMoveCommand on its chips; pre-fix this file had
+        // none, so the block could only be crossed
+        // geometrically, which is exactly what failed on
+        // the owner's Dark Waters case (from the link list,
+        // UP never reached the source row).
+        .joeBoundaryMove(
+            up: { epMove(.up, detail: d, serverIndex: serverIndex,
+                         episodeIndex: episodeIndex) },
+            down: { epMove(.down, detail: d, serverIndex: serverIndex,
+                           episodeIndex: episodeIndex) },
+            left: { epMove(.left, detail: d, serverIndex: serverIndex,
+                           episodeIndex: episodeIndex) },
+            right: { epMove(.right, detail: d, serverIndex: serverIndex,
+                            episodeIndex: episodeIndex) })
     }
 
     // MARK: - Loading + playing
@@ -1082,6 +1516,13 @@ struct JoeMovieDetail: View {
             alternatives = await Providers.findAlternatives(
                 fromCode: provider, name: d.movie.name,
                 origin: d.movie.originName, year: d.movie.year)
+            // v2.0.5 (D3): the detail-time identity ladder
+            // runs alongside the alternatives lookup and lands
+            // in view state, so the source row re-renders with
+            // the Torrent entry's state the moment it resolves.
+            filmIdentity = await Providers.resolveIdentity(
+                movie: d.movie, fromCode: provider,
+                alternatives: alternatives)
         } catch {
             switching = false
             if let cachedPaint {
@@ -1095,6 +1536,13 @@ struct JoeMovieDetail: View {
                     name: cachedPaint.movie.name,
                     origin: cachedPaint.movie.originName,
                     year: cachedPaint.movie.year)
+                // v2.0.5 (D3): the identity ladder runs here
+                // too — the painted film's Torrent entry must
+                // not wait on a detail fetch that already
+                // failed once either.
+                filmIdentity = await Providers.resolveIdentity(
+                    movie: cachedPaint.movie, fromCode: attemptedProvider,
+                    alternatives: alternatives)
             } else if !hadDetail {
                 loadFailed = true
                 focusedRetry = true
@@ -1274,14 +1722,19 @@ struct JoeMovieDetail: View {
     /// on the Phim entry (one CW row per title, as the owner
     /// expects). Identity is by ID only, never by title text:
     /// the detail's own IMDB id when a provider carried one
-    /// (Tủ Phim does), else its TMDB id → TMDB external_ids →
-    /// IMDB id, with the TMDB id hunted through the KK
-    /// alternative when this provider's detail lacks one (the
-    /// hop's own findAlternatives call — KK is the provider
-    /// whose details carry TMDB ids). Series episodes address
-    /// Torrentio as imdbId:season:episode. Fail-soft end to
-    /// end: any gap returns [] and the director shows its
-    /// exhausted slate — the honest end state.
+    /// (Tủ Phim does); else — v2.0.5 — the detail-time
+    /// ladder's cached identity (Providers.resolveIdentity:
+    /// external_ids, every alternative's detail, the strict
+    /// TMDB title search), consumed first, negatives
+    /// included; only when that ladder never ran for the
+    /// film does the rung fall back to its original
+    /// derivation (TMDB id → TMDB external_ids → IMDB id,
+    /// with the TMDB id hunted through the KK alternative
+    /// when this provider's detail lacks one). Series
+    /// episodes address Torrentio as imdbId:season:episode.
+    /// Fail-soft end to end: any gap returns [] and the
+    /// director shows its exhausted slate — the honest end
+    /// state.
     /// `highQualityOnly` is the source-priority policy's
     /// front-probe form: only streams whose release passes
     /// TorStream.isHighQualityRelease may lead the ladder;
@@ -1309,23 +1762,45 @@ struct JoeMovieDetail: View {
         var tmdbType = d.movie.tmdbType
         var tmdbSeason = d.movie.tmdbSeason
         if imdbId.isEmpty {
-            var tmdbId = d.movie.tmdbId
-            if tmdbId.isEmpty {
-                let alts = await Providers.findAlternatives(
-                    fromCode: identity.entry.source,
-                    name: d.movie.name, origin: d.movie.originName,
-                    year: d.movie.year)
-                if let kk = alts.first(where: { $0.code == Providers.KK }),
-                   let kd = try? await Providers.detail(kk.code, slug: kk.slug) {
-                    tmdbId = kd.movie.tmdbId
-                    imdbId = kd.movie.imdbId
-                    if tmdbType.isEmpty { tmdbType = kd.movie.tmdbType }
-                    if tmdbSeason <= 0 { tmdbSeason = kd.movie.tmdbSeason }
+            // v2.0.5 (D3): consume the detail-time ladder's
+            // result FIRST. The ladder (Providers
+            // .resolveIdentity, run when this film's detail
+            // page loaded) is a superset of the derivation
+            // below — own ids, external_ids, EVERY
+            // alternative's detail, the strict TMDB title
+            // search — and its answer is session-cached,
+            // negatives included. A cached NEGATIVE is
+            // consumed as-is: re-running the weaker derivation
+            // could only repeat its answer, slower. Only a
+            // cache MISS (the ladder never ran for this film —
+            // a programmatic director entry) falls back to the
+            // derivation below.
+            if let cached = Providers.identityCacheGet(
+                Providers.identityKey(name: originDetail.movie.name,
+                                      year: originDetail.movie.year,
+                                      fromCode: originProvider)) {
+                imdbId = cached.imdbId
+                if tmdbType.isEmpty { tmdbType = cached.tmdbType }
+                if tmdbSeason <= 0 { tmdbSeason = cached.tmdbSeason }
+            } else {
+                var tmdbId = d.movie.tmdbId
+                if tmdbId.isEmpty {
+                    let alts = await Providers.findAlternatives(
+                        fromCode: identity.entry.source,
+                        name: d.movie.name, origin: d.movie.originName,
+                        year: d.movie.year)
+                    if let kk = alts.first(where: { $0.code == Providers.KK }),
+                       let kd = try? await Providers.detail(kk.code, slug: kk.slug) {
+                        tmdbId = kd.movie.tmdbId
+                        imdbId = kd.movie.imdbId
+                        if tmdbType.isEmpty { tmdbType = kd.movie.tmdbType }
+                        if tmdbSeason <= 0 { tmdbSeason = kd.movie.tmdbSeason }
+                    }
                 }
-            }
-            if imdbId.isEmpty, !tmdbId.isEmpty {
-                imdbId = await TMDBClient.imdbId(
-                    tmdbId: tmdbId, type: tmdbType) ?? ""
+                if imdbId.isEmpty, !tmdbId.isEmpty {
+                    imdbId = await TMDBClient.imdbId(
+                        tmdbId: tmdbId, type: tmdbType) ?? ""
+                }
             }
         }
         guard !imdbId.isEmpty else { return [] }

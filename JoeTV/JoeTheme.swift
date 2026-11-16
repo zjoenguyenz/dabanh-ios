@@ -271,6 +271,86 @@ extension View {
     }
 }
 
+// MARK: - Card button (the system focus effect, disabled ONCE, centrally)
+//
+// v2.0.5 (owner errors 1+2): every Button in the app used the
+// bare .card style, so TWO focus visuals stacked — the app's
+// JoeFocusRing (drawn inside the label's own bounds) AND the
+// tvOS system card effect (a scale + outset shadow platter
+// larger than the button), which is what clipped the "2026"
+// line on Poster Wall cards, threw grey silhouettes around
+// inset art, and pushed neighbouring chips off their row.
+// The cure is central, not per-site: this ONE modifier keeps
+// the .card style's press/focus behaviour and disables its
+// system focus effect, so JoeFocusRing is the only visible
+// focus treatment in the app. It is safe now for the reason
+// the old 1.9.2 ban's precondition no longer holds: every
+// label in the target paints one full shape (the slab defect
+// came from bare-text labels over the platter), so nothing
+// needs the platter to read as a surface. (focusEffectDisabled
+// is tvOS 17+; the target's minimum is 17.0.)
+struct JoeCardButton: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(.card)
+            .focusEffectDisabled()
+    }
+}
+
+extension View {
+    /// The app's only card-button construction — see
+    /// JoeCardButton above. Every `.card` call site in the
+    /// target goes through here.
+    func joeCardButton() -> some View {
+        modifier(JoeCardButton())
+    }
+}
+
+// MARK: - Boundary routing (v2.0.5, N1 — one shared construction)
+//
+// The shared boundary-routing helper. The repo's standing
+// rule, learned from every handler that device-proves
+// (JoeTVSection.moveInGrid, JoeSearch.resultMove,
+// JoeBrowse.gridMove): an attached .onMoveCommand owns EVERY
+// direction — the engine delivers the press to the handler
+// INSTEAD of moving focus geometrically. So a call site that
+// attaches this helper declares all four exits: a direction
+// with a closure performs that closure's landing (in-region
+// arithmetic or a boundary landing — the call site's own
+// knowledge), and a direction left nil is a DECLARED no-op
+// (the element sits at a region edge with nothing beyond it
+// in that direction — the screen's top edge, a full-width
+// row's sides), never an accidental swallow. Handlers are
+// always installed where the helper is applied; attachment
+// follows the surface, never focus state (law D4).
+struct JoeBoundaryMove: ViewModifier {
+    var up: (() -> Void)? = nil
+    var down: (() -> Void)? = nil
+    var left: (() -> Void)? = nil
+    var right: (() -> Void)? = nil
+
+    func body(content: Content) -> some View {
+        content.onMoveCommand { direction in
+            switch direction {
+            case .up: up?()
+            case .down: down?()
+            case .left: left?()
+            case .right: right?()
+            @unknown default: break
+            }
+        }
+    }
+}
+
+extension View {
+    func joeBoundaryMove(up: (() -> Void)? = nil,
+                         down: (() -> Void)? = nil,
+                         left: (() -> Void)? = nil,
+                         right: (() -> Void)? = nil) -> some View {
+        modifier(JoeBoundaryMove(up: up, down: down, left: left, right: right))
+    }
+}
+
 // MARK: - Wrapping flow layout (UI-6 defect D-4)
 
 /// Rows of content-sized items that wrap onto the next line —
@@ -332,13 +412,29 @@ struct FlowLayout: Layout {
 struct PosterCard: View {
     let title: String
     let posterURL: URL?
+    /// TMDB identity for the art slot's fallback ladder
+    /// (v2.0.5): when the primary poster is missing or fails
+    /// the portrait aspect gate, the slot resolves the
+    /// record's TMDB poster instead of painting a band.
+    /// Defaulted empty — call sites without an identity in
+    /// hand keep compiling and simply have no TMDB leg.
+    var tmdbId: String = ""
+    var tmdbType: String = ""
     var meta: String = ""
     var badge: String? = nil        // provider code (KK / F4K / VS / TP)
     var quality: String = ""        // quality tag (FHD / HD / CAM …)
     var progress: Double? = nil
     var subline: String? = nil
-    let focused: Bool
 
+    // v2.0.5 (N4): ONE focus source of truth — the card reads
+    // its own focus from the environment, exactly like every
+    // other label in the theme system (PillLabel, JoeChipLabel,
+    // JoePrimaryLabel). The caller-passed `focused:` argument
+    // is gone: it duplicated the environment value through a
+    // second channel (the caller's @FocusState), and the two
+    // could disagree for a frame whenever a landing write and
+    // the engine's own update raced.
+    @Environment(\.isFocused) private var isFocused
     @Environment(\.joeTheme) private var theme
 
     private var artRadius: CGFloat { max(theme.rCard - theme.artInset, 0) }
@@ -357,11 +453,30 @@ struct PosterCard: View {
     // and this frame is exactly 2:3, and the image is FIT into it —
     // the whole poster is always visible, aspect preserved end-to-end,
     // never cropped or stretched; a missing poster leaves the painted
-    // surface below, never a broken hole.
+    // surface below, never a broken hole. v2.0.5: the slot also gates
+    // on the decoded bitmap's aspect (slotClass .portrait) — a source
+    // whose "poster" field actually serves a landscape still (the Tủ
+    // Phim name swap) is rejected and the TMDB fallback runs, instead
+    // of the bitmap letterboxing into a band inside the frame.
+    /// The TMDB leg of the art slot's fallback ladder,
+    /// present only when the record carries a TMDB identity.
+    /// The pipeline caches the path lookup per identity, so
+    /// repeated appearances never re-ask.
+    private var tmdbFallback: (() async -> URL?)? {
+        guard !tmdbId.isEmpty else { return nil }
+        let id = tmdbId, type = tmdbType
+        return {
+            await JoeImagePipeline.shared.tmdbPosterURL(
+                tmdbId: id, type: type)
+        }
+    }
+
     private var art: some View {
         ZStack {
             Color.black.opacity(0.45)
-            JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true) {
+            JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true,
+                           slotClass: .portrait,
+                           fallbackProvider: tmdbFallback) {
                 Image(systemName: "film")
                     .font(.system(size: 44))
                     .foregroundStyle(.white.opacity(0.35))
@@ -411,7 +526,7 @@ struct PosterCard: View {
             art
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
-                .foregroundStyle(focused ? theme.focusTitle : theme.text)
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 12)
             if !meta.isEmpty {
@@ -435,8 +550,8 @@ struct PosterCard: View {
         .frame(width: theme.cardWidth, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: theme.rCard).fill(theme.surfaceGradient))
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .strokeBorder(focused ? theme.focus : theme.stroke,
-                          lineWidth: focused ? theme.ringWidth : 1.5))
+            .strokeBorder(isFocused ? theme.focus : theme.stroke,
+                          lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 
     private var wallBody: some View {
@@ -444,7 +559,7 @@ struct PosterCard: View {
             art
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
-                .foregroundStyle(focused ? theme.focusTitle : theme.text)
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 12)
             if !meta.isEmpty {
@@ -472,8 +587,8 @@ struct PosterCard: View {
         // on through the title block). Same shape, colour and
         // width values as before; only the bounds are corrected.
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .strokeBorder(focused ? theme.focus : .clear,
-                          lineWidth: focused ? theme.ringWidth : 0))
+            .strokeBorder(isFocused ? theme.focus : .clear,
+                          lineWidth: isFocused ? theme.ringWidth : 0))
     }
 }
 
@@ -496,5 +611,13 @@ struct Rail<Content: View>: View {
                     .padding(.vertical, 14)
             }
         }
+        // v2.0.5 (N1): every rail is a declared focus region.
+        // Between-region movement (rail ↔ rail, header ↔ rail)
+        // is then section-to-section navigation — the engine
+        // enters the rail as a unit and picks within it —
+        // instead of a pure beam search that dropped presses
+        // whose column held no card. Static and always
+        // installed; it guides the engine, consumes nothing.
+        .focusSection()
     }
 }

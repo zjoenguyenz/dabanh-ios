@@ -155,6 +155,7 @@ targets:
       - JoeTV/SourceProbe.swift
       - JoeTV/TMDBClient.swift
       - JoeTV/TMDBKey.swift
+      - JoeTV/BundledTokens.swift
       - JoeTV/Assets.xcassets
     dependencies:
       - package: KSPlayer
@@ -163,15 +164,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "2.0.4"
-        CURRENT_PROJECT_VERSION: "17"
+        MARKETING_VERSION: "2.0.5"
+        CURRENT_PROJECT_VERSION: "18"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.4"
-        CFBundleVersion: "17"
+        CFBundleShortVersionString: "2.0.5"
+        CFBundleVersion: "18"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

@@ -1,6 +1,20 @@
 import AVFoundation
 import AVKit
+import OSLog
 import SwiftUI
+
+/// Playback failure log (v2.0.5, error 8a): the torrent path
+/// used to discard every engine error unread — the KS delegate
+/// received the finish Error and threw it away, RD resolution
+/// failures vanished into a bare `try?`, and the exhausted
+/// slate carried no evidence at all. Failures are now logged
+/// with engine + HOST ONLY: Torrentio URLs embed the owner's
+/// RD token in the path, so a full URL (or any token) must
+/// never reach the log.
+enum PlaybackLog {
+    static let logger = Logger(subsystem: "com.luun.nguyen.joetv",
+                               category: "playback")
+}
 
 /// One playable stream candidate: a freshly resolved URL plus
 /// the headers its CDN demands (never a blanket header — see the
@@ -52,6 +66,13 @@ final class PlayDirector: ObservableObject {
     @Published private(set) var attemptID = 0
     @Published var notice: String?
     @Published private(set) var currentLabel = ""
+    /// The most recent candidate failure's short cause (an
+    /// engine error's description, or a watchdog label) — the
+    /// exhausted slate shows it ("Lỗi cuối: …") so a dead
+    /// slate finally says WHY, and itemFailed logs it. Set by
+    /// whichever engine/watchdog reports the failure; cleared
+    /// on a manual retry.
+    @Published private(set) var lastFailure: String?
 
     /// What the view should render right now.
     private(set) var candidate: PlayCandidate?
@@ -132,8 +153,20 @@ final class PlayDirector: ObservableObject {
     }
 
     /// The current item failed (status .failed or failed-to-end).
-    func itemFailed() {
+    /// `cause` is the failing engine's own error description
+    /// (or a watchdog label): it is remembered for the
+    /// exhausted slate and logged with the candidate's engine
+    /// and HOST ONLY — never the full URL (Torrentio URLs
+    /// carry the owner's RD token in the path).
+    func itemFailed(cause: String? = nil) {
         guard phase == .playing else { return }
+        if let cause, !cause.isEmpty {
+            lastFailure = String(cause.prefix(80))
+        }
+        let engineName = candidate?.engine == .ffmpeg ? "ffmpeg" : "avplayer"
+        let host = candidate?.url.host ?? "?"
+        PlaybackLog.logger.error(
+            "candidate failed engine=\(engineName, privacy: .public) host=\(host, privacy: .public) cause=\(cause ?? "—", privacy: .public)")
         candidateIndex += 1
         if candidateIndex < candidates.count {
             beginCandidate()
@@ -190,6 +223,7 @@ final class PlayDirector: ObservableObject {
         hopped = false
         fallbackTried = false
         seekApplied = false
+        lastFailure = nil
         notice = "Đang thử lại…"
         Task { await loadLadder() }
     }
@@ -341,15 +375,22 @@ struct JoePlayerView: View {
                 // v2.0.0 (UI-5): the slate's placement follows
                 // the active design — A a left column, D centred,
                 // F bottom-left with the tried sources as rows.
+                // v2.0.5 (error 8b): the slate's focus landing
+                // is a standing .defaultFocus DECLARATION on the
+                // slate container (one attachment covers all
+                // three anatomies) — the focus engine consults
+                // it at every focus update, including the one
+                // the engine representable's teardown triggers.
+                // The pre-fix construction was a one-shot
+                // @FocusState write in .onChange racing that
+                // teardown, with no declared landing to fall
+                // back on: focus landed nowhere and the slate's
+                // buttons were unreachable (Menu-only trap).
                 exhaustedSlate
+                    .defaultFocus($slateFocus, .retry)
             }
         }
         .onAppear { director.start() }
-        .onChange(of: director.phase) { _, phase in
-            // §8: when the error slate appears, focus lands on
-            // its first button.
-            if phase == .exhausted { slateFocus = .retry }
-        }
         .onDisappear { director.flush() }
         .onExitCommand { dismiss() }
     }
@@ -455,6 +496,15 @@ struct JoePlayerView: View {
             .font(.system(size: 29))
             .foregroundStyle(.white.opacity(0.7))
             .multilineTextAlignment(centred ? .center : .leading)
+        if let lastFailure = director.lastFailure {
+            // v2.0.5 (error 8a): the last failure's own cause,
+            // remembered by the director — a dead slate used
+            // to say nothing about why every attempt died.
+            Text("Lỗi cuối: \(lastFailure)")
+                .font(.system(size: 25))
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(centred ? .center : .leading)
+        }
         if theme.id != .sourceBoard, let attemptRows, !attemptRows.isEmpty {
             Text("Đã thử: " + attemptRows.joined(separator: " · "))
                 .font(.system(size: 25))
@@ -478,7 +528,7 @@ struct JoePlayerView: View {
                 JoeSecondaryLabel(title: title)
             }
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused($slateFocus, equals: tag)
     }
 
@@ -596,7 +646,9 @@ private struct PlayerController: UIViewControllerRepresentable {
             // error for it. The watchdog feeds the stall into
             // the director's normal failover path.
             watchdog?.cancel()
-            let wd = DispatchWorkItem { [weak self] in self?.fireFail() }
+            let wd = DispatchWorkItem { [weak self] in
+                self?.fireFail(cause: "Quá 20 giây vẫn chưa sẵn sàng phát")
+            }
             watchdog = wd
             DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: wd)
             // Mid-play freeze watchdog: armed now, but it only
@@ -636,8 +688,12 @@ private struct PlayerController: UIViewControllerRepresentable {
             }
             failToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-            ) { [weak self] _ in
-                self?.fireFail()
+            ) { [weak self] note in
+                // The notification carries the error that
+                // ended playback — hand it to the director
+                // (pre-v2.0.5 it was discarded unread).
+                let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                self?.fireFail(cause: err?.localizedDescription)
             }
             endToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
@@ -700,17 +756,24 @@ private struct PlayerController: UIViewControllerRepresentable {
             }
             lastPositionSec = pos
             if Date().timeIntervalSince(lastAdvanceAt) >= 12 {
-                fireFail()
+                fireFail(cause: "Hình đứng yên 12 giây (đóng băng)")
             }
         }
 
-        private func fireFail() {
+        /// Failure funnel: the cause (the caller's explicit
+        /// label, else the item's own error — read here before
+        /// it is thrown away) rides to the director, which logs
+        /// it and remembers it for the exhausted slate.
+        private func fireFail(cause: String? = nil) {
             guard !failed else { return }
             failed = true
             watchdog?.cancel()
             freezeTimer?.invalidate()
             freezeTimer = nil
-            DispatchQueue.main.async { [weak self] in self?.director.itemFailed() }
+            let resolved = cause ?? player?.currentItem?.error?.localizedDescription
+            DispatchQueue.main.async { [weak self] in
+                self?.director.itemFailed(cause: resolved)
+            }
         }
 
         func invalidate() {

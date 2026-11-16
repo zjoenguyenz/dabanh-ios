@@ -301,6 +301,14 @@ struct JoeFilterBar: View {
     let showType: Bool
     let showLang: Bool
     var chipFocus: FocusState<String?>.Binding
+    /// Browse surface only: the landing of a DOWN press on a
+    /// sort-row chip — the results grid's first item, the
+    /// reciprocal of the grid's UP → sort-chip landing
+    /// (JoeBrowseView.gridMove). The wall passes nil: owner
+    /// rails sit between its bar and its grid, so its sort row
+    /// keeps geometric DOWN and its chips carry no move
+    /// handler.
+    var onSortChipDown: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -370,9 +378,22 @@ struct JoeFilterBar: View {
             facetRow("Sắp xếp") {
                 ForEach([JoeSortOrder.updated, .newest, .oldest], id: \.self) { order in
                     chip(id: order.chipID, title: order.title,
-                         selected: filter.sort == order) {
+                         selected: filter.sort == order,
+                         onMove: sortMoveHandler(for: order.chipID)) {
                         filter.sort = order
                     }
+                }
+                // Đặt lại (owner, error 7): one press returns
+                // EVERY facet and the sort to defaults — the
+                // filter is a single value, so one assignment
+                // is the whole reset (no more un-tapping six
+                // rows of "Tất cả" chips). It rides the sort
+                // row's end and the row's focus system like
+                // any chip; it is never "selected".
+                chip(id: "sort:reset", title: "Đặt lại",
+                     selected: false,
+                     onMove: sortMoveHandler(for: "sort:reset")) {
+                    filter = JoeBrowseFilter()
                 }
             }
         }
@@ -393,13 +414,67 @@ struct JoeFilterBar: View {
         }
     }
 
+    @ViewBuilder
     private func chip(id: String, title: String, selected: Bool,
+                      onMove: ((MoveCommandDirection) -> Void)? = nil,
                       action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             JoeChipLabel(title: title, selected: selected)
         }
-        .buttonStyle(.card)
+        .joeCardButton()
         .focused(chipFocus, equals: id)
+        // The attachment follows the SURFACE (browse vs wall —
+        // see onSortChipDown), never focus state: the
+        // JoeSearchView.resultCard construction.
+        if let onMove {
+            button.onMoveCommand(perform: onMove)
+        } else {
+            button
+        }
+    }
+
+    /// The sort row's chip ids in visual order — the three
+    /// sort chips plus Đặt lại riding last.
+    private var sortRowChipIDs: [String] {
+        [JoeSortOrder.updated, .newest, .oldest].map { $0.chipID } + ["sort:reset"]
+    }
+
+    /// The sort row's move handler, present only where the
+    /// surface declared a DOWN landing (onSortChipDown);
+    /// everywhere else the chips carry no handler at all.
+    private func sortMoveHandler(for id: String) -> ((MoveCommandDirection) -> Void)? {
+        guard onSortChipDown != nil else { return nil }
+        return { direction in sortMove(direction, from: id) }
+    }
+
+    /// Sort-row routing (browse surface): once a chip carries
+    /// a move handler the handler owns every direction, so
+    /// LEFT/RIGHT are the row's own arithmetic (stopping at
+    /// the row's ends, the file's chip convention), UP lands
+    /// on the ACTIVE chip of the facet row directly above —
+    /// the same active-chip landing the grids use in reverse
+    /// (gridMove / wallMove) — and DOWN is the surface's
+    /// declared landing: the results grid's first item.
+    private func sortMove(_ direction: MoveCommandDirection, from id: String) {
+        let ids = sortRowChipIDs
+        switch direction {
+        case .left:
+            if let i = ids.firstIndex(of: id), i > 0 {
+                chipFocus.wrappedValue = ids[i - 1]
+            }
+        case .right:
+            if let i = ids.firstIndex(of: id), i + 1 < ids.count {
+                chipFocus.wrappedValue = ids[i + 1]
+            }
+        case .up:
+            chipFocus.wrappedValue = showLang
+                ? (filter.lang.map { "lang:" + $0 } ?? "lang:all")
+                : filter.type.chipID
+        case .down:
+            onSortChipDown?()
+        @unknown default:
+            break
+        }
     }
 }
 
@@ -428,62 +503,91 @@ struct JoeBrowseView: View {
     }
 
     var body: some View {
+        // Error 7 (owner): the bar used to be PINNED above a
+        // separate results ScrollView — ~525 pt of fixed
+        // header on a 1080 pt screen, leaving the grid a
+        // single poster row. The bar now rides INSIDE the one
+        // scroll container, the theme D wall's construction
+        // (JoeWallHomeView): it scrolls away and the grid gets
+        // the screen. The title stays the fixed header above
+        // the scroll.
         VStack(alignment: .leading, spacing: 26) {
             Text("Tất cả phim")
                 .font(.system(size: 44, weight: .heavy))
                 .foregroundStyle(theme.text)
-            JoeFilterBar(filter: $filter,
-                         years: JoeBrowseFilter.yearBuckets(for: phim.merged),
-                         hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
-                         showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
-                         showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
-                         showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
-                         showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
-                         chipFocus: $chipFocus)
-            if movies.isEmpty {
-                if phim.loading && !phim.loadTimedOut {
-                    ProgressView("Đang tải…")
-                        .font(.system(size: 29))
-                        .foregroundStyle(theme.text)
-                        .tint(theme.text)
-                } else if filter.filtersActive {
-                    Text("Không có phim nào khớp bộ lọc.")
-                        .font(.system(size: 29))
-                        .foregroundStyle(theme.meta)
-                } else {
-                    Text("Chưa có phim trong mục này.")
-                        .font(.system(size: 29))
-                        .foregroundStyle(theme.meta)
-                }
-                Spacer()
-            } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 40) {
-                        ForEach(movies) { movie in
-                            Button { nav.movie = MovieRoute(
-                                provider: movie.provider, slug: movie.slug,
-                                name: movie.name, poster: movie.poster,
-                                year: movie.year) } label: {
-                                PosterCard(
-                                    title: movie.name,
-                                    posterURL: movie.posterURL,
-                                    meta: movie.cardMeta,
-                                    badge: Providers.badge(movie.provider),
-                                    quality: movie.quality,
-                                    focused: gridFocus == "browse|" + movie.id)
-                            }
-                            .buttonStyle(.card)
-                            .focused($gridFocus, equals: "browse|" + movie.id)
-                            .onMoveCommand { direction in
-                                gridMove(direction, from: movie)
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 26) {
+                    JoeFilterBar(filter: $filter,
+                                 years: JoeBrowseFilter.yearBuckets(for: phim.merged),
+                                 hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
+                                 showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
+                                 showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
+                                 showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
+                                 showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
+                                 chipFocus: $chipFocus,
+                                 onSortChipDown: {
+                                     if let first = movies.first {
+                                         gridFocus = "browse|" + first.id
+                                     }
+                                 })
+                        // v2.0.5 (N1, pair e): the bar is a
+                        // declared focus region, the grid
+                        // below it another; the Wave-1 pair
+                        // (sortMove DOWN → first item, gridMove
+                        // UP → active sort chip) routes between
+                        // them.
+                        .focusSection()
+                    if movies.isEmpty {
+                        if phim.loading && !phim.loadTimedOut {
+                            ProgressView("Đang tải…")
+                                .font(.system(size: 29))
+                                .foregroundStyle(theme.text)
+                                .tint(theme.text)
+                        } else if filter.filtersActive {
+                            Text("Không có phim nào khớp bộ lọc.")
+                                .font(.system(size: 29))
+                                .foregroundStyle(theme.meta)
+                        } else {
+                            Text("Chưa có phim trong mục này.")
+                                .font(.system(size: 29))
+                                .foregroundStyle(theme.meta)
+                        }
+                    } else {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 40) {
+                            ForEach(movies) { movie in
+                                Button { nav.movie = MovieRoute(
+                                    provider: movie.provider, slug: movie.slug,
+                                    name: movie.name, poster: movie.poster,
+                                    year: movie.year) } label: {
+                                    PosterCard(
+                                        title: movie.name,
+                                        posterURL: movie.posterURL,
+                                        tmdbId: movie.tmdbId,
+                                        tmdbType: movie.tmdbType,
+                                        meta: movie.cardMeta,
+                                        badge: Providers.badge(movie.provider),
+                                        quality: movie.quality)
+                                }
+                                .joeCardButton()
+                                .focused($gridFocus, equals: "browse|" + movie.id)
+                                .onMoveCommand { direction in
+                                    gridMove(direction, from: movie)
+                                }
                             }
                         }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 4)
+                        .focusSection()
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 4)
                 }
             }
         }
+        // v2.0.5 (N1): the layer's DECLARED top element — the
+        // filter bar's first chip. The browse layer swaps in
+        // over the home (the tapped button's subtree is
+        // destroyed), so focus needs a declared landing here
+        // exactly as the search layer declares its field.
+        .defaultFocus($chipFocus, "genre:all")
         .task(id: filter) {
             JoeImagePipeline.shared.prefetch(
                 movies.compactMap { $0.posterURL }, targetPixels: 720)
@@ -493,7 +597,11 @@ struct JoeBrowseView: View {
     /// Grid routing, the JoeSearchView.resultMove shape: UP from
     /// the first row lands on the sort row's ACTIVE chip (the
     /// facet row nearest the grid); LEFT/RIGHT stop at row
-    /// edges; DOWN past the end is a defined no-op.
+    /// edges; DOWN past the end is a defined no-op. The
+    /// reciprocal DOWN from the sort row is declared by the
+    /// bar (JoeFilterBar.sortMove → this view's onSortChipDown
+    /// → gridFocus on the grid's first item), so the
+    /// bar ↔ grid pair is explicit in both directions.
     private func gridMove(_ direction: MoveCommandDirection, from movie: Movie) {
         guard let idx = movies.firstIndex(where: { $0.id == movie.id }) else { return }
         let columns = 6
@@ -592,6 +700,12 @@ struct JoeWallHomeView: View {
                              showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
                              showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
                              chipFocus: $chipFocus)
+                    // v2.0.5 (N1, pair d): the wall's facet
+                    // chain is a declared focus region; the
+                    // owner rails and the wall grid below are
+                    // regions of their own (rails via the
+                    // shared Rail, the grid below).
+                    .focusSection()
                 if !filter.filtersActive {
                     cwWallRail
                     favWallRail
@@ -608,12 +722,13 @@ struct JoeWallHomeView: View {
                                 PosterCard(
                                     title: movie.name,
                                     posterURL: movie.posterURL,
+                                    tmdbId: movie.tmdbId,
+                                    tmdbType: movie.tmdbType,
                                     meta: movie.cardMeta,
                                     badge: Providers.badge(movie.provider),
-                                    quality: movie.quality,
-                                    focused: wallFocus == "wall|" + movie.id)
+                                    quality: movie.quality)
                             }
-                            .buttonStyle(.card)
+                            .joeCardButton()
                             .focused($wallFocus, equals: "wall|" + movie.id)
                             .onMoveCommand { direction in
                                 wallMove(direction, from: movie)
@@ -621,6 +736,7 @@ struct JoeWallHomeView: View {
                         }
                     }
                     .padding(.horizontal, 4)
+                    .focusSection()
                 }
                 if !filter.filtersActive {
                     wallCategorySections
@@ -634,6 +750,11 @@ struct JoeWallHomeView: View {
                 }
             }
         }
+        // v2.0.5 (N1/N2): the wall home's DECLARED top element
+        // — the filter bar's first chip, the landing the pill
+        // row's DOWN resigns focus to while the Poster Wall
+        // home is the Phim section's face.
+        .defaultFocus($chipFocus, "genre:all")
         .task {
             attempted = true
             JoeImagePipeline.shared.prefetch(
@@ -678,7 +799,7 @@ struct JoeWallHomeView: View {
                 Button { phim.retry() } label: {
                     JoePrimaryLabel(title: "Thử lại")
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($retryFocused)
             }
         } else if showWallEmpty {
@@ -755,12 +876,13 @@ struct JoeWallHomeView: View {
                         PosterCard(
                             title: movie.name,
                             posterURL: movie.posterURL,
+                            tmdbId: movie.tmdbId,
+                            tmdbType: movie.tmdbType,
                             meta: movie.cardMeta,
                             badge: Providers.badge(movie.provider),
-                            quality: movie.quality,
-                            focused: entryFocus == "sec|" + section.scope + "|" + movie.id)
+                            quality: movie.quality)
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($entryFocus, equals: "sec|" + section.scope + "|" + movie.id)
                 }
             }
@@ -782,10 +904,9 @@ struct JoeWallHomeView: View {
                             meta: entry.epLabel,
                             badge: Providers.badge(entry.source),
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
-                            focused: entryFocus == "cw|" + entry.key)
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($entryFocus, equals: "cw|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -812,10 +933,9 @@ struct JoeWallHomeView: View {
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
-                            badge: Providers.badge(entry.source),
-                            focused: entryFocus == "fav|" + entry.key)
+                            badge: Providers.badge(entry.source))
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($entryFocus, equals: "fav|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {

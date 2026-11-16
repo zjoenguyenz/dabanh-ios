@@ -115,8 +115,23 @@ enum TpClient {
         m.name = JSON.str(o, "name").trimmingCharacters(in: .whitespaces)
         m.originName = JSON.str(o, "originName").trimmingCharacters(in: .whitespaces)
         m.slug = JSON.str(o, "primarySlug")
-        m.poster = JSON.str(o, "posterPath300")
-        if m.poster.isEmpty { m.poster = JSON.str(o, "posterPathOriginal") }
+        // ★ Field names are SWAPPED vs content on this API
+        // (live-measured 2026-11-16, 6 newest titles):
+        // posterPath* serves the LANDSCAPE 16:9 still
+        // (poster_300 = 533×300; poster_original up to
+        // 3840×2160) while thumbPath* serves the PORTRAIT
+        // 2:3 poster (thumb_300 = 200×300; thumb_original
+        // 336×504 … 2000×3000). Map by CONTENT, never by
+        // name: poster ← the portrait file, thumb ← the
+        // real landscape. The old name-based read put a 16:9
+        // bitmap in every 2:3 card — the whole Tủ Phim shelf
+        // letterboxed into a band in every theme — and left
+        // m.thumb "" for every TP record, so the detail band
+        // had no thumb stage either.
+        m.poster = JSON.str(o, "thumbPathOriginal")
+        if m.poster.isEmpty { m.poster = JSON.str(o, "thumbPath300") }
+        m.thumb = JSON.str(o, "posterPathOriginal")
+        if m.thumb.isEmpty { m.thumb = JSON.str(o, "posterPath300") }
         m.year = JSON.str(o, "year")
         m.type = JSON.str(o, "type") == "series" ? "phim-bo" : "phim-le"
         m.episodeCurrent = cleanField(JSON.str(o, "episodeCurrent"))

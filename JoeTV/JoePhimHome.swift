@@ -102,6 +102,26 @@ struct JoePhimHome: View {
                 exitConfirm = true
             }
         }
+        // v2.0.5 (N3): delivery for the presses this handler
+        // cannot see. Exit commands only reach ANCESTORS of
+        // the focused view, and the shell's topBar is a
+        // sibling of this subtree — a Menu press with focus
+        // on a pill never arrives here. JoeRootView's root
+        // handler runs the shell state machine for those
+        // presses and, when only the exit confirmation
+        // remains, sets nav.exitRequested; this observer
+        // presents THIS view's one confirmation for it (the
+        // root never grows a second alert). The state checks
+        // mirror the handler above exactly.
+        .onChange(of: nav.exitRequested) { _, requested in
+            guard requested else { return }
+            nav.exitRequested = false
+            if nav.browseOpen {
+                nav.browseOpen = false
+            } else if !nav.searchOpen {
+                exitConfirm = true
+            }
+        }
         .alert("Thoát Joe TV?", isPresented: $exitConfirm) {
             Button("Thoát", role: .destructive) {
                 exitConfirm = false
@@ -329,7 +349,7 @@ struct JoePhimHome: View {
                         } label: {
                             JoePrimaryLabel(title: "Xem ngay", systemImage: "play.fill")
                         }
-                        .buttonStyle(.card)
+                        .joeCardButton()
                         .focused($heroPlayFocused)
                         Button {
                             toggleHeroFavorite(featured)
@@ -337,14 +357,14 @@ struct JoePhimHome: View {
                             JoeSecondaryLabel(title: isHeroFavorite(featured)
                                               ? "♥ Đã thích" : "♡ Yêu thích")
                         }
-                        .buttonStyle(.card)
+                        .joeCardButton()
                         Button {
                             nav.browseOpen = true
                         } label: {
                             JoeSecondaryLabel(title: "Tất cả phim",
                                               systemImage: "square.grid.2x2")
                         }
-                        .buttonStyle(.card)
+                        .joeCardButton()
                     }
                     .padding(.top, 8)
                 }
@@ -352,6 +372,13 @@ struct JoePhimHome: View {
                 .frame(maxWidth: 1100, alignment: .leading)
             }
             .frame(height: 668)
+            // v2.0.5 (N1/N2): the hero's play button is this
+            // section's DECLARED top element while a hero is
+            // on screen — the landing the pill row's DOWN
+            // resigns focus to, and the section's entry when
+            // focus re-resolves into the home. Static
+            // declaration, the JoeSearchView shape.
+            .defaultFocus($heroPlayFocused, true)
             // UI-6 D-2: fetch the featured film's detail for
             // the synopsis (fail-soft — a failed fetch simply
             // leaves the hero without one).
@@ -477,9 +504,15 @@ struct JoePhimHome: View {
             } label: {
                 JoeSecondaryLabel(title: "Tất cả phim", systemImage: "square.grid.2x2")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($headerFocused)
         }
+        // v2.0.5 (N1/N2): with no hero on screen (design F, or
+        // A before the catalogue lands) the header's browse
+        // button is the section's DECLARED top element — the
+        // same landing role the hero play button plays above.
+        // Only one of the two headers ever renders at a time.
+        .defaultFocus($headerFocused, true)
     }
 
     /// F's source band header (UI-6 defects D-15 + D-3): ONE
@@ -510,8 +543,17 @@ struct JoePhimHome: View {
                     .background(Capsule().fill(theme.bg))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($bandFocused, equals: scope)
+            // v2.0.5 (N1, pair c): the band button sits at the
+            // FAR RIGHT, its rail's cards at the far left — the
+            // cross-column DOWN/UP pair the beam dropped.
+            // Declared landings both ways (bandMove); LEFT/
+            // RIGHT are declared no-ops (the button is the
+            // band row's only focusable element).
+            .joeBoundaryMove(
+                up: { bandMove(.up, scope: scope) },
+                down: { bandMove(.down, scope: scope) })
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
@@ -602,7 +644,7 @@ struct JoePhimHome: View {
             Button { phim.retry() } label: {
                 JoePrimaryLabel(title: "Thử lại")
             }
-            .buttonStyle(.card)
+            .joeCardButton()
             .focused($retryFocused)
         }
         .padding(.top, 30)
@@ -743,6 +785,38 @@ struct JoePhimHome: View {
         }
     }
 
+    /// Band-button boundary (v2.0.5, N1 pair c): DOWN lands
+    /// on the band's OWN rail's first card; UP lands on the
+    /// last card of the rail above the band, or — when the
+    /// band's rail is the first rail on screen — on the
+    /// header's browse button (design F always renders the
+    /// slim header above its bands). All targets are this
+    /// view's own focus state, the first-rail handler's
+    /// in-view shape.
+    private func bandMove(_ direction: MoveCommandDirection, scope: String) {
+        switch direction {
+        case .down:
+            if let spec = railSpecs.first(where: { $0.scope == scope }),
+               let first = spec.movies.first {
+                setRailFocus(.movie(scope + "|" + first.id))
+            }
+        case .up:
+            let rails = phimRails
+            if let idx = rails.firstIndex(where: { rail in
+                   if case .movie(let id) = rail.first {
+                       return id.hasPrefix(scope + "|")
+                   }
+                   return false
+               }), idx > 0, let last = rails[idx - 1].last {
+                setRailFocus(last)
+            } else {
+                headerFocused = true
+            }
+        default:
+            break
+        }
+    }
+
     @ViewBuilder
     private var cwRail: some View {
         if !movieProgress.isEmpty {
@@ -758,10 +832,9 @@ struct JoePhimHome: View {
                             meta: entry.epLabel,
                             badge: Providers.badge(entry.source),
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
-                            focused: focusedEntry == "cw|" + entry.key)
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($focusedEntry, equals: "cw|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -792,10 +865,9 @@ struct JoePhimHome: View {
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
-                            badge: Providers.badge(entry.source),
-                            focused: focusedEntry == "fav|" + entry.key)
+                            badge: Providers.badge(entry.source))
                     }
-                    .buttonStyle(.card)
+                    .joeCardButton()
                     .focused($focusedEntry, equals: "fav|" + entry.key)
                     .contextMenu {
                         Button(role: .destructive) {
@@ -828,12 +900,13 @@ struct JoePhimHome: View {
                     PosterCard(
                         title: movie.name,
                         posterURL: movie.posterURL,
+                        tmdbId: movie.tmdbId,
+                        tmdbType: movie.tmdbType,
                         meta: movie.cardMeta,
                         badge: badges ? Providers.badge(movie.provider) : nil,
-                        quality: movie.quality,
-                        focused: focusedMovie == scope + "|" + movie.id)
+                        quality: movie.quality)
                 }
-                .buttonStyle(.card)
+                .joeCardButton()
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
                 // Only the FIRST catalogue rail's cards carry
                 // the first-rail move handler (see

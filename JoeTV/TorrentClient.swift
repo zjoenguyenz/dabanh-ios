@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Torrent/debrid module over OPEN Stremio-protocol APIs + the
 /// owner's OWN debrid accounts — port of the Android TorrentApi +
@@ -39,6 +40,25 @@ enum TorrentSettings {
         get { UserDefaults.standard.string(forKey: keyTorBoxToken) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: keyTorBoxToken) }
     }
+
+    /// v2.0.5 (N7 — baked-in tokens, owner order 2026-11-16):
+    /// the EFFECTIVE tokens resolve exactly like the TMDB
+    /// key (TMDBClient.swift): a stored value wins; when
+    /// storage is empty, the build-time bundled value from
+    /// BundledTokens (injected by the workflow from the
+    /// RD_TOKEN / TORBOX_TOKEN Actions secrets) applies, so
+    /// a reinstall never asks the owner to re-type a token
+    /// with the TV remote. The raw accessors above stay the
+    /// Settings editor's view of storage — unchanged keys,
+    /// unchanged save() behaviour.
+    static var effectiveRDToken: String {
+        let stored = rdToken.trimmingCharacters(in: .whitespaces)
+        return stored.isEmpty ? BundledTokens.rdToken : stored
+    }
+    static var effectiveTorBoxToken: String {
+        let stored = torboxToken.trimmingCharacters(in: .whitespaces)
+        return stored.isEmpty ? BundledTokens.torboxToken : stored
+    }
     static var subAddonURL: String {
         get { UserDefaults.standard.string(forKey: keySubAddonURL) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: keySubAddonURL) }
@@ -50,14 +70,38 @@ enum TorrentSettings {
     /// The addon base to talk to, or nil when nothing is
     /// configured. A pasted full Torrentio URL wins; otherwise a
     /// bare token builds the standard Torrentio config URL.
+    /// v2.0.5 (error 4): a pasted value must VALIDATE as an
+    /// http/https URL with a host before it may win. Pre-fix,
+    /// any non-empty string — the owner's test typing "bbbb"
+    /// in the field — took absolute priority over the RD token
+    /// and every stream fetch became "bbbb/stream/…", while
+    /// isConfigured (effectiveBase != nil) still showed ✓.
+    /// An invalid pasted value now falls through to the token
+    /// bases; if none is valid either, the result is nil and
+    /// the configuration check is honest.
     static var effectiveBase: String? {
         let url = addonURL.trimmingCharacters(in: .whitespaces)
-        if !url.isEmpty { return stripSlash(url) }
-        let rd = rdToken.trimmingCharacters(in: .whitespaces)
+        if !url.isEmpty {
+            let base = stripSlash(url)
+            if isValidAddonBase(base) { return base }
+        }
+        let rd = effectiveRDToken
         if !rd.isEmpty { return torrentio + "/realdebrid=" + rd }
-        let tb = torboxToken.trimmingCharacters(in: .whitespaces)
+        let tb = effectiveTorBoxToken
         if !tb.isEmpty { return torrentio + "/torbox=" + tb }
         return nil
+    }
+
+    /// A usable addon base is an absolute http/https URL with
+    /// a non-empty host. (A bare word like "bbbb" parses as a
+    /// RELATIVE URL — scheme and host both nil — and fails.)
+    private static func isValidAddonBase(_ s: String) -> Bool {
+        guard let u = URL(string: s),
+              let scheme = u.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = u.host, !host.isEmpty
+        else { return false }
+        return true
     }
 
     static var isConfigured: Bool { effectiveBase != nil }
@@ -362,16 +406,84 @@ enum TorrentClient {
     /// Real-Debrid account. Fail-soft to nil. (Moved here from
     /// JoeTorrentDetail: both play paths below share it, so the
     /// RD behaviour can never drift between them.)
+    /// v2.0.5 (error 8a): a direct URL on the ADDON's host is
+    /// Torrentio's /resolve/ redirector — a bare 302 hop to the
+    /// debrid CDN. The listing path (URLSession) follows it
+    /// natively, but the FFmpeg media stack fails to open the
+    /// redirector itself, so EVERY candidate died identically
+    /// while the list loaded fine. Following the Android
+    /// discipline (DirectNet.resolveFinalUrl pre-resolves for
+    /// players that cannot ride the hop), the redirect chain
+    /// is followed HERE and the engine receives the FINAL CDN
+    /// URL. Fail-soft: any probe failure returns the original
+    /// URL, exactly the pre-fix behaviour.
     static func resolvePlayable(_ s: TorStream) async -> URL? {
-        if s.playable { return URL(string: s.url) }
-        guard !s.infoHash.isEmpty else { return nil }
-        let token = TorrentSettings.rdToken
-        guard !token.isEmpty else { return nil }
-        if let r = try? await RdClient.resolve(
-            token: token, infoHash: s.infoHash, fileIdx: s.fileIdx) {
-            return URL(string: r.url)
+        if s.playable {
+            guard let raw = URL(string: s.url) else { return nil }
+            if isAddonHost(raw) { return await preResolved(raw) }
+            return raw
         }
-        return nil
+        guard !s.infoHash.isEmpty else { return nil }
+        // v2.0.5 (N7): the EFFECTIVE token (stored wins,
+        // bundled fallback) — same resolution as
+        // effectiveBase above.
+        let token = TorrentSettings.effectiveRDToken
+        guard !token.isEmpty else { return nil }
+        do {
+            let r = try await RdClient.resolve(
+                token: token, infoHash: s.infoHash, fileIdx: s.fileIdx)
+            return URL(string: r.url)
+        } catch {
+            // v2.0.5 (error 8a): the failure is LOGGED, not
+            // swallowed by a bare `try?` — an RD failure and a
+            // dead URL used to be indistinguishable after the
+            // fact. Behaviour stays fail-soft (nil).
+            PlaybackLog.logger.error(
+                "RD resolve failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// True when the URL lives on the configured addon host —
+    /// the only URLs that are /resolve/ redirectors. Debrid
+    /// CDN URLs (from RdClient) and any other direct URL pass
+    /// through pre-resolution untouched.
+    private static func isAddonHost(_ url: URL) -> Bool {
+        guard let base = TorrentSettings.effectiveBase,
+              let baseHost = URL(string: base)?.host,
+              let host = url.host
+        else { return false }
+        return host.caseInsensitiveCompare(baseHost) == .orderedSame
+    }
+
+    /// Session cache of /resolve/ → final-URL results, keyed
+    /// by the source URL string. Debrid download links live
+    /// for hours; a session is far shorter, and re-probing the
+    /// same title on every ladder rebuild would only add
+    /// latency. Guarded by a lock: playCandidates probes
+    /// concurrently.
+    private static var finalURLCache: [String: URL] = [:]
+    private static let finalURLCacheLock = NSLock()
+
+    /// The final URL at the end of the redirect chain, or the
+    /// original URL when the chain cannot be followed (error,
+    /// timeout ≤ 8 s, or no redirect at all).
+    private static func preResolved(_ url: URL) async -> URL {
+        let key = url.absoluteString
+        finalURLCacheLock.lock()
+        let cached = finalURLCache[key]
+        finalURLCacheLock.unlock()
+        if let cached { return cached }
+        let probe = RedirectProbe()
+        guard let final = await probe.run(url: url, timeout: 8) else {
+            PlaybackLog.logger.error(
+                "pre-resolve failed host=\(url.host ?? "?", privacy: .public) — falling back to the original URL")
+            return url
+        }
+        finalURLCacheLock.lock()
+        finalURLCache[key] = final
+        finalURLCacheLock.unlock()
+        return final
     }
 
     /// Streams → player candidates: THE conversion both torrent
@@ -408,13 +520,47 @@ enum TorrentClient {
            let match = streams.first(where: {
                $0.name == lead.name && $0.title == lead.title }),
            let url = await resolvePlayable(match) {
-            out.append(PlayCandidate(url: url, label: label(match),
+            // v2.0.5 (error 8a, H6): the stream's own
+            // proxyHeaders ride into the candidate — pre-fix
+            // they were parsed at fetch time and read NOWHERE,
+            // so a stream whose media leg required its Referer
+            // or User-Agent failed on tvOS while Android (which
+            // forwards them) played it.
+            out.append(PlayCandidate(url: url,
+                                     headers: match.proxyHeaders,
+                                     label: label(match),
                                      engine: .ffmpeg))
         }
-        for s in streams where s.playable {
-            if let lead, s.name == lead.name && s.title == lead.title { continue }
-            if let url = URL(string: s.url) {
-                out.append(PlayCandidate(url: url, label: label(s),
+        // Remaining direct-URL streams, in list order. Each
+        // goes through resolvePlayable too (v2.0.5): the
+        // /resolve/ pre-resolution must cover EVERY candidate
+        // the ladder can reach, not only the lead — pre-fix
+        // this loop copied s.url verbatim. The probes run
+        // concurrently (one round-trip class of latency for
+        // the whole list, not one per candidate); results are
+        // slotted back into list order.
+        let rest = streams.filter { s in
+            guard s.playable else { return false }
+            if let lead, s.name == lead.name && s.title == lead.title {
+                return false
+            }
+            return true
+        }
+        let resolved: [URL?] = await withTaskGroup(
+            of: (Int, URL?).self
+        ) { group in
+            for (i, s) in rest.enumerated() {
+                group.addTask { (i, await resolvePlayable(s)) }
+            }
+            var slots = [URL?](repeating: nil, count: rest.count)
+            for await (i, u) in group { slots[i] = u }
+            return slots
+        }
+        for (s, url) in zip(rest, resolved) {
+            if let url {
+                out.append(PlayCandidate(url: url,
+                                         headers: s.proxyHeaders,
+                                         label: label(s),
                                          engine: .ffmpeg))
             }
         }
@@ -446,6 +592,59 @@ enum TorrentClient {
             if l.contains("viet") && loose == nil { loose = s }
         }
         return loose
+    }
+}
+
+/// Follows a redirect chain WITHOUT downloading the body:
+/// the data task is cancelled the moment the final response's
+/// headers arrive, and the response's URL — the chain's end —
+/// is the result. This is what turns Torrentio's /resolve/
+/// 302 into the debrid CDN URL the media stack opens
+/// directly, at the cost of one headers-only round trip
+/// (a Range header is sent as well, as a second guard
+/// against a server that would otherwise stream the file).
+/// Redirects are followed by the session's default policy;
+/// the delegate only observes the final response.
+private final class RedirectProbe: NSObject, URLSessionDataDelegate {
+    private var continuation: CheckedContinuation<URL?, Never>?
+    private var finalURL: URL?
+
+    /// The chain's final URL, or nil on any failure (DNS,
+    /// TLS, timeout — the session's request/resource budgets
+    /// are both `timeout`, so the probe is bounded end to
+    /// end, the house JoeHTTP discipline).
+    func run(url: URL, timeout: TimeInterval) async -> URL? {
+        await withCheckedContinuation { cont in
+            self.continuation = cont
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = timeout
+            config.timeoutIntervalForResource = timeout
+            let session = URLSession(configuration: config,
+                                     delegate: self, delegateQueue: nil)
+            var req = URLRequest(url: url)
+            req.timeoutInterval = timeout
+            req.setValue(JoeHTTP.userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            session.dataTask(with: req).resume()
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        finalURL = response.url
+        completionHandler(.cancel)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        // Fires for every ending — the cancel above, a
+        // timeout, a network error. Whatever response URL was
+        // captured (nil when none arrived) is the answer.
+        session.invalidateAndCancel()
+        let cont = continuation
+        continuation = nil
+        cont?.resume(returning: finalURL)
     }
 }
 
