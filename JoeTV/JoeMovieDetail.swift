@@ -748,7 +748,7 @@ struct JoeMovieDetail: View {
         guard TorrentSettings.isConfigured else { return .notConfigured }
         guard let filmIdentity else { return .pending }
         return filmIdentity.imdbId.isEmpty
-            ? .unresolved : .ready(filmIdentity.imdbId)
+            ? .unresolved : .ready(imdbId: filmIdentity.imdbId)
     }
 
     /// The Torrent entry pressed in its .ready state (D2):
