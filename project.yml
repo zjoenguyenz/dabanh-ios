@@ -79,20 +79,22 @@ targets:
       - DaBanhTV/TVMatchViews.swift
       - DaBanhTV/TVPlayerView.swift
       - DaBanhTV/Assets.xcassets
+    dependencies:
+      - target: DaBanhTVTopShelf
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv
         INFOPLIST_FILE: InfoTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.3.2"
-        CURRENT_PROJECT_VERSION: "14"
+        MARKETING_VERSION: "1.3.3"
+        CURRENT_PROJECT_VERSION: "15"
     info:
       path: InfoTV.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.3.2"
-        CFBundleVersion: "14"
+        CFBundleShortVersionString: "1.3.3"
+        CFBundleVersion: "15"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -224,3 +226,25 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.luun.nguyen.joetv
+  DaBanhTVTopShelf:
+    type: app-extension
+    platform: tvOS
+    sources:
+      - DaBanhTVTopShelf/TopShelfProvider.swift
+      - DaBanhTVTopShelf/mu-shelf-1.jpg
+      - DaBanhTVTopShelf/mu-shelf-2.jpg
+      - DaBanhTVTopShelf/mu-shelf-3.jpg
+      - DaBanhTVTopShelf/mu-shelf-4.jpg
+      - DaBanhTVTopShelf/mu-shelf-5.jpg
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanhtv.topshelf
+        INFOPLIST_FILE: InfoDaBanhTVTopShelf.plist
+    info:
+      path: InfoDaBanhTVTopShelf.plist
+      properties:
+        CFBundleDisplayName: "Đá Banh"
+        CFBundleName: "DaBanhTVTopShelf"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.tv-top-shelf
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).TopShelfProvider
