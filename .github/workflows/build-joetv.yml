@@ -45,6 +45,12 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           printf 'enum TMDBBundledKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTV/TMDBKey.swift
+      - name: Inject bundled tokens
+        env:
+          RD_TOKEN: ${{ secrets.RD_TOKEN }}
+          TORBOX_TOKEN: ${{ secrets.TORBOX_TOKEN }}
+        run: |
+          printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" > JoeTV/BundledTokens.swift
 
       - name: Generate Xcode project
         run: xcodegen generate
