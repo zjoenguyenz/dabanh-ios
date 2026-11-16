@@ -1460,8 +1460,20 @@ struct JoeMovieDetail: View {
                 .padding(.vertical, 11)
                 .background(Capsule()
                     .fill(preselected ? theme.accent : theme.surface2))
+                // v2.0.9 (owner defect, theme D only): the same
+                // colour collision as JoeChipLabel — in D the
+                // preselected episode's fill (accent #FFD60A)
+                // and the focus ring (focus #FFD60A) are one
+                // colour, so focus on the preselected chip was
+                // invisible. The owner's ruling applies here
+                // too: preselected + focused in D wears the
+                // opaque-white (trắng đục) frame; every other
+                // state and theme keeps the expression below
+                // unchanged.
                 .overlay(Capsule()
-                    .strokeBorder(focused ? theme.focus
+                    .strokeBorder(focused
+                                  ? (theme.id == .posterWall && preselected
+                                     ? Color.white : theme.focus)
                                   : (preselected ? Color.clear : theme.stroke),
                                   lineWidth: focused ? theme.ringWidth : 1.5))
         }

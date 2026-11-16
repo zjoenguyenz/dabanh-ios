@@ -622,6 +622,9 @@ struct JoeWallHomeView: View {
     @FocusState private var wallFocus: Movie.ID?
     @FocusState private var entryFocus: String?
     @FocusState private var retryFocused: Bool
+    /// v2.0.9: the header close control's focus identity
+    /// (see the header note in `body`).
+    @FocusState private var closeFocused: Bool
 
     private var wallMovies: [Movie] { filter.apply(phim: phim) }
 
@@ -655,7 +658,41 @@ struct JoeWallHomeView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        // v2.0.9 (owner defect #1, theme D only): the wall IS
+        // design D's "Tất cả phim" surface — design-D/grid.html
+        // carries that title over this same wall — but the
+        // v2.0.8 Phase-5 close control was built only into
+        // JoeBrowseView's header, a layer theme D never
+        // presents (every browseOpen entry lives in the A/F
+        // rail home), so D's opened all-movies surface had no
+        // "Đóng" at all (the owner's photo: this wall, no
+        // header, no close). The header row below mirrors the
+        // browse header's construction — the surface title
+        // plus the shared JoeSecondaryLabel close button in
+        // its own focus section, fixed above the scroll — with
+        // the title at design D's own sheet value (.wall-title:
+        // 40 pt, weight 800). Pressing Đóng folds the surface
+        // back to its initial state: the filter returns to its
+        // defaults and focus returns to the surface's declared
+        // top element (the filter bar's first chip — the same
+        // landing .defaultFocus declares for this view).
+        VStack(alignment: .leading, spacing: 26) {
+            HStack(alignment: .center, spacing: 28) {
+                Text("Tất cả phim")
+                    .font(.system(size: 40, weight: .heavy))
+                    .foregroundStyle(theme.text)
+                Spacer()
+                Button {
+                    filter = JoeBrowseFilter()
+                    chipFocus = "genre:all"
+                } label: {
+                    JoeSecondaryLabel(title: "Đóng", systemImage: "xmark")
+                }
+                .joeCardButton()
+                .focused($closeFocused)
+            }
+            .focusSection()
+            ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 36) {
                 JoeFilterBar(filter: $filter,
                              years: JoeBrowseFilter.yearBuckets(for: phim.merged),
@@ -724,6 +761,7 @@ struct JoeWallHomeView: View {
         // focus ring is an OUTSET band (6 pt outside the
         // art), so the container never clips it.
         .scrollClipDisabled()
+        } // v2.0.9: closes the header VStack opened in `body`.
         // v2.0.5 (N1/N2): the wall home's DECLARED top element
         // — the filter bar's first chip, the landing the pill
         // row's DOWN resigns focus to while the Poster Wall

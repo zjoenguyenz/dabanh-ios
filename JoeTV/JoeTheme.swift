@@ -299,8 +299,26 @@ struct JoeChipLabel: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 11)
             .background(Capsule().fill(selected ? theme.accent : theme.surface2))
+            // v2.0.9 (owner defect, theme D only): design D's
+            // sheets draw .chip.sel (fill #FFD60A, box-shadow:
+            // none) and .chip.focused (inset 6 pt #FFD60A ring)
+            // as separate states and draw NO combined state —
+            // and in D's tokens accent == focus == #FFD60A, so
+            // the focused ring painted over a selected chip's
+            // yellow fill in the same yellow and the owner
+            // could not tell focus was there ("Cùng màu nên ko
+            // nhận ra đc"). His ruling: a selected + focused
+            // chip in D wears an OPAQUE WHITE (trắng đục) frame.
+            // Unselected + focused keeps the drawn yellow ring;
+            // selected + unfocused keeps the plain yellow fill.
+            // Themes A/F never take the branch (their accent
+            // and focus colours differ) — their expression is
+            // byte-identical to before.
             .overlay(Capsule().strokeBorder(
-                isFocused ? theme.focus : (selected ? .clear : theme.stroke),
+                isFocused
+                    ? (theme.id == .posterWall && selected
+                       ? Color.white : theme.focus)
+                    : (selected ? .clear : theme.stroke),
                 lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
