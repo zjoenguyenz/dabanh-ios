@@ -214,6 +214,10 @@ final class JoeNavigator: ObservableObject {
 struct JoeRootView: View {
     @StateObject private var nav = JoeNavigator()
     @EnvironmentObject private var watch: WatchStore
+    /// v2.0.10 (Package B): the Top Shelf writer resolves its
+    /// hot list against the catalogue, so the root also reads
+    /// the Phim store (already injected at the App level).
+    @EnvironmentObject private var phim: PhimStore
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
     @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
@@ -344,6 +348,16 @@ struct JoeRootView: View {
             // feeds only the top bar's .defaultFocus value.
             if let focused { lastFocusedPill = focused }
         }
+        .onChange(of: watch.progressEntries) { _, _ in
+            // v2.0.10 (Package B): the Top Shelf payload
+            // mirrors Continue Watching — rebuild it whenever
+            // the CW store changes (forced; the launch refresh
+            // in .task below is the throttled one).
+            Task {
+                await JoeTopShelfWriter.refresh(
+                    watch: watch, phim: phim, force: true)
+            }
+        }
         // v2.0.5 (N2 item 3 + N3): the ROOT exit handler — the
         // shell state machine, always installed. Exit commands
         // travel to the NEAREST handler above the focused
@@ -377,6 +391,12 @@ struct JoeRootView: View {
                 nav.exitRequested = true
             }
         }
+        // v2.0.10 (Package B): Top Shelf deep links (joetv://,
+        // written by JoeTopShelfWriter) land here — nav is this
+        // view's @StateObject, so the routes below are built in
+        // scope. An additive handler: nothing else in the shell
+        // consumes URLs.
+        .onOpenURL { url in handleDeepLink(url) }
         .task {
             // UI-5 pipeline: warm the owner's own posters at
             // launch (Continue Watching + favourites render from
@@ -384,6 +404,11 @@ struct JoeRootView: View {
             let entries = watch.progress() + watch.favorites()
             JoeImagePipeline.shared.prefetch(
                 entries.compactMap { $0.posterURL }, targetPixels: 720)
+            // v2.0.10 (Package B): refresh the Top Shelf
+            // payload (App Group hand-off; throttled inside
+            // the writer, fail-soft when the group container
+            // is unavailable under the owner's signing).
+            await JoeTopShelfWriter.refresh(watch: watch, phim: phim)
         }
         .environment(\.joeTheme, theme)
         .environmentObject(nav)
@@ -494,6 +519,43 @@ struct JoeRootView: View {
     // content's .focusSection(), and the bar's entry landing
     // is declared by .defaultFocus on the bar itself (see the
     // pillFocus note in this view).
+
+    /// Top Shelf deep links (joetv://), written by
+    /// JoeTopShelfWriter. Parsing is fail-soft: a malformed
+    /// link opens nothing, exactly like a cold launch.
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == "joetv",
+              let c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return }
+        let q = Dictionary(uniqueKeysWithValues:
+            (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        switch c.host {
+        case "movie":
+            guard let provider = q["provider"], let slug = q["slug"],
+                  !provider.isEmpty, !slug.isEmpty else { return }
+            nav.section = .phim
+            nav.movie = MovieRoute(provider: provider, slug: slug,
+                                   name: q["name"] ?? "",
+                                   poster: q["poster"] ?? "",
+                                   year: q["year"] ?? "",
+                                   preselectEp: q["ep"] ?? "")
+        case "torrent":
+            guard let metaId = q["id"], !metaId.isEmpty else { return }
+            var meta = TorMeta()
+            meta.id = metaId
+            meta.type = q["type"] ?? "movie"
+            meta.name = q["name"] ?? ""
+            meta.poster = q["poster"] ?? ""
+            meta.background = q["background"] ?? ""
+            meta.year = q["year"] ?? ""
+            meta.desc = q["desc"] ?? ""
+            nav.section = .torrent
+            nav.tor = TorRoute(meta: meta, base: q["base"] ?? "",
+                               preselectStreamId: q["stream"] ?? "")
+        default:
+            return
+        }
+    }
 
     /// Open the Phim search layer from any section. When the
     /// section changes in the same action, the search flag is
