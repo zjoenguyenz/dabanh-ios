@@ -69,6 +69,14 @@ enum JoeTopShelfWriter {
     /// launch task (force = false) and whenever the CW store
     /// changes (force = true). Cheap when throttled: a stat of
     /// the existing doc is the only work.
+    ///
+    /// @MainActor (run-34 fix): the body reads PhimStore.merged
+    /// and PhimStore is a @MainActor store, so the writer's
+    /// entry point carries the same isolation. Both call sites
+    /// (JoeTVApp's .task and its .onChange-spawned Task) already
+    /// run on the main actor and already await this call — the
+    /// annotation costs no hop and changes no behaviour.
+    @MainActor
     static func refresh(watch: WatchStore, phim: PhimStore,
                         force: Bool = false) async {
         guard let container = FileManager.default
