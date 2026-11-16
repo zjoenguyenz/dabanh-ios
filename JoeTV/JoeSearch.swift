@@ -6,6 +6,7 @@ import SwiftUI
 /// shows once per source, so the owner picks the source himself).
 struct JoeSearchView: View {
     @EnvironmentObject private var nav: JoeNavigator
+    @EnvironmentObject private var phim: PhimStore
     @Environment(\.joeTheme) private var theme
     @State private var query = ""
     /// The term the on-screen results belong to (UI-6 defect
@@ -16,6 +17,20 @@ struct JoeSearchView: View {
     @State private var searching = false
     @State private var searched = false
     @State private var searchFailed = false
+    // v2.0.1 search-round state (Android FIX2/FIX3 parity):
+    // the two render pools, the round generation (a new press
+    // supersedes any in-flight round), and the settle
+    // bookkeeping. `searching` is the VISIBLE settle (soft
+    // deadline); `roundActive` runs to the hard settle.
+    @State private var localPool: [Movie] = []
+    @State private var serverPool: [Movie] = []
+    @State private var roundID = 0
+    @State private var roundActive = false
+    @State private var branchesDone = 0
+    @State private var branchesOK = 0
+    @State private var branchesFailed = 0
+    @State private var firstPaintLogged = false
+    @State private var pressStart = Date()
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
 
@@ -51,7 +66,12 @@ struct JoeSearchView: View {
             // §8: searching, failure and no-results are three
             // DIFFERENT surfaces. v1.8 merged the last two into
             // one line, so a dead network read as "no such film".
-            if searching {
+            // v2.0.1: while a round is active with an empty
+            // grid the surface stays "Đang tìm…" even past the
+            // soft deadline (nothing found YET is not a
+            // no-match); with results on screen the spinner
+            // rides above them until the visible settle.
+            if roundActive && results.isEmpty && !searchFailed {
                 ProgressView("Đang tìm…")
                     .font(.system(size: 29))
                     .foregroundStyle(theme.text)
@@ -82,6 +102,14 @@ struct JoeSearchView: View {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
                     .foregroundStyle(theme.meta)
+            } else if searching {
+                // Results are already on screen; branches are
+                // still merging (the visible settle — soft
+                // deadline or last branch — ends this line).
+                ProgressView("Đang tìm…")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.text)
+                    .tint(theme.text)
             }
             // UI-6 defect D-19: D's results carry the render's
             // heading naming the searched term.
@@ -255,25 +283,284 @@ struct JoeSearchView: View {
         }
     }
 
+    // MARK: - Search round (v2.0.1 — Android FIX2 + FIX3 parity)
+    //
+    // One press runs ONE round:
+    //  1. LOCAL FIRST: the title pool (everything already
+    //     downloaded — home rails, the browse dataset, genre /
+    //     country lists, all resident in PhimStore — plus every
+    //     earlier round's branch results) answers synchronously
+    //     at the press. The search never waits on the store's
+    //     load: an unloaded store simply yields fewer local hits
+    //     and the branches carry the round.
+    //  2. The four provider branches fan out; each merges into
+    //     the server pool and re-renders THE MOMENT IT LANDS
+    //     (progressive merge — the pre-fix round rendered
+    //     nothing until the slowest branch answered).
+    //  3. Two settles: the VISIBLE settle at the 2.5 s soft
+    //     deadline (or when the last branch lands, if sooner)
+    //     flips `searching` off; branches keep merging until
+    //     the 15 s hard budget, where stragglers are cut and
+    //     counted failed.
+    //  4. Bookkeeping is honest (the FIX2 rule): only a round
+    //     with ZERO failed branches is snapshotted for instant
+    //     replay; an all-failed round is never cached — a
+    //     re-press re-runs it — and shows the failure surface,
+    //     never the no-match line.
+    // JOESEARCH lines ride the house signpost log (LoadSignpost)
+    // with per-branch timings and the round's first paint.
+
     private func runSearch() {
         let kw = query.trimmingCharacters(in: .whitespaces)
-        guard !kw.isEmpty, !searching else { return }
-        searching = true
-        searchFailed = false
+        guard !kw.isEmpty else { return }
         searchedQuery = kw
-        Task {
-            async let kk = try? Providers.search(Providers.KK, keyword: kw)
-            async let f4k = try? Providers.search(Providers.F4K, keyword: kw)
-            async let vs = try? Providers.search(Providers.VS, keyword: kw)
-            async let tp = try? Providers.search(Providers.TP, keyword: kw)
-            let (a, b, c, d) = await (kk, f4k, vs, tp)
-            results = (a ?? []) + (b ?? []) + (c ?? []) + (d ?? [])
-            // Failure means every provider threw; a provider
-            // that answered empty is a (partial) success.
-            searchFailed = a == nil && b == nil && c == nil && d == nil
-            searched = true
+        searchFailed = false
+
+        // Snapshot restore: a clean earlier round for this
+        // name replays instantly with zero network. (Facet
+        // state is not part of the key — on tvOS the facets
+        // live in the browse layer, where they re-apply at
+        // render over the store, so there is nothing to key.)
+        if let snap = JoeSearchSession.shared.snapshot(for: kw) {
+            roundID += 1
+            roundActive = false
             searching = false
+            searched = true
+            results = Self.renderPool(local: snap.local,
+                                      server: snap.server, query: kw)
+            LoadSignpost.log("JOESEARCH snapshot query=\"\(kw)\" results=\(results.count)")
+            return
         }
+
+        roundID += 1
+        let gen = roundID
+        roundActive = true
+        searching = true
+        searched = false
+        branchesDone = 0
+        branchesOK = 0
+        branchesFailed = 0
+        firstPaintLogged = false
+        pressStart = Date()
+
+        // 1. Local first.
+        JoeSearchSession.shared.feed(storeMovies())
+        let hits = JoeSearchSession.shared.localHits(for: kw)
+        localPool = hits
+        serverPool = []
+        results = Self.renderPool(local: hits, server: [], query: kw)
+        if !hits.isEmpty { logFirstPaint(localHits: hits.count) }
+
+        // 2. Branch fan-out with progressive merge.
+        for code in Providers.priority {
+            Task {
+                let t0 = Date()
+                let res = try? await Providers.search(code, keyword: kw)
+                guard gen == roundID, roundActive else { return }
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                branchesDone += 1
+                if let res {
+                    branchesOK += 1
+                    JoeSearchSession.shared.feed(res)
+                    serverPool = Self.mergePool(serverPool, res)
+                    LoadSignpost.log("JOESEARCH provider=\(code) ms=\(ms) results=\(res.count) timeout=0 error=0 query=\"\(kw)\"")
+                } else {
+                    branchesFailed += 1
+                    LoadSignpost.log("JOESEARCH provider=\(code) ms=\(ms) results=0 timeout=0 error=1 query=\"\(kw)\"")
+                }
+                results = Self.renderPool(local: localPool,
+                                          server: serverPool, query: kw)
+                if !results.isEmpty { logFirstPaint(localHits: hits.count) }
+                if branchesDone == Providers.priority.count {
+                    hardSettle(gen: gen, kw: kw)
+                }
+            }
+        }
+
+        // 3a. Soft deadline: the visible settle.
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard gen == roundID, roundActive, searching else { return }
+            searching = false
+            LoadSignpost.log("JOESEARCH soft_settle ms=2500 query=\"\(kw)\" results=\(results.count)")
+        }
+
+        // 3b. Hard budget: cut the stragglers, settle with
+        // what the round has.
+        Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard gen == roundID, roundActive else { return }
+            let missing = Providers.priority.count - branchesDone
+            if missing > 0 {
+                branchesFailed += missing
+                LoadSignpost.log("JOESEARCH hard_budget missing=\(missing) query=\"\(kw)\"")
+            }
+            hardSettle(gen: gen, kw: kw)
+        }
+    }
+
+    /// The hard settle: failure honesty + the snapshot rule.
+    private func hardSettle(gen: Int, kw: String) {
+        guard gen == roundID, roundActive else { return }
+        roundActive = false
+        searching = false
+        searched = true
+        // Failure means every provider threw (or was cut by
+        // the hard budget); a provider that answered empty is
+        // a (partial) success. The failure surface itself only
+        // shows when the grid is empty (body rule) — local
+        // hits stand even under an all-failed round.
+        if branchesFailed >= Providers.priority.count {
+            searchFailed = true
+        }
+        if branchesFailed == 0 {
+            JoeSearchSession.shared.storeSnapshot(
+                name: kw, local: localPool, server: serverPool)
+        }
+        let totalMs = Int(Date().timeIntervalSince(pressStart) * 1000)
+        LoadSignpost.log("JOESEARCH total ms=\(totalMs) ok=\(branchesOK) failed=\(branchesFailed) query=\"\(kw)\"")
+    }
+
+    private func logFirstPaint(localHits: Int) {
+        guard !firstPaintLogged else { return }
+        firstPaintLogged = true
+        let ms = Int(Date().timeIntervalSince(pressStart) * 1000)
+        LoadSignpost.log("JOESEARCH first_paint ms=\(ms) local_hits=\(localHits) query=\"\(searchedQuery)\"")
+    }
+
+    /// Everything the Phim store has already downloaded: the
+    /// merged newest rails, the type lists, chiếu rạp, the
+    /// Vietnam block, and every genre / country list. (The
+    /// merged rail already covers the four newest rails;
+    /// feeding duplicates is harmless — the pool dedupes.)
+    private func storeMovies() -> [Movie] {
+        var all: [Movie] = []
+        all += phim.merged
+        all += phim.kkSeries + phim.kkMovies + phim.kkAnime
+        all += phim.f4kNew + phim.f4kMovies
+        all += phim.vsNew + phim.vsSeries
+        all += phim.tpNew + phim.tpMovies + phim.tpSeries
+        all += phim.chieuRap + phim.vietnamAll
+        for list in phim.genreLists.values { all += list }
+        for list in phim.countryLists.values { all += list }
+        return all
+    }
+
+    /// Append `extra` to `base`, dropping later duplicates of
+    /// an already-kept film (provider|slug, first copy wins —
+    /// store copies carry the richer facet fields).
+    private static func mergePool(_ base: [Movie], _ extra: [Movie]) -> [Movie] {
+        var seen = Set(base.map { $0.id })
+        var out = base
+        for m in extra where !m.slug.isEmpty && !seen.contains(m.id) {
+            seen.insert(m.id)
+            out.append(m)
+        }
+        return out
+    }
+
+    /// The render pool: local hits first, then the server pool
+    /// grouped in provider priority order (the shipped grid
+    /// order), with the ONE sanctioned reordering — the
+    /// exact-match tier: a film whose normalized name OR
+    /// origin name EQUALS the query leads, in arrival order.
+    /// Every other card keeps its pool order and never moves
+    /// within its tier, so a branch landing late only appends
+    /// (or upgrades its own exact match into the front block).
+    private static func renderPool(local: [Movie], server: [Movie],
+                                   query: String) -> [Movie] {
+        var merged = mergePool([], local)
+        for code in Providers.priority {
+            merged = mergePool(merged, server.filter { $0.provider == code })
+        }
+        merged = mergePool(merged, server)
+        let q = Providers.normalizeTitle(query)
+        let exact = merged.filter {
+            Providers.normalizeTitle($0.name) == q
+                || Providers.normalizeTitle($0.originName) == q
+        }
+        guard !exact.isEmpty else { return merged }
+        let exactIDs = Set(exact.map { $0.id })
+        return exact + merged.filter { !exactIDs.contains($0.id) }
+    }
+}
+
+/// Session search memory (v2.0.1 — the Android TitleIndex +
+/// query cache, tvOS form): the local title pool and the
+/// clean-round snapshots. Lock-guarded static state (the
+/// Providers.altCache pattern) because the search view is
+/// recreated on every open while the session memory must
+/// survive it. Keys are precomputed at feed time, so a query
+/// costs two substring checks per entry.
+private final class JoeSearchSession: @unchecked Sendable {
+    static let shared = JoeSearchSession()
+
+    private let lock = NSLock()
+    private var poolOrder: [String] = []
+    private var pool: [String: Movie] = [:]
+    private var poolKeys: [String: (name: String, origin: String)] = [:]
+    private var snapshots: [(name: String, local: [Movie], server: [Movie])] = []
+
+    /// Feed downloaded titles into the pool: first copy wins,
+    /// cap 6000 entries with eldest-first eviction.
+    func feed(_ movies: [Movie]) {
+        lock.lock()
+        for m in movies where !m.slug.isEmpty {
+            if pool[m.id] == nil {
+                pool[m.id] = m
+                poolKeys[m.id] = (Providers.normalizeTitle(m.name),
+                                  Providers.normalizeTitle(m.originName))
+                poolOrder.append(m.id)
+            }
+        }
+        while poolOrder.count > 6000 {
+            let evicted = poolOrder.removeFirst()
+            pool.removeValue(forKey: evicted)
+            poolKeys.removeValue(forKey: evicted)
+        }
+        lock.unlock()
+    }
+
+    /// Local hits for a name — the search's own match rule:
+    /// normalized substring over the name OR the origin name.
+    func localHits(for query: String) -> [Movie] {
+        let q = Providers.normalizeTitle(query)
+        guard !q.isEmpty else { return [] }
+        lock.lock()
+        let ids = poolOrder
+        let poolCopy = pool
+        let keysCopy = poolKeys
+        lock.unlock()
+        return ids.compactMap { id in
+            guard let m = poolCopy[id], let k = keysCopy[id] else { return nil }
+            return (k.name.contains(q) || k.origin.contains(q)) ? m : nil
+        }
+    }
+
+    /// A snapshotted clean round for this name (LRU touch on
+    /// hit), or nil.
+    func snapshot(for name: String) -> (local: [Movie], server: [Movie])? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let i = snapshots.firstIndex(where: { $0.name == name }) {
+            let hit = snapshots.remove(at: i)
+            snapshots.append(hit)
+            return (hit.local, hit.server)
+        }
+        return nil
+    }
+
+    /// Snapshot a round. The CALLER enforces the FIX2 rule —
+    /// only rounds with zero failed branches are stored, so a
+    /// failed round can never be replayed as a result.
+    func storeSnapshot(name: String, local: [Movie], server: [Movie]) {
+        lock.lock()
+        snapshots.removeAll { $0.name == name }
+        snapshots.append((name, local, server))
+        if snapshots.count > 12 {
+            snapshots.removeFirst(snapshots.count - 12)
+        }
+        lock.unlock()
     }
 }
 

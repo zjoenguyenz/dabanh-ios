@@ -198,10 +198,17 @@ struct JoePhimHome: View {
     private var hero: some View {
         if let featured = heroMovie {
             ZStack(alignment: .bottomLeading) {
-                JoeRemoteImage(url: featured.thumbURL ?? featured.posterURL,
-                               targetPixels: 1920) {
-                    Color.black.opacity(0.45)
-                }
+                // v2.0.1 (Android hero parity): the hero art
+                // paints through the band layer — a landscape
+                // thumb as a top-anchored slice (anchor 0.20,
+                // the Android hero anchor) instead of the
+                // centred fill that cut faces, and a poster-
+                // only feature falls back to the blurred field
+                // rather than a cropped poster. The scrims
+                // below are untouched.
+                JoeBandImage(url: featured.thumbURL ?? featured.posterURL,
+                             targetPixels: 1920, anchor: 0.20,
+                             portraitMode: .blurField)
                 .frame(maxWidth: .infinity)
                 .frame(height: 668)
                 .clipped()

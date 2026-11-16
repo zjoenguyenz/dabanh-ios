@@ -116,19 +116,53 @@ struct JoeMovieDetail: View {
         }
         .task(id: slug + "|" + provider) { await load() }
         .task(id: detail?.movie.id ?? "") {
-            // TMDB enrichment (v1.6), fail-soft: only when the
-            // loaded detail carries a TMDB id AND a TMDB API key
-            // is available — the bundled key injected at build
-            // time, or one the owner saved in Settings (the saved
-            // key wins). Any failure leaves tmdb nil and the
-            // screen is the provider-only one.
-            guard let detail, !detail.movie.tmdbId.isEmpty,
-                  !TMDBClient.apiKey.isEmpty else {
+            // TMDB enrichment (v1.6), fail-soft: runs when a
+            // TMDB API key is available — the bundled key
+            // injected at build time, or one the owner saved in
+            // Settings (the saved key wins). Any failure leaves
+            // tmdb nil and the screen is the provider-only one.
+            //
+            // v2.0.1 (Android FIX2 parity): the task stays
+            // decoupled from the detail fetch (it always was —
+            // a separate task) and now publishes in TWO stages:
+            // backdrop + overview land with the TMDB detail
+            // call; the cast merges when the credits call
+            // returns, so the band never waits behind credits.
+            // A film whose payload carries no TMDB id — or a
+            // record with no backdrop — is hunted by the
+            // name + year title search for a backdrop, exactly
+            // like the Android pipeline.
+            guard let detail, !TMDBClient.apiKey.isEmpty else {
                 tmdb = nil
                 return
             }
-            tmdb = await TMDBClient.fetch(tmdbId: detail.movie.tmdbId,
-                                          type: detail.movie.tmdbType)
+            let movie = detail.movie
+            var info: TMDBInfo?
+            if !movie.tmdbId.isEmpty {
+                info = await TMDBClient.fetchInfo(
+                    tmdbId: movie.tmdbId, type: movie.tmdbType)
+            }
+            if info?.backdropURL.isEmpty ?? true {
+                if let url = await TMDBClient.searchBackdrop(
+                    name: movie.name, origin: movie.originName,
+                    year: Providers.yearOf(movie)) {
+                    if info == nil { info = TMDBInfo() }
+                    info?.backdropURL = url
+                }
+            }
+            guard let resolved = info else {
+                tmdb = nil
+                return
+            }
+            tmdb = resolved
+            if !movie.tmdbId.isEmpty {
+                let cast = await TMDBClient.fetchCast(
+                    tmdbId: movie.tmdbId, type: movie.tmdbType)
+                if !cast.isEmpty, var current = tmdb {
+                    current.cast = cast
+                    tmdb = current
+                }
+            }
         }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
@@ -189,21 +223,32 @@ struct JoeMovieDetail: View {
                 Spacer(minLength: 0)
             }
         case .billboard:
-            HStack(alignment: .top, spacing: 40) {
-                posterArt(m)
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(route.name)
-                        .font(.system(size: 60, weight: .heavy))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(3)
-                    if !route.year.isEmpty {
-                        Text(route.year)
-                            .font(.system(size: 29))
-                            .foregroundStyle(theme.heroMeta)
+            // v2.0.1: the placeholder carries the SAME band +
+            // overlap composition as the loaded detail (the
+            // Android pipeline starts at open from the launch
+            // payload): the band's poster treatment paints
+            // from the tapped card's decoded cache on the
+            // first frame, and the page does not change shape
+            // when the detail lands.
+            VStack(alignment: .leading, spacing: 0) {
+                backdropBand(movie: m, tmdbURL: nil)
+                HStack(alignment: .top, spacing: 40) {
+                    posterArt(m)
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(route.name)
+                            .font(.system(size: 60, weight: .heavy))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(3)
+                        if !route.year.isEmpty {
+                            Text(route.year)
+                                .font(.system(size: 29))
+                                .foregroundStyle(theme.heroMeta)
+                        }
+                        providerChip
                     }
-                    providerChip
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .padding(.top, bandVisible(movie: m, tmdbURL: nil) ? -168 : 0)
             }
         }
     }
@@ -245,9 +290,11 @@ struct JoeMovieDetail: View {
     private func billboardDetail(_ d: Detail) -> some View {
         VStack(alignment: .leading, spacing: 32) {
             VStack(alignment: .leading, spacing: 0) {
-                backdropBand(d)
+                backdropBand(movie: d.movie, tmdbURL: tmdbBackdropURL)
                 header(d)
-                    .padding(.top, hasBackdrop(d) ? -168 : 0)
+                    .padding(.top, bandVisible(movie: d.movie,
+                                                tmdbURL: tmdbBackdropURL)
+                             ? -168 : 0)
             }
             sourceChips
             servers(d, heading: "Chọn tập", headingSize: 30)
@@ -671,35 +718,64 @@ struct JoeMovieDetail: View {
         (tmdb?.backdropURL).flatMap { $0.isEmpty ? nil : URL(string: $0) }
     }
 
-    private func hasBackdrop(_ d: Detail) -> Bool {
-        d.movie.thumbURL != nil || tmdbBackdropURL != nil
+    /// The band exists whenever ANY band art can paint: the
+    /// TMDB backdrop, the provider thumb, or — v2.0.1 — the
+    /// poster itself (the portrait treatment is a real band,
+    /// so a poster-only film no longer opens on a missing
+    /// band while its TMDB search is still in flight).
+    private func bandVisible(movie: Movie, tmdbURL: URL?) -> Bool {
+        movie.thumbURL != nil || tmdbURL != nil || movie.posterURL != nil
     }
 
-    /// Design A's backdrop band (430 tall): the provider
-    /// landscape thumb, with the TMDB backdrop over it when the
-    /// enrichment arrives — both through the image pipeline.
-    /// UI-3 SCRIM FLOOR: the fade reaches the token floor
-    /// (0.55 black) by 60% of the band's height (UI-6 defect
-    /// D-8 — the render's stop) and the band's foot is fully
-    /// the foundation colour, so the header text overlapping
-    /// the band's lower zone always sits on at least the
-    /// guaranteed floor. Pure decoration — no focusable
-    /// elements. Hidden entirely when neither image exists
-    /// (the header then renders un-overlapped).
+    /// Design A's backdrop band (430 tall), v2.0.1 — the
+    /// Android v2.3 backdrop pipeline expressed natively.
+    /// Three image stages in one stack, each painting the
+    /// moment its bitmap is on the device, higher stages
+    /// covering lower ones as they land (the declarative form
+    /// of the Android stage guards — the TMDB layer sits on
+    /// top, so nothing can ever paint over the final):
+    ///   1. the poster treatment (JoeBandImage): blurred
+    ///      field + the whole poster at band height — fed
+    ///      from the decoded cache the tapped card warmed,
+    ///      so the band's first frame is instant (FIX4 peek);
+    ///   2. the provider's landscape thumb as a full-size
+    ///      top-anchored slice (FIX round 1 — the centred
+    ///      slice cut faces);
+    ///   3. the TMDB w1280 backdrop, same slice.
+    /// The fade over the whole composite is the design's own
+    /// (design-A/detail.html .fade, verbatim):
+    /// linear-gradient(0deg, #0A0A0A 5%, rgba(10,10,10,.25)
+    /// 60%, rgba(10,10,10,.45)) — read top→bottom: 45% shade
+    /// at the top, 25% at 40% of the height, solid foundation
+    /// from 95% down, so the poster copy's foot and the
+    /// overlapping header text melt into the foundation
+    /// exactly as the render has them (this replaces the UI-3
+    /// scrim-floor approximation with the design's literal
+    /// stops — the same stops the Android build ships).
+    /// Pure decoration — no focusable elements. Hidden
+    /// entirely when no art exists at all (the header then
+    /// renders un-overlapped).
     @ViewBuilder
-    private func backdropBand(_ d: Detail) -> some View {
-        if hasBackdrop(d) {
+    private func backdropBand(movie: Movie, tmdbURL: URL?) -> some View {
+        if bandVisible(movie: movie, tmdbURL: tmdbURL) {
             ZStack {
                 Color.black.opacity(0.45)
-                if let url = d.movie.thumbURL {
-                    JoeRemoteImage(url: url, targetPixels: 1920) { Color.clear }
+                if let url = movie.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.16, portraitMode: .treatment)
                 }
-                if let url = tmdbBackdropURL {
-                    JoeRemoteImage(url: url, targetPixels: 1920) { Color.clear }
+                if let url = movie.thumbURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.16, portraitMode: .slice)
+                }
+                if let url = tmdbURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.16, portraitMode: .slice)
                 }
                 LinearGradient(stops: [
-                    .init(color: .clear, location: 0.35),
-                    .init(color: .black.opacity(theme.scrimFloor), location: 0.60),
+                    .init(color: theme.bg.opacity(0.45), location: 0),
+                    .init(color: theme.bg.opacity(0.25), location: 0.40),
+                    .init(color: theme.bg, location: 0.95),
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
             }
@@ -967,9 +1043,39 @@ struct JoeMovieDetail: View {
         let attemptedSlug = slug
         if !hadDetail { loadFailed = false }
         switching = hadDetail
+        // v2.0.1 DetailCache (Android FIX2 parity): on a FIRST
+        // open, a cached payload paints the full detail
+        // immediately; the fetch below then runs as a
+        // background refresh — it repaints only when the
+        // payload actually changed (fingerprint), and a failed
+        // refresh never errors over the cache-filled screen.
+        // Switches keep the pre-cache behaviour exactly (the
+        // current detail already stays on screen through one).
+        var cachedPaint: Detail?
+        if !hadDetail,
+           let cached = JoeDetailCache.read(provider: attemptedProvider,
+                                            slug: attemptedSlug) {
+            detail = cached
+            cachedPaint = cached
+        }
         do {
             let d = try await Providers.detail(provider, slug: slug)
-            detail = d
+            JoeDetailCache.write(d, provider: attemptedProvider,
+                                 slug: attemptedSlug)
+            if let cachedPaint {
+                if JoeDetailCache.fingerprint(d)
+                    != JoeDetailCache.fingerprint(cachedPaint) {
+                    detail = d
+                }
+                // Same payload: the cached render stands. The
+                // fresh copy's stream URLs are NOT needed —
+                // the play path re-resolves them fresh at tap
+                // time (makeDirector's ladder re-fetches the
+                // detail), so nothing stale can reach the
+                // player from either copy.
+            } else {
+                detail = d
+            }
             switching = false
             lastGoodProvider = provider
             lastGoodSlug = slug
@@ -978,7 +1084,18 @@ struct JoeMovieDetail: View {
                 origin: d.movie.originName, year: d.movie.year)
         } catch {
             switching = false
-            if !hadDetail {
+            if let cachedPaint {
+                // The cache-filled screen stays — no error
+                // surface, no revert (the painted detail IS
+                // the attempted provider's own). Alternatives
+                // still run: the source row must not wait on a
+                // detail fetch that already failed once.
+                alternatives = await Providers.findAlternatives(
+                    fromCode: attemptedProvider,
+                    name: cachedPaint.movie.name,
+                    origin: cachedPaint.movie.originName,
+                    year: cachedPaint.movie.year)
+            } else if !hadDetail {
                 loadFailed = true
                 focusedRetry = true
             } else if attemptedProvider != lastGoodProvider

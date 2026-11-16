@@ -8,7 +8,7 @@ import Foundation
 /// WITH the movie because aggregation moves titles from several
 /// providers through one rail.
 
-struct Movie: Identifiable, Hashable {
+struct Movie: Identifiable, Hashable, Codable {
     var name = ""
     var slug = ""
     var originName = ""
@@ -63,18 +63,21 @@ struct Movie: Identifiable, Hashable {
     }
 }
 
-struct Episode: Hashable {
+struct Episode: Hashable, Codable {
     var name = ""
     var m3u8 = ""
     var embed = ""
 }
 
-struct Server: Hashable {
+struct Server: Hashable, Codable {
     var name = ""
     var episodes: [Episode] = []
 }
 
-struct Detail {
+/// Codable (v2.0.1) so the detail payload can ride the disk
+/// cache (JoeDetailCache) — the shapes are plain value types,
+/// so the conformance is synthesized and changes no parsing.
+struct Detail: Codable {
     var movie = Movie()
     var content = ""
     var metaLine = ""

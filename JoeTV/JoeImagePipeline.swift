@@ -61,6 +61,23 @@ final class JoeImagePipeline: @unchecked Sendable {
         return decoded.object(forKey: key(url, Self.bucket(forPixels: targetPixels)) as NSString)
     }
 
+    /// Synchronous decoded-cache read at ANY size bucket, largest
+    /// first (v2.0.1 — the Android FIX4 peek, tvOS form). The band
+    /// layers ask for a full-size decode, but a smaller decode of
+    /// the same URL — the tapped card's 720, the header's 960 —
+    /// is already on the device and can paint the band's first
+    /// frame instantly; the layer's own load then upgrades it
+    /// once when the full decode lands.
+    func cachedImageAnySize(for url: URL?) -> UIImage? {
+        guard let url else { return nil }
+        for b in [1920, 1440, 960, 720, 480, 240] {
+            if let hit = decoded.object(forKey: key(url, b) as NSString) {
+                return hit
+            }
+        }
+        return nil
+    }
+
     func image(for url: URL?, targetPixels: Int) async -> UIImage? {
         guard let url else { return nil }
         let bucket = Self.bucket(forPixels: targetPixels)
@@ -185,5 +202,106 @@ struct JoeRemoteImage<Placeholder: View>: View {
             loaded = nil
             loaded = await JoeImagePipeline.shared.image(for: url, targetPixels: targetPixels)
         }
+    }
+}
+
+// MARK: - Band image (v2.0.1 — Android v2.3 backdrop pipeline)
+
+/// One image layer of a wide backdrop band (the detail band,
+/// the home hero). Three behaviours, chosen by the loaded
+/// bitmap's own aspect — the Android pipeline's chooser:
+///
+///  - LANDSCAPE art is painted as a top-anchored slice: scaled
+///    to cover the band, with the visible window starting
+///    `anchor` of the way down the overflow (0.16 detail band,
+///    0.20 hero — the Android sliceForBand anchors). The
+///    pre-fix centred fill kept only the centre slice of a
+///    16:9 frame inside a 4.47:1 band, which is what cut the
+///    actors' faces on the Sony; faces live in the upper
+///    third, so the window opens near the top instead.
+///  - PORTRAIT art (a poster is the film's only image) gets
+///    the portrait treatment in .treatment mode: a blurred,
+///    darkened full-bleed field of the same art, with the
+///    WHOLE poster over it, fit to exactly the band height —
+///    never cropped, never stretched; its foot melts through
+///    the band's fade like the rest of the composite (the
+///    Android FIX2 z-order rule). .blurField paints only the
+///    field (the hero, whose text block owns the foreground).
+///
+/// First paint is the pipeline's any-size decoded cache (the
+/// tapped card already decoded this poster), so the layer can
+/// paint on the view's first render; its own full-size load
+/// upgrades the bitmap exactly once when it lands. Until any
+/// bitmap exists the layer paints nothing — the band's base
+/// colour is the painted surface, never a hole.
+struct JoeBandImage: View {
+    let url: URL?
+    var targetPixels: Int = 1920
+    var anchor: CGFloat = 0.16
+
+    enum PortraitMode { case treatment, blurField, slice }
+    var portraitMode: PortraitMode = .treatment
+
+    @State private var loaded: UIImage?
+
+    private var image: UIImage? {
+        loaded ?? JoeImagePipeline.shared.cachedImageAnySize(for: url)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                if let image {
+                    if image.size.width >= image.size.height
+                        || portraitMode == .slice {
+                        slice(image, in: geo.size)
+                    } else if portraitMode == .blurField {
+                        field(image, in: geo.size)
+                    } else {
+                        field(image, in: geo.size)
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: geo.size.width,
+                                   height: geo.size.height)
+                    }
+                }
+            }
+        }
+        .task(id: url) {
+            loaded = nil
+            loaded = await JoeImagePipeline.shared.image(
+                for: url, targetPixels: targetPixels)
+        }
+    }
+
+    /// Cover-slice with the window anchored near the top:
+    /// scale so the bitmap covers the slot, then shift it up
+    /// by `anchor` × the vertical overflow (0 = the very top
+    /// edge, 0.5 = the old centred slice).
+    private func slice(_ image: UIImage, in size: CGSize) -> some View {
+        let scale = max(size.width / image.size.width,
+                        size.height / image.size.height)
+        let w = image.size.width * scale
+        let h = image.size.height * scale
+        let overflow = max(h - size.height, 0)
+        return Image(uiImage: image)
+            .resizable()
+            .frame(width: w, height: h)
+            .offset(x: (size.width - w) / 2, y: -overflow * anchor)
+    }
+
+    /// The portrait treatment's field: the same art as a
+    /// blurred, darkened full-bleed backdrop (the Android
+    /// blurredBand: shrunk, blurred, darkened ~35%). The
+    /// slice is computed 72 pt oversize and shifted back, so
+    /// the blur's edge fringe falls outside the band's clip
+    /// instead of lightening its rim.
+    private func field(_ image: UIImage, in size: CGSize) -> some View {
+        slice(image, in: CGSize(width: size.width + 72,
+                                height: size.height + 72))
+            .blur(radius: 28)
+            .overlay(Color.black.opacity(0.35))
+            .offset(x: -36, y: -36)
     }
 }

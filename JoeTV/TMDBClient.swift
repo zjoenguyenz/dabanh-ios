@@ -39,7 +39,14 @@ enum TMDBClient {
         return saved.isEmpty ? TMDBBundledKey.value : saved
     }
 
-    static func fetch(tmdbId: String, type: String) async -> TMDBInfo? {
+    /// Stage 1 (v2.0.1): the TMDB detail call alone —
+    /// backdrop (w1280) + overview. Split from the credits
+    /// call so the detail screen can publish the backdrop the
+    /// moment THIS call returns, instead of the backdrop
+    /// waiting behind the cast fetch (the Android FIX2
+    /// decoupling: TMDB work never serialises behind itself).
+    /// nil on no key, no id, or a failed detail call.
+    static func fetchInfo(tmdbId: String, type: String) async -> TMDBInfo? {
         let key = apiKey
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
@@ -54,20 +61,74 @@ enum TMDBClient {
             info.backdropURL = "https://image.tmdb.org/t/p/w1280" + backdropPath
         }
         info.overview = JSON.str(root, "overview")
+        return info
+    }
 
-        if let credits = try? await JoeHTTP.getJSON(
-            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/credits?api_key=\(key)") {
-            info.cast = (JSON.arr(credits, "cast") ?? []).prefix(12).map { member in
-                let profilePath = JSON.str(member, "profile_path")
-                return TMDBCastMember(
-                    id: JSON.int(member, "id"),
-                    name: JSON.str(member, "name"),
-                    character: JSON.str(member, "character"),
-                    photoURL: profilePath.isEmpty
-                        ? "" : "https://image.tmdb.org/t/p/w185" + profilePath)
+    /// Stage 2 (v2.0.1): the credits call alone — top-billed
+    /// cast. Fail-soft: [] on any failure, so a dead credits
+    /// call simply leaves the screen without a cast row.
+    static func fetchCast(tmdbId: String, type: String) async -> [TMDBCastMember] {
+        let key = apiKey
+        guard !key.isEmpty, !tmdbId.isEmpty else { return [] }
+        let kind = (type == "tv") ? "tv" : "movie"
+
+        guard let credits = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/credits?api_key=\(key)")
+        else { return [] }
+        return (JSON.arr(credits, "cast") ?? []).prefix(12).map { member in
+            let profilePath = JSON.str(member, "profile_path")
+            return TMDBCastMember(
+                id: JSON.int(member, "id"),
+                name: JSON.str(member, "name"),
+                character: JSON.str(member, "character"),
+                photoURL: profilePath.isEmpty
+                    ? "" : "https://image.tmdb.org/t/p/w185" + profilePath)
+        }
+    }
+
+    /// Backdrop by title search (v2.0.1 — the Android
+    /// TmdbApi.searchBackdrop parity): for a film whose
+    /// payload carries no TMDB id, or whose record has no
+    /// backdrop. One /search/multi call per query name —
+    /// origin name first, the Vietnamese name as fallback —
+    /// accepting only results that carry a backdrop_path,
+    /// whose normalized title matches either of the film's
+    /// names, and whose year matches when both years are
+    /// known. Returns the w1280 URL or nil; fail-soft.
+    static func searchBackdrop(name: String, origin: String,
+                               year: String) async -> String? {
+        let key = apiKey
+        guard !key.isEmpty else { return nil }
+        var queries: [String] = []
+        for q in [origin, name] {
+            let t = q.trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty, !queries.contains(t) { queries.append(t) }
+        }
+        let wantNames = [Providers.normalizeTitle(name),
+                         Providers.normalizeTitle(origin)]
+        let wantYear = Providers.yearOf(year)
+        for q in queries {
+            guard let root = try? await JoeHTTP.getJSON(
+                "https://api.themoviedb.org/3/search/multi?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(q))&include_adult=false")
+            else { continue }
+            for item in JSON.arr(root, "results") ?? [] {
+                let backdropPath = JSON.str(item, "backdrop_path")
+                if backdropPath.isEmpty { continue }
+                let candidates = ["title", "name", "original_title", "original_name"]
+                    .map { Providers.normalizeTitle(JSON.str(item, $0)) }
+                guard candidates.contains(where: {
+                    !$0.isEmpty && wantNames.contains($0)
+                }) else { continue }
+                let release = JSON.str(item, "release_date")
+                let dateStr = release.isEmpty
+                    ? JSON.str(item, "first_air_date") : release
+                let itemYear = Providers.yearOf(dateStr)
+                if !wantYear.isEmpty, !itemYear.isEmpty,
+                   itemYear != wantYear { continue }
+                return "https://image.tmdb.org/t/p/w1280" + backdropPath
             }
         }
-        return info
+        return nil
     }
 
     /// The title's IMDB id, via TMDB's external_ids — the id
