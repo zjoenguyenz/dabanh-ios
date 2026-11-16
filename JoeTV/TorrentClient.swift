@@ -106,7 +106,19 @@ struct TorStream: Identifiable {
     var infoHash = ""
     var fileIdx = -1
     var proxyHeaders: [String: String] = [:]
-    var playable: Bool { !url.isEmpty && containerPlayable }
+
+    /// "Plays at once": the stream carries a direct URL. Since
+    /// v2.0.3 the torrent candidates play in the FFmpeg engine
+    /// (KSPlayer — see JoeKSPlayerView), which opens every
+    /// container Torrentio serves, so a direct URL is all
+    /// "playable" means now. The B-5 container gate below is
+    /// retired from selection: it was an AVPlayer workaround,
+    /// and in practice it could not even see the container —
+    /// Torrentio's RD resolve URLs carry no file extension and
+    /// its release titles carry no extension either, so MKV
+    /// files sailed through the gate and died inside AVPlayer
+    /// after the tap (the owner's endless black spinner).
+    var playable: Bool { !url.isEmpty }
 
     /// Containers AVPlayer opens natively.
     static let avPlayerContainers: Set<String> = ["mp4", "m4v", "mov"]
@@ -115,16 +127,13 @@ struct TorStream: Identifiable {
     static let nonAVPlayerContainers: Set<String> =
         ["mkv", "avi", "wmv", "flv", "webm", "ts", "mpg", "mpeg", "rm", "rmvb"]
 
-    /// B-5: whether this stream's container is one AVPlayer can
-    /// play. Read from the stream URL's extension when it has
-    /// one, else from the release name carried in the title/name
-    /// text (Torrentio titles carry it). Unknown containers stay
-    /// playable — the rule only excludes containers that are
-    /// KNOWN-bad, so unlabelled streams are never punished.
-    /// `playable` folds this in, and `playable` is what the
-    /// view's auto-pick walk and "PHÁT NGAY" badge key on — a
-    /// known-bad container is excluded at selection time
-    /// instead of being discovered by AVPlayer after the tap.
+    /// B-5 (historical): whether this stream's container is one
+    /// AVPlayer can play, read from the stream URL's extension
+    /// when it has one, else from the release name carried in
+    /// the title/name text. No longer consulted at selection
+    /// time (the torrent engine is FFmpeg now); retained as the
+    /// documented AVPlayer capability boundary — RdClient's
+    /// file pick keys on the same container sets above.
     var containerPlayable: Bool {
         if let ext = URL(string: url)?.pathExtension.lowercased(),
            !ext.isEmpty {
@@ -376,8 +385,15 @@ enum TorrentClient {
     /// direct URL: resolving every hash in the list would spam
     /// the owner's account, so other hash entries are never
     /// auto-resolved. Every remaining candidate is a direct-URL
-    /// stream passing TorStream.playable (the B-5 container
-    /// rule included), in list order. `labelPrefix` marks the
+    /// stream (TorStream.playable), in list order.
+    /// v2.0.3: every candidate is tagged .ffmpeg (the KSPlayer
+    /// engine — Torrentio's files are predominantly Matroska,
+    /// which AVPlayer cannot open at all), and the walk is
+    /// capped at 6, the Android ladder's MAX_TRIES: Torrentio
+    /// ranks by quality/seeds, so the head of the list is where
+    /// a working file lives; the old uncapped walk could burn
+    /// a dozen-plus attempts behind one unchanging label before
+    /// the exhausted slate appeared. `labelPrefix` marks the
     /// source for the player's status capsule ("" keeps the
     /// stream's own label, exactly what the torrent section
     /// has always shown).
@@ -392,15 +408,17 @@ enum TorrentClient {
            let match = streams.first(where: {
                $0.name == lead.name && $0.title == lead.title }),
            let url = await resolvePlayable(match) {
-            out.append(PlayCandidate(url: url, label: label(match)))
+            out.append(PlayCandidate(url: url, label: label(match),
+                                     engine: .ffmpeg))
         }
         for s in streams where s.playable {
             if let lead, s.name == lead.name && s.title == lead.title { continue }
             if let url = URL(string: s.url) {
-                out.append(PlayCandidate(url: url, label: label(s)))
+                out.append(PlayCandidate(url: url, label: label(s),
+                                         engine: .ffmpeg))
             }
         }
-        return out
+        return Array(out.prefix(6))
     }
 
     // MARK: - Subtitles (addon protocol)
@@ -459,28 +477,21 @@ enum RdClient {
         guard !files.isEmpty else { throw URLError(.badServerResponse) }
         var bestSize: Int64 = -1
         var bestId = -1
-        var bestPlayableSize: Int64 = -1
-        var bestPlayableId = -1
         var idxId = -1
         for (i, f) in files.enumerated() {
             let fid = JSON.int(f, "id", -1)
             let size = Int64(JSON.double(f, "bytes"))
             if i == fileIdx { idxId = fid }
             if size > bestSize { bestSize = size; bestId = fid }
-            // B-5: the size fallback prefers the largest file
-            // whose container AVPlayer can actually play (the
-            // .mp4 in a release pack over an .mkv, say). The
-            // addon's fileIdx, when present, is still honoured
-            // exactly — it is the addon's own choice.
-            let ext = (JSON.str(f, "path") as NSString).pathExtension.lowercased()
-            if TorStream.avPlayerContainers.contains(ext),
-               size > bestPlayableSize {
-                bestPlayableSize = size
-                bestPlayableId = fid
-            }
         }
-        let pick = idxId >= 0 ? idxId
-            : (bestPlayableId >= 0 ? bestPlayableId : bestId)
+        // The addon's fileIdx, when present, is honoured
+        // exactly — it is the addon's own choice; otherwise the
+        // largest file (the feature, not a sample or extra).
+        // The B-5-era preference for the largest AVPlayer-native
+        // container is retired with the gate itself (v2.0.3):
+        // the torrent engine is FFmpeg now, and the preference
+        // could pick a small .mp4 sample over the .mkv feature.
+        let pick = idxId >= 0 ? idxId : bestId
         guard pick >= 0 else { throw URLError(.badServerResponse) }
 
         _ = try await request(token: trimmed, method: "POST",

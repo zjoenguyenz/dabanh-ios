@@ -6,9 +6,23 @@ import SwiftUI
 /// the headers its CDN demands (never a blanket header — see the
 /// house rule in Channel.swift).
 struct PlayCandidate {
+    /// Which engine plays this candidate. Provider ladders stay
+    /// on AVPlayer (the house player, untouched). Torrent
+    /// candidates (TorrentClient.playCandidates — the torrent
+    /// section AND the Phim substitution rung) carry .ffmpeg:
+    /// the files Torrentio/Real-Debrid serve are predominantly
+    /// Matroska, which AVFoundation cannot demux at all — those
+    /// items never became ready and the session walked a long
+    /// list of them as one endless black spinner (v2.0.3).
+    enum Engine {
+        case avPlayer
+        case ffmpeg
+    }
+
     var url: URL
     var headers: [String: String] = [:]
     var label: String = ""
+    var engine: Engine = .avPlayer
 }
 
 /// Everything the player needs to keep WatchStore honest: the
@@ -185,16 +199,26 @@ final class PlayDirector: ObservableObject {
     /// landed on — here we just record that it happened and show
     /// the Android toast text).
     func itemReady(player: AVPlayer) {
+        let durSec = player.currentItem?.duration.seconds ?? 0
+        let durMs = durSec.isFinite ? Int64(durSec * 1000) : 0
+        itemReady(durationMs: durMs) { ms in
+            player.seek(to: CMTime(milliseconds: ms),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+    }
+
+    /// The same resume rule for the FFmpeg engine (v2.0.3): the
+    /// KSPlayer coordinator supplies the duration it measured
+    /// and performs the seek itself. One rule, two engines —
+    /// the >20 s / last-30 s window is identical.
+    func itemReady(durationMs: Int64, seek: (Int64) -> Void) {
         guard !seekApplied else { return }
         seekApplied = true
         // The Android rule, checked with the real duration in
         // hand: seek only when the stored position is past 20 s
         // AND outside the last 30 s (a finished title restarts).
-        let durSec = player.currentItem?.duration.seconds ?? 0
-        let durMs = durSec.isFinite ? Int64(durSec * 1000) : 0
-        if resumeMs > 20_000 && (durMs <= 0 || resumeMs < durMs - 30_000) {
-            let target = CMTime(milliseconds: resumeMs)
-            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        if resumeMs > 20_000 && (durationMs <= 0 || resumeMs < durationMs - 30_000) {
+            seek(resumeMs)
             notice = "Tiếp tục từ \(WatchStore.fmtClock(resumeMs))"
         }
     }
@@ -289,10 +313,21 @@ struct JoePlayerView: View {
                 .ignoresSafeArea()
             case .playing:
                 if let candidate = director.candidate {
-                    PlayerController(candidate: candidate,
-                                     director: director)
-                        .id(director.attemptID)
-                        .ignoresSafeArea()
+                    // Engine dispatch is a value on the candidate
+                    // (torrent candidates carry .ffmpeg — see
+                    // PlayCandidate); the shell, the capsule and
+                    // the director contract are shared.
+                    if candidate.engine == .ffmpeg {
+                        JoeKSPlayerController(candidate: candidate,
+                                              director: director)
+                            .id(director.attemptID)
+                            .ignoresSafeArea()
+                    } else {
+                        PlayerController(candidate: candidate,
+                                         director: director)
+                            .id(director.attemptID)
+                            .ignoresSafeArea()
+                    }
                 }
                 statusCapsule
             case .exhausted:

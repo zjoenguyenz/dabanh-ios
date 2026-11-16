@@ -189,7 +189,26 @@ struct JoeSettingsView: View {
             HStack(alignment: .center, spacing: 16) {
                 Group {
                     if secure {
-                        SecureField("", text: text)
+                        // v2.0.3: a secure field's own masked
+                        // rendering drops out while focus moves
+                        // or the page scrolls (tvOS redraws the
+                        // secure text lazily), which made a saved
+                        // token read as an empty field. The
+                        // bullet row UNDER the field is painted
+                        // from the stored string itself — always
+                        // installed, same font and colour the
+                        // chrome applies — so the masked state
+                        // is stable in every focus/scroll state;
+                        // the field's own dots coincide with it
+                        // whenever the system does draw them.
+                        // The value itself is never rendered —
+                        // one bullet per stored character, capped.
+                        ZStack(alignment: .leading) {
+                            Text(String(repeating: "•",
+                                        count: min(text.wrappedValue.count, 40)))
+                                .allowsHitTesting(false)
+                            SecureField("", text: text)
+                        }
                     } else {
                         TextField("", text: text)
                     }

@@ -442,9 +442,6 @@ struct PosterCard: View {
     private var wallBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             art
-                .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-                    .strokeBorder(focused ? theme.focus : .clear,
-                                  lineWidth: focused ? theme.ringWidth : 0))
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
                 .foregroundStyle(focused ? theme.focusTitle : theme.text)
@@ -467,6 +464,16 @@ struct PosterCard: View {
         }
         .frame(width: theme.cardWidth, alignment: .leading)
         .background(theme.bg)
+        // v2.0.3: the focus ring overlays the WHOLE card — the
+        // bounds the focus engine (and the owner) sees. It used
+        // to ride the art alone, so in this theme the app's ring
+        // and the card's actual bounds disagreed (the ring
+        // stopped at the art's bottom edge while the card runs
+        // on through the title block). Same shape, colour and
+        // width values as before; only the bounds are corrected.
+        .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+            .strokeBorder(focused ? theme.focus : .clear,
+                          lineWidth: focused ? theme.ringWidth : 0))
     }
 }
 

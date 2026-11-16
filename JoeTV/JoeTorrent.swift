@@ -869,8 +869,7 @@ struct JoeTorrentDetail: View {
     }
 
     private func streamRow(_ stream: TorStream) -> some View {
-        let focused = focusedRow == "st|" + stream.id.uuidString
-        return Button {
+        Button {
             play(stream)
         } label: {
             HStack(spacing: 16) {
@@ -904,11 +903,15 @@ struct JoeTorrentDetail: View {
             // old white 0.06→0.13 brightening was a focus wash).
             // v2.0.0: the fill is the theme's surface token and
             // the outline is the theme ring (value-only).
+            // v2.0.3: the outline is the shared JoeFocusRing
+            // primitive — the same shape instance geometry as the
+            // fill (rField), drawn inside the row's own bounds,
+            // environment-driven like every other control in the
+            // app (the hand-rolled copy here keyed off the
+            // parent's FocusState instead).
             .background(RoundedRectangle(cornerRadius: theme.rField)
                 .fill(theme.surface2))
-            .overlay(RoundedRectangle(cornerRadius: theme.rField)
-                .strokeBorder(focused ? theme.focus : Color.clear,
-                              lineWidth: focused ? theme.ringWidth : 0))
+            .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
         .buttonStyle(.card)
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
