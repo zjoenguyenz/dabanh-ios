@@ -81,7 +81,11 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// though the engine reports time every 0.1 s.
     private var lastTickAt = Date.distantPast
 
-    override var canBecomeFocused: Bool { true }
+    override func loadView() {
+        view = KSPlayerHostRootView()
+    }
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] { [view] }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -292,4 +296,15 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             self?.director?.itemFailed()
         }
     }
+}
+
+/// The host's root view — the one focusable surface of the KS
+/// player screen. tvOS focus can only land on a UIView: a view
+/// controller has no `canBecomeFocused` to override (that line
+/// is what CI run #24 rejected). With focus on this view,
+/// remote presses bubble up the responder chain to the host
+/// controller's `pressesEnded`, which is where Select and
+/// Left/Right are handled; Menu is never swallowed there.
+private final class KSPlayerHostRootView: UIView {
+    override var canBecomeFocused: Bool { true }
 }
