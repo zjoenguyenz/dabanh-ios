@@ -130,6 +130,21 @@ final class WatchStore: ObservableObject {
         if progressEntries.count != before { persist() }
     }
 
+    /// Owner reset (v2.0.7): clear the WHOLE opened-movies
+    /// history at once — every Continue Watching entry, all
+    /// providers and torrent alike (both tabs read this one
+    /// array). removeProgress above is the per-card long-press
+    /// route; this is the Settings button's route, for a rail
+    /// that filled up with accidentally opened films.
+    /// Favorites are NOT progress and are never touched here.
+    /// Same mutation discipline as every other write:
+    /// in-memory first, then persist() writes the whole Doc.
+    func clearAllProgress() {
+        guard !progressEntries.isEmpty else { return }
+        progressEntries.removeAll()
+        persist()
+    }
+
     // MARK: - Favorites
 
     func favorites() -> [Entry] { favoriteEntries }

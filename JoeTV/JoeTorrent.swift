@@ -214,7 +214,8 @@ struct JoeTorrentHome: View {
                             posterURL: entry.posterURL,
                             meta: entry.epLabel,
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($focusedEntry, equals: "cw|" + entry.key)
@@ -253,7 +254,8 @@ struct JoeTorrentHome: View {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
-                            meta: entry.year)
+                            meta: entry.year,
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($focusedEntry, equals: "fav|" + entry.key)
@@ -512,7 +514,8 @@ struct JoeTorrentHome: View {
                     PosterCard(
                         title: meta.name,
                         posterURL: meta.posterURL,
-                        meta: meta.year)
+                        meta: meta.year,
+                        form: .rail)
                 }
                 .joeCardButton()
                 .focused($focusedMeta, equals: scope + "|" + meta.id)
@@ -549,6 +552,11 @@ struct JoeTorrentHome: View {
                 }
             }
         }
+        // Design D's wall ring is an OUTSET band around the
+        // art (6 pt): under D the grid takes edge clearance
+        // past it so the outer columns' rings are never
+        // clipped by the scroll frame.
+        .padding(.horizontal, theme.id == .posterWall ? 8 : 0)
     }
 
     /// Search-grid routing (C-2): the handler sits on each result,
@@ -698,11 +706,14 @@ struct JoeTorrentDetail: View {
             }
             .frame(width: 240, height: 360)
             .clipShape(RoundedRectangle(cornerRadius: theme.rCard))
-            // v2.0.6 (Team Ring): hairline outset, as on every
-            // clipped-image frame — it frames the poster instead
-            // of painting over its edge pixels.
+            // The hairline is an INSIDE strokeBorder (the
+            // v2.0.6 outset band is retired on this frame —
+            // the torrent surfaces carry no drawing of their
+            // own, and the inside form is the system's resting
+            // frame treatment outside the two drawn outset
+            // rings: the field's and design D's wall art).
             .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
 
             VStack(alignment: .leading, spacing: 16) {
                 Text(meta.name)

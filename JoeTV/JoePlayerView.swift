@@ -401,7 +401,11 @@ struct JoePlayerView: View {
         case .posterWall:
             VStack(alignment: .center, spacing: 18) {
                 slateTexts(centred: true)
-                HStack(spacing: 16) {
+                // Design-D player slate: button row gap 18,
+                // margin-top 40 above the row (the column's 18
+                // spacing + this 22 padding — the A branch's
+                // construction, whose drawing agrees).
+                HStack(spacing: 18) {
                     slateButton("Thử lại", tag: .retry, primary: true) {
                         director.retryFromExhausted()
                     }
@@ -409,14 +413,17 @@ struct JoePlayerView: View {
                         dismiss()
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 22)
             }
             .frame(maxWidth: 1150)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         case .billboard:
             VStack(alignment: .leading, spacing: 18) {
                 slateTexts(centred: false)
-                HStack(spacing: 16) {
+                // Design-A player slate: button row gap 18,
+                // margin-top 40 above the row (the column's 18
+                // spacing + this 22 padding).
+                HStack(spacing: 18) {
                     slateButton("Thử lại", tag: .retry, primary: true) {
                         director.retryFromExhausted()
                     }
@@ -424,7 +431,7 @@ struct JoePlayerView: View {
                         dismiss()
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 22)
             }
             .frame(maxWidth: 1150, alignment: .leading)
             .padding(.leading, 48)
@@ -433,29 +440,39 @@ struct JoePlayerView: View {
             VStack(alignment: .leading, spacing: 18) {
                 slateTexts(centred: false)
                 if let attemptRows {
-                    VStack(alignment: .leading, spacing: 10) {
+                    // Design-F player: the attempt rows are
+                    // the drawing's .srcrow at full slate-column
+                    // width — name 30 bold, the failed state 25
+                    // semibold in the bad colour, padding 22/30,
+                    // radius 18 (theme.rField under F), the
+                    // surface gradient with the resting inset
+                    // stroke 1.5, rows at margin-bottom 16; the
+                    // block's margin-top is 28 (the column's 18
+                    // + this 10 padding).
+                    VStack(alignment: .leading, spacing: 16) {
                         ForEach(attemptRows, id: \.self) { name in
-                            HStack(spacing: 16) {
+                            HStack(spacing: 22) {
                                 Text(name)
-                                    .font(.system(size: 27, weight: .semibold))
+                                    .font(.system(size: 30, weight: .bold))
                                     .foregroundStyle(theme.text)
                                 Spacer()
                                 Text("✗ Không phát được")
-                                    .font(.system(size: 25))
+                                    .font(.system(size: 25, weight: .semibold))
                                     .foregroundStyle(JoeTheme.accentRed)
                             }
-                            .padding(.horizontal, 22)
-                            .padding(.vertical, 12)
-                            // UI-6 defect D-18: F's attempt
-                            // rows follow the theme's field
-                            // radius and surface gradient.
+                            .padding(.horizontal, 30)
+                            .padding(.vertical, 22)
                             .background(RoundedRectangle(cornerRadius: theme.rField)
                                 .fill(theme.surfaceGradient))
+                            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                                .strokeBorder(theme.stroke, lineWidth: 1.5))
                         }
                     }
-                    .frame(maxWidth: 700, alignment: .leading)
+                    .padding(.top, 10)
                 }
-                HStack(spacing: 16) {
+                // Design-F player: button row gap 18,
+                // margin-top 30 (the column's 18 + this 12).
+                HStack(spacing: 18) {
                     slateButton("Thử lại", tag: .retry, primary: true) {
                         director.retryFromExhausted()
                     }
@@ -463,7 +480,7 @@ struct JoePlayerView: View {
                         dismiss()
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 12)
             }
             .frame(maxWidth: 1150, alignment: .leading)
             .padding(.leading, 48)
@@ -478,44 +495,65 @@ struct JoePlayerView: View {
     /// headline, the explanation, the tried-sources line
     /// (designs A/D; F renders the same data as rows below),
     /// and the active source-mode line.
-    @ViewBuilder
     private func slateTexts(centred: Bool) -> some View {
-        if !filmTitle.isEmpty {
-            Text(filmEpisode.isEmpty ? filmTitle : "\(filmTitle) — \(filmEpisode)")
-                .font(.system(size: 22, weight: .bold))
-                .tracking(4)
-                .textCase(.uppercase)
-                .foregroundStyle(theme.focusTitle)
+        // Design .slate text rhythm (shared stylesheet, all
+        // three drawings): headline margin-top 12 below the
+        // kicker, message 16 below the headline in FULL white,
+        // tried line 18 below the message in the theme's meta
+        // colour. One spacing-0 column with per-line top
+        // paddings, so an absent line collapses with its
+        // margin, like CSS. The "Lỗi cuối" and source-mode
+        // lines are app-only (v2.0.5 error 8a) and keep their
+        // dimmed white at the same 18 rhythm.
+        VStack(alignment: centred ? .center : .leading, spacing: 0) {
+            if !filmTitle.isEmpty {
+                Text(filmEpisode.isEmpty ? filmTitle : "\(filmTitle) — \(filmEpisode)")
+                    .font(.system(size: 22, weight: .bold))
+                    .tracking(4)
+                    .textCase(.uppercase)
+                    .foregroundStyle(theme.focusTitle)
+                    .multilineTextAlignment(centred ? .center : .leading)
+            }
+            // Headline/message sizes follow each drawing's own
+            // slate classes: A and F inline the slate sizes
+            // (52 headline, 29 message, full white); design-D's
+            // player drawing reuses its hero classes instead —
+            // .hero-title at D's 56px override and .hero-syn
+            // at 27px, white at the base rule's .92 opacity.
+            Text("Không phát được nguồn này")
+                .font(.system(size: theme.id == .posterWall ? 56 : 52, weight: .heavy))
+                .foregroundStyle(.white)
                 .multilineTextAlignment(centred ? .center : .leading)
-        }
-        Text("Không phát được nguồn này")
-            .font(.system(size: 52, weight: .heavy))
-            .foregroundStyle(.white)
-            .multilineTextAlignment(centred ? .center : .leading)
-        Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được.")
-            .font(.system(size: 29))
-            .foregroundStyle(.white.opacity(0.7))
-            .multilineTextAlignment(centred ? .center : .leading)
-        if let lastFailure = director.lastFailure {
-            // v2.0.5 (error 8a): the last failure's own cause,
-            // remembered by the director — a dead slate used
-            // to say nothing about why every attempt died.
-            Text("Lỗi cuối: \(lastFailure)")
-                .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
+                .padding(.top, filmTitle.isEmpty ? 0 : 12)
+            Text("Đã thử lấy link mới và đổi nguồn nhưng vẫn không phát được.")
+                .font(.system(size: theme.id == .posterWall ? 27 : 29))
+                .foregroundStyle(theme.id == .posterWall ? .white.opacity(0.92) : .white)
                 .multilineTextAlignment(centred ? .center : .leading)
-        }
-        if theme.id != .sourceBoard, let attemptRows, !attemptRows.isEmpty {
-            Text("Đã thử: " + attemptRows.joined(separator: " · "))
-                .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(centred ? .center : .leading)
-        }
-        if !sourceLine.isEmpty {
-            Text(sourceLine)
-                .font(.system(size: 25))
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(centred ? .center : .leading)
+                .padding(.top, 16)
+            if let lastFailure = director.lastFailure {
+                // v2.0.5 (error 8a): the last failure's own cause,
+                // remembered by the director — a dead slate used
+                // to say nothing about why every attempt died.
+                Text("Lỗi cuối: \(lastFailure)")
+                    .font(.system(size: 25))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(centred ? .center : .leading)
+                    .padding(.top, 18)
+            }
+            if theme.id != .sourceBoard, let attemptRows, !attemptRows.isEmpty {
+                Text("Đã thử: " + attemptRows.joined(separator: " · "))
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                    .multilineTextAlignment(centred ? .center : .leading)
+                    .padding(.top, 18)
+            }
+            if !sourceLine.isEmpty {
+                Text(sourceLine)
+                    .font(.system(size: 25))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(centred ? .center : .leading)
+                    .padding(.top, 18)
+            }
         }
     }
 

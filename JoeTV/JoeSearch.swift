@@ -111,9 +111,13 @@ struct JoeSearchView: View {
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
             }
-            // UI-6 defect D-19: D's results carry the render's
-            // heading naming the searched term.
-            if theme.id == .posterWall && searched && !results.isEmpty {
+            // UI-6 defect D-19: the results carry the render's
+            // heading naming the searched term — design D's
+            // search drawing has it, and design A's search
+            // drawing has the same heading ("Kết quả cho "…"",
+            // rail-title 34 bold), so A takes it too. F keeps
+            // its per-source grouped rails without it.
+            if theme.id != .sourceBoard && searched && !results.isEmpty {
                 Text("Kết quả cho “\(searchedQuery)”")
                     .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(theme.text)
@@ -216,7 +220,9 @@ struct JoeSearchView: View {
                 // whose column count the code cannot enumerate) so
                 // result focus routing is exact arithmetic — see
                 // resultMove.
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28),
+                // Column gap = the theme's rail gap (design
+                // card pitch: A 26, D 24, F 28).
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
                                          count: 6),
                           alignment: .leading, spacing: 40) {
                     ForEach(results) { movie in
@@ -224,7 +230,11 @@ struct JoeSearchView: View {
                     }
                 }
                 .padding(.vertical, 8)
-                .padding(.horizontal, 4)
+                // Design D's wall ring is an OUTSET band around
+                // the art (6 pt): the grid's edge clearance
+                // grows past it under D so the outer columns'
+                // rings are never clipped by the scroll frame.
+                .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
             }
         }
     }

@@ -302,24 +302,35 @@ struct JoePhimHome: View {
                     .init(color: .clear, location: 0.55),
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 14) {
+                // Design-A home hero text column (design-A/home.html):
+                // the drawing spaces its elements with per-element
+                // margins, not a uniform gap — kicker →(0) title
+                // →(12) meta →(10) genres →(16) synopsis →(26)
+                // buttons — so the column runs at spacing 0 and each
+                // element carries its own top padding (an absent
+                // element collapses with its margin, like CSS).
+                VStack(alignment: .leading, spacing: 0) {
                     Text("Nổi bật hôm nay")
-                        .font(.system(size: 23, weight: .bold))
-                        .tracking(3)
-                        .foregroundStyle(theme.heroMeta)
+                        .font(.system(size: 22, weight: .bold))
+                        .tracking(4)
+                        .foregroundStyle(theme.text)
                     Text(featured.name)
                         .font(.system(size: 68, weight: .heavy))
                         .foregroundStyle(theme.text)
                         .lineLimit(2)
+                    // App-only line (the home drawing has no origin
+                    // line; it sits between title and meta here).
                     if !featured.originName.isEmpty, featured.originName != featured.name {
                         Text(featured.originName)
                             .font(.system(size: 27))
                             .foregroundStyle(theme.heroMeta)
                             .lineLimit(1)
+                            .padding(.top, 10)
                     }
                     Text(heroMetaLine(featured))
-                        .font(.system(size: 27))
+                        .font(.system(size: 27, weight: .medium))
                         .foregroundStyle(theme.heroMeta)
+                        .padding(.top, 12)
                     // UI-6 D-2: the render's genres line and
                     // synopsis — genres from the list payload's
                     // own category names (heroDetail's parsed
@@ -327,9 +338,10 @@ struct JoePhimHome: View {
                     // the featured film's detail fetch.
                     if !heroGenres.isEmpty {
                         Text(heroGenres.joined(separator: " · "))
-                            .font(.system(size: 25))
+                            .font(.system(size: 23))
                             .foregroundStyle(theme.heroMeta)
                             .lineLimit(1)
+                            .padding(.top, 10)
                     }
                     if let synopsis = heroDetail?.content, !synopsis.isEmpty {
                         Text(synopsis)
@@ -338,8 +350,9 @@ struct JoePhimHome: View {
                             .lineSpacing(6)
                             .lineLimit(3)
                             .frame(maxWidth: 880, alignment: .leading)
+                            .padding(.top, 16)
                     }
-                    HStack(spacing: 16) {
+                    HStack(spacing: 18) {
                         Button {
                             nav.movie = MovieRoute(provider: featured.provider,
                                                    slug: featured.slug,
@@ -366,10 +379,15 @@ struct JoePhimHome: View {
                         }
                         .joeCardButton()
                     }
-                    .padding(.top, 8)
+                    .padding(.top, 26)
                 }
-                .padding(40)
-                .frame(maxWidth: 1100, alignment: .leading)
+                // Design: hero content max-width 1000, starting at
+                // the screen padding edge (the rails' left edge) —
+                // no extra horizontal inset; the 40 vertical inset
+                // keeps the bottom-anchored column off the band's
+                // bottom edge.
+                .padding(.vertical, 40)
+                .frame(maxWidth: 1000, alignment: .leading)
             }
             .frame(height: 668)
             // v2.0.5 (N1/N2): the hero's play button is this
@@ -517,13 +535,17 @@ struct JoePhimHome: View {
 
     /// F's source band header (UI-6 defects D-15 + D-3): ONE
     /// row — source name and catalogue note inline on the same
-    /// baseline row (the render's .band), padding 28/18, an
-    /// inset stroke over the surface2 fill — and the "Xem tất
-    /// cả ›" label PAINTS its full frame (a bg capsule behind
-    /// the text), so the system platter can never show through
-    /// the .card label.
+    /// baseline row (the render's .band: gap 22, padding 28/18,
+    /// radius 14, the flat surface2 fill with the inset stroke
+    /// 1.5 over it). The "Xem tất cả ›" label is the drawing's
+    /// plain cyan text (.band .all: 25 semibold, focus colour)
+    /// — no capsule behind it (the old bg capsule was a
+    /// system-platter defence from before .joeCardButton
+    /// disabled that effect centrally); focus shows as the
+    /// inside ring around the padded label, and the text stays
+    /// cyan in every state, as drawn.
     private func bandHeader(name: String, note: String, scope: String) -> some View {
-        HStack(alignment: .center, spacing: 20) {
+        HStack(alignment: .center, spacing: 22) {
             Text(name)
                 .font(.system(size: 34, weight: .heavy))
                 .foregroundStyle(theme.text)
@@ -537,10 +559,9 @@ struct JoePhimHome: View {
             } label: {
                 Text("Xem tất cả ›")
                     .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(bandFocused == scope ? theme.text : theme.focusTitle)
+                    .foregroundStyle(theme.focusTitle)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(Capsule().fill(theme.bg))
                     .overlay(JoeFocusRing(shape: Capsule()))
             }
             .joeCardButton()
@@ -559,7 +580,7 @@ struct JoePhimHome: View {
         .padding(.vertical, 18)
         .background(RoundedRectangle(cornerRadius: 14).fill(theme.surface2))
         .overlay(RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(theme.stroke, lineWidth: 1))
+            .strokeBorder(theme.stroke, lineWidth: 1.5))
     }
 
     // MARK: - Load states (§8)
@@ -832,7 +853,8 @@ struct JoePhimHome: View {
                             meta: entry.epLabel,
                             badge: Providers.badge(entry.source),
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($focusedEntry, equals: "cw|" + entry.key)
@@ -865,7 +887,8 @@ struct JoePhimHome: View {
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
-                            badge: Providers.badge(entry.source))
+                            badge: Providers.badge(entry.source),
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($focusedEntry, equals: "fav|" + entry.key)
@@ -904,7 +927,8 @@ struct JoePhimHome: View {
                         tmdbType: movie.tmdbType,
                         meta: movie.cardMeta,
                         badge: badges ? Providers.badge(movie.provider) : nil,
-                        quality: movie.quality)
+                        quality: movie.quality,
+                        form: .rail)
                 }
                 .joeCardButton()
                 .focused($focusedMovie, equals: scope + "|" + movie.id)
@@ -947,21 +971,24 @@ struct JoeRailSpec: Identifiable {
 @MainActor
 func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
     var specs: [JoeRailSpec] = []
+    // Design F's cards carry BOTH badges in every rail (the
+    // renders' .badge + .srcbadge — the banded rails included),
+    // so every sourceBoard spec passes badges: true.
     if themeID == .sourceBoard {
         specs.append(JoeRailSpec(scope: "kkNew", title: "Mới cập nhật",
-                                 movies: phim.kkNew, badges: false,
+                                 movies: phim.kkNew, badges: true,
                                  bandName: "KKPhim",
                                  bandNote: "Kho phim lớn nhất · cập nhật liên tục"))
         specs.append(JoeRailSpec(scope: "f4kNew", title: "Mới cập nhật",
-                                 movies: phim.f4kNew, badges: false,
+                                 movies: phim.f4kNew, badges: true,
                                  bandName: "Phim4K",
                                  bandNote: "Phim mới mỗi ngày"))
         specs.append(JoeRailSpec(scope: "vsNew", title: "Mới cập nhật",
-                                 movies: phim.vsNew, badges: false,
+                                 movies: phim.vsNew, badges: true,
                                  bandName: "VSMOV",
                                  bandNote: "Vietsub · phim bộ & phim lẻ"))
         specs.append(JoeRailSpec(scope: "tpNew", title: "Mới cập nhật",
-                                 movies: phim.tpNew, badges: false,
+                                 movies: phim.tpNew, badges: true,
                                  bandName: "Tủ Phim",
                                  bandNote: "Kho lưu trữ · phim chọn lọc"))
     } else {
@@ -986,19 +1013,19 @@ func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
     }
     if themeID == .sourceBoard {
         specs.append(JoeRailSpec(scope: "kkSeries", title: "📺 KKPhim · Phim bộ mới",
-                                 movies: phim.kkSeries, badges: false))
+                                 movies: phim.kkSeries, badges: true))
         specs.append(JoeRailSpec(scope: "kkMovies", title: "🎞️ KKPhim · Phim lẻ mới",
-                                 movies: phim.kkMovies, badges: false))
+                                 movies: phim.kkMovies, badges: true))
         specs.append(JoeRailSpec(scope: "kkAnime", title: "🐣 KKPhim · Hoạt hình",
-                                 movies: phim.kkAnime, badges: false))
+                                 movies: phim.kkAnime, badges: true))
         specs.append(JoeRailSpec(scope: "f4kMovies", title: "🎞️ Film4K · Phim lẻ mới",
-                                 movies: phim.f4kMovies, badges: false))
+                                 movies: phim.f4kMovies, badges: true))
         specs.append(JoeRailSpec(scope: "vsSeries", title: "🎬 VSMOV · Phim bộ mới",
-                                 movies: phim.vsSeries, badges: false))
+                                 movies: phim.vsSeries, badges: true))
         specs.append(JoeRailSpec(scope: "tpMovies", title: "📚 Tủ Phim · Phim lẻ mới",
-                                 movies: phim.tpMovies, badges: false))
+                                 movies: phim.tpMovies, badges: true))
         specs.append(JoeRailSpec(scope: "tpSeries", title: "📚 Tủ Phim · Phim bộ mới",
-                                 movies: phim.tpSeries, badges: false))
+                                 movies: phim.tpSeries, badges: true))
     } else {
         specs.append(JoeRailSpec(scope: "kkNew", title: "✨ Mới cập nhật",
                                  movies: phim.kkNew, badges: false))

@@ -359,7 +359,8 @@ struct JoeRootView: View {
     @ViewBuilder
     private var topBar: some View {
         if theme.id == .posterWall {
-            HStack(alignment: .center, spacing: 26) {
+            // Design .topbar gap: 20 (all three drawings).
+            HStack(alignment: .center, spacing: 20) {
                 wordmark
                 Spacer()
                 ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
@@ -585,11 +586,23 @@ private struct PillLabel: View {
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
         }
-        .foregroundStyle((selected || isFocused) ? theme.onAccent : theme.text.opacity(0.85))
-        .padding(.horizontal, 28)
-        .padding(.vertical, 14)
-        .background(Capsule().fill(selected || isFocused ? theme.accent : theme.surface2))
-        .overlay(JoeFocusRing(shape: Capsule()))
+        // Design .pill: 29px medium (semibold when selected or
+        // focused), padding 15px 30px; the accent fill belongs
+        // to the SELECTED state only — a focused-but-unselected
+        // pill keeps the surface2 fill and shows the inside ring
+        // + semibold text at full text colour. The resting
+        // state carries the drawing's inset stroke (1.5
+        // theme.stroke; the selected fill replaces it —
+        // box-shadow: none), so the ring is an explicit
+        // strokeBorder in the JoeChipLabel form, not
+        // JoeFocusRing (which paints clear at rest).
+        .foregroundStyle(selected ? theme.onAccent : theme.text)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 15)
+        .background(Capsule().fill(selected ? theme.accent : theme.surface2))
+        .overlay(Capsule().strokeBorder(
+            isFocused ? theme.focus : (selected ? .clear : theme.stroke),
+            lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 
@@ -609,25 +622,29 @@ private struct TopLinkLabel: View {
 
     var body: some View {
         Text(title)
-            .font(.system(size: 27, weight: selected ? .bold : .medium))
+            .font(.system(size: 27, weight: (selected || isFocused) ? .bold : .medium))
             .foregroundStyle(isFocused ? theme.focus
                              : (selected ? theme.text : theme.meta))
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 18)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
             .background(theme.bg)
+            // Design .toplink.sel: box-shadow inset 0 -4px 0 —
+            // the underline spans the link's FULL width (the
+            // whole padded box), not just the text.
             .overlay(alignment: .bottom) {
                 Rectangle()
                     .fill(selected ? theme.focus : .clear)
                     .frame(height: 4)
-                    .padding(.horizontal, 18)
             }
-            // v2.0.6 (Team Ring): band outset like every
-            // focus ring (width still a constant 3 — only the
-            // colour changes with focus, as before).
+            // Design .toplink.focused: box-shadow inset 0 0 0
+            // 3px #FFD60A, border-radius 8 — the ring is INSIDE
+            // the link's bounds. (The v2.0.6 outset band is
+            // retired here; width stays a constant 3 — only the
+            // colour changes with focus, as before.)
             .overlay(RoundedRectangle(cornerRadius: 8)
-                .joeOutsetStrokeBorder(isFocused ? theme.focus : .clear, lineWidth: 3))
+                .strokeBorder(isFocused ? theme.focus : .clear, lineWidth: 3))
     }
 }
 

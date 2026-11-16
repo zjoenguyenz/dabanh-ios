@@ -214,18 +214,23 @@ struct JoeMovieDetail: View {
         let m = placeholderMovie()
         switch theme.id {
         case .posterWall:
-            VStack(alignment: .center, spacing: 18) {
+            // The loaded D detail's rhythm (title margin-top
+            // 24 below the poster), so the page keeps its
+            // shape when the detail lands.
+            VStack(alignment: .center, spacing: 0) {
                 posterArt(m)
                 Text(route.name)
                     .font(.system(size: 56, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
+                    .padding(.top, 24)
                 providerChip
+                    .padding(.top, 10)
             }
             .frame(maxWidth: .infinity)
         case .sourceBoard:
-            HStack(alignment: .top, spacing: 32) {
+            HStack(alignment: .top, spacing: 36) {
                 posterArt(m)
                 VStack(alignment: .leading, spacing: 14) {
                     Text(route.name)
@@ -251,7 +256,7 @@ struct JoeMovieDetail: View {
             // when the detail lands.
             VStack(alignment: .leading, spacing: 0) {
                 backdropBand(movie: m, tmdbURL: nil)
-                HStack(alignment: .top, spacing: 40) {
+                HStack(alignment: .top, spacing: 44) {
                     posterArt(m)
                     VStack(alignment: .leading, spacing: 16) {
                         Text(route.name)
@@ -307,7 +312,12 @@ struct JoeMovieDetail: View {
     /// Xem ngay / Yêu thích; below the header block: Nguồn phát
     /// chips, then Chọn tập chips. No re-layout.
     private func billboardDetail(_ d: Detail) -> some View {
-        VStack(alignment: .leading, spacing: 32) {
+        // Design-A detail margins (design-A/detail.html): the
+        // "Nguồn phát" block sits margin-top 38 below the header
+        // block; the "Chọn tập" block is a rail-title block
+        // (margin-top 36). Per-element margins, spacing 0 — the
+        // uniform 32 gap matched neither drawing value.
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 backdropBand(movie: d.movie, tmdbURL: tmdbBackdropURL)
                 header(d)
@@ -316,7 +326,9 @@ struct JoeMovieDetail: View {
                              ? -168 : 0)
             }
             sourceChips
+                .padding(.top, 38)
             servers(d, heading: "Chọn tập", headingSize: 30)
+                .padding(.top, 36)
         }
     }
 
@@ -335,55 +347,82 @@ struct JoeMovieDetail: View {
     /// the other themes' Nguồn phát blocks show). Declared,
     /// not silent.
     private func wallDetail(_ d: Detail) -> some View {
-        VStack(alignment: .center, spacing: 28) {
+        // Design-D detail (design-D/detail.html): a CENTRED
+        // column whose elements carry the drawing's own
+        // margins — title 24 below the poster, meta 10, genre
+        // chips 16, synopsis 18, buttons 26 (row gap 18),
+        // source chips 30, episode chips 16 — so the column
+        // runs at spacing 0 with per-element top paddings
+        // (absent elements collapse with their margin, like
+        // CSS). The origin line and the cast row are app-only
+        // elements (kept); they ride the same rhythm.
+        let hasGenres = !d.categories
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .isEmpty
+        return VStack(alignment: .center, spacing: 0) {
             posterArt(d.movie)
             Text(d.movie.name)
                 .font(.system(size: 56, weight: .heavy))
                 .foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
+                .padding(.top, 24)
             if !d.movie.originName.isEmpty {
                 Text(d.movie.originName)
                     .font(.system(size: 29))
                     .foregroundStyle(theme.meta)
                     .multilineTextAlignment(.center)
                     .lineLimit(1)
+                    .padding(.top, 10)
             }
             if !d.metaLine.isEmpty {
                 // UI-6 defect D-14: D's detail meta reads in
                 // the theme's heroMeta (the render's meta
-                // colour), not the dimmer rail meta.
+                // colour), not the dimmer rail meta. Design
+                // size: .hero-meta, 27px medium.
                 Text(d.metaLine)
-                    .font(.system(size: 29))
+                    .font(.system(size: 27, weight: .medium))
                     .foregroundStyle(theme.heroMeta)
+                    .padding(.top, 10)
             }
             genreChips(d)
+                .padding(.top, hasGenres ? 16 : 0)
             if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
+                // Design .hero-syn under D: 27px, white at
+                // .92 (the base rule's opacity survives D's
+                // size override), max-width 920, centred.
                 Text((tmdb?.overview.isEmpty ?? true)
                      ? d.content : (tmdb?.overview ?? ""))
-                    .font(.system(size: 29))
-                    .foregroundStyle(theme.meta)
+                    .font(.system(size: 27))
+                    .foregroundStyle(theme.text.opacity(0.92))
                     .lineSpacing(8)
                     .lineLimit(5)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 920)
+                    .padding(.top, 18)
             }
-            HStack(spacing: 16) {
+            HStack(spacing: 18) {
                 playButton(d)
                 favButton(d)
                 providerChip
             }
+            .padding(.top, 26)
             if let tmdb, !tmdb.cast.isEmpty {
                 castRow(tmdb.cast)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 26)
             }
             // The Nguồn phát row is unconditional in D too —
             // it carries the policy's Tự động chip even when
-            // this film has no alternative source.
+            // this film has no alternative source. Design-D
+            // centres the row (justify-content: center) — no
+            // leading frame.
             altChips
-                .frame(maxWidth: .infinity, alignment: .leading)
-            servers(d)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 30)
+            servers(d, centered: true)
+                .padding(.top, 16)
         }
         .frame(maxWidth: .infinity)
     }
@@ -394,10 +433,22 @@ struct JoeMovieDetail: View {
     /// state), episode chips under them, cast, and the synopsis
     /// demoted to a small 2-line tail.
     private func boardDetail(_ d: Detail) -> some View {
-        VStack(alignment: .leading, spacing: 30) {
-            HStack(alignment: .top, spacing: 32) {
+        // Design-F detail (design-F/detail.html): the column
+        // carries the drawing's own margins — content row gap
+        // 36; title → meta 10, meta → genre chips 16, chips →
+        // buttons 22 (button gap 18); the "Nguồn phát" heading
+        // margin-top 30; the episode row margin-top 6 below
+        // the source rows; the synopsis margin-top 16 — so the
+        // column runs at spacing 0 with per-element top
+        // paddings (absent elements collapse with their
+        // margin, like CSS). The meta line is the drawing's
+        // .hero-meta: 27 medium in the heroMeta colour.
+        let hasGenres = d.categories.split(separator: ",")
+            .contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 36) {
                 posterArt(d.movie)
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 0) {
                     Text(d.movie.name)
                         .font(.system(size: 54, weight: .heavy))
                         .foregroundStyle(theme.text)
@@ -407,31 +458,37 @@ struct JoeMovieDetail: View {
                             .font(.system(size: 27))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
+                            .padding(.top, 10)
                     }
                     if !d.metaLine.isEmpty {
                         Text(d.metaLine)
-                            .font(.system(size: 27))
-                            .foregroundStyle(theme.meta)
+                            .font(.system(size: 27, weight: .medium))
+                            .foregroundStyle(theme.heroMeta)
+                            .padding(.top, 10)
                     }
                     genreChips(d)
-                    HStack(spacing: 16) {
+                        .padding(.top, hasGenres ? 16 : 0)
+                    HStack(spacing: 18) {
                         playButton(d)
                         favButton(d)
                     }
+                    .padding(.top, 22)
                 }
                 Spacer(minLength: 0)
             }
             sourceRows(d)
+                .padding(.top, 30)
             // UI-6 defect D-11: in F the "Chọn tập" heading is
             // the render's INLINE label beside the chip rows,
             // not a block heading above them.
-            HStack(alignment: .top, spacing: 20) {
+            HStack(alignment: .top, spacing: 14) {
                 Text("Chọn tập")
                     .font(.system(size: 26, weight: .bold))
                     .foregroundStyle(theme.text)
                     .padding(.top, 8)
                 serverGroups(d)
             }
+            .padding(.top, 6)
             // UI-6 defect D-17: F's fingerprint has NO cast
             // row (D keeps its own) — the castRow call that
             // stood here is removed.
@@ -443,6 +500,7 @@ struct JoeMovieDetail: View {
                     .lineSpacing(6)
                     .lineLimit(2)
                     .frame(maxWidth: 1500, alignment: .leading)
+                    .padding(.top, 16)
             }
         }
     }
@@ -461,10 +519,17 @@ struct JoeMovieDetail: View {
     /// substitution rung still fires automatically inside
     /// the director exactly as before.
     private func sourceRows(_ d: Detail) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // Design-F detail: the heading is the .rail-title at
+        // the detail's inline 30px (margin-top 30 — applied by
+        // boardDetail), margin-bottom 18 to the first row;
+        // rows follow at the .srcrow margin-bottom 16. The
+        // stack runs at 16 with the heading carrying the extra
+        // 2 of bottom margin.
+        VStack(alignment: .leading, spacing: 16) {
             Text("Nguồn phát — chọn là xem")
-                .font(.system(size: 34, weight: .bold))
+                .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(theme.text)
+                .padding(.bottom, 2)
             ForEach(sourceEntries) { entry in
                 sourceRowEntry(entry, detail: d)
             }
@@ -492,6 +557,7 @@ struct JoeMovieDetail: View {
                       meta: "Phim Âu Mỹ chiếu rạp: ưu tiên Torrent chất lượng cao · còn lại theo thứ tự nguồn",
                       state: autoSource ? "● Đang chọn" : "Sẵn sàng",
                       stateColor: autoSource ? JoeTheme.okGreen : theme.meta,
+                      stateWeight: autoSource ? .semibold : .regular,
                       focusID: "auto") {
                 autoSource = true
             }
@@ -501,6 +567,7 @@ struct JoeMovieDetail: View {
                         .joined(separator: " · "),
                       state: autoSource ? "Sẵn sàng" : "● Đang phát",
                       stateColor: autoSource ? theme.meta : JoeTheme.okGreen,
+                      stateWeight: autoSource ? .regular : .semibold,
                       focusID: "current") {
                 autoSource = false
             }
@@ -531,10 +598,13 @@ struct JoeMovieDetail: View {
     private var torrentRow: some View {
         switch torrentEntryState {
         case .notConfigured:
+            // Design-F detail: the Torrent row's "Cần token"
+            // state is the plain .st (meta colour, regular
+            // weight) — no warning colour in the drawing.
             sourceRow(name: "Torrent",
                       meta: "Nguồn thay thế tự động khi các nguồn trên đều chết",
                       state: "Cần token",
-                      stateColor: .orange,
+                      stateColor: theme.meta,
                       action: nil)
         case .pending:
             sourceRow(name: "Torrent",
@@ -560,8 +630,12 @@ struct JoeMovieDetail: View {
     }
 
     /// One source row (UI-6 defect D-6): SINGLE line — name and
-    /// meta inline on one row (the render's .srcrow), radius
-    /// theme.rField, the theme's surface-gradient fill.
+    /// meta inline on one row (the render's .srcrow: name 30
+    /// bold, meta 24 in the meta colour, state 25 — regular at
+    /// rest, semibold only in the .st.ok / .st.bad variants —
+    /// padding 22/30, radius theme.rField, the theme's
+    /// surface-gradient fill, and the resting inset stroke 1.5
+    /// under the focus ring).
     /// v2.0.5 (N1, pair h): a row with an action AND a focusID
     /// joins the detail's focus system (focusedAlt, the same
     /// binding the chip anatomies use) and carries the
@@ -570,6 +644,7 @@ struct JoeMovieDetail: View {
     @ViewBuilder
     private func sourceRow(name: String, meta: String, state: String,
                            stateColor: Color,
+                           stateWeight: Font.Weight = .regular,
                            focusID: String? = nil,
                            action: (() -> Void)?) -> some View {
         let row = HStack(alignment: .center, spacing: 20) {
@@ -578,13 +653,13 @@ struct JoeMovieDetail: View {
                 .foregroundStyle(theme.text)
             if !meta.isEmpty {
                 Text(meta)
-                    .font(.system(size: 23))
+                    .font(.system(size: 24))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
             Text(state)
-                .font(.system(size: 25, weight: .semibold))
+                .font(.system(size: 25, weight: stateWeight))
                 .foregroundStyle(stateColor)
         }
         .padding(.horizontal, 30)
@@ -592,6 +667,8 @@ struct JoeMovieDetail: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: theme.rField)
             .fill(theme.surfaceGradient))
+        .overlay(RoundedRectangle(cornerRadius: theme.rField)
+            .strokeBorder(theme.stroke, lineWidth: 1.5))
         if let action {
             let button = Button(action: action) {
                 row.overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
@@ -622,14 +699,21 @@ struct JoeMovieDetail: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         if !genres.isEmpty {
-            HStack(spacing: 10) {
+            // Design .chip geometry (all three detail drawings):
+            // 24px medium, padding 11px 22px, surface2 capsule
+            // with the resting inset stroke 1.5 theme.stroke;
+            // row gap 12. Non-focusable decoration, so the stroke
+            // is unconditional (never the focus ring).
+            HStack(spacing: 12) {
                 ForEach(genres, id: \.self) { genre in
                     Text(genre)
-                        .font(.system(size: 23, weight: .semibold))
+                        .font(.system(size: 24, weight: .medium))
                         .foregroundStyle(theme.text)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 11)
                         .background(Capsule().fill(theme.surface2))
+                        .overlay(Capsule().strokeBorder(theme.stroke,
+                                                        lineWidth: 1.5))
                 }
             }
         }
@@ -638,45 +722,57 @@ struct JoeMovieDetail: View {
     // MARK: - Header (design A composition; pieces shared by D/F heads)
 
     private func header(_ d: Detail) -> some View {
-        HStack(alignment: .top, spacing: 40) {
+        // Design-A detail (design-A/detail.html): content row
+        // gap 44; the info column's elements carry the drawing's
+        // own margins — title margin-top 8 below the origin line,
+        // meta 10, genre chips 18, synopsis 18, cast line 14,
+        // buttons 26 with gap 18 — so the column runs at
+        // spacing 0 with per-element top paddings (absent
+        // elements collapse with their margin, like CSS).
+        let hasGenres = d.categories.split(separator: ",")
+            .contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        return HStack(alignment: .top, spacing: 44) {
             posterArt(d.movie)
             // OWNER FIDELITY RULE (design A render, 2026-11-15):
             // the info column's order is the render's — origin
             // name, title, meta line, genre chips, synopsis,
-            // actors line, action buttons. (1.9.2 item 1b's
-            // spacing defence is kept: the gaps keep a focused
-            // button's ring clear of the line above it.)
-            VStack(alignment: .leading, spacing: 20) {
+            // actors line, action buttons.
+            VStack(alignment: .leading, spacing: 0) {
                 if !d.movie.originName.isEmpty {
                     Text(d.movie.originName)
-                        .font(.system(size: 29))
-                        .foregroundStyle(theme.heroMeta)
+                        .font(.system(size: 24))
+                        .foregroundStyle(theme.meta)
                         .lineLimit(1)
                 }
                 Text(d.movie.name)
                     .font(.system(size: 60, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .lineLimit(3)
+                    .padding(.top, 8)
                 if !d.metaLine.isEmpty {
                     Text(d.metaLine)
-                        .font(.system(size: 29))
+                        .font(.system(size: 27, weight: .medium))
                         .foregroundStyle(theme.heroMeta)
+                        .padding(.top, 10)
                 }
                 genreChips(d)
+                    .padding(.top, hasGenres ? 18 : 0)
                 if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
                     Text((tmdb?.overview.isEmpty ?? true)
                          ? d.content : (tmdb?.overview ?? ""))
-                        .font(.system(size: 29))
-                        .foregroundStyle(theme.heroMeta)
+                        .font(.system(size: 26))
+                        .foregroundStyle(theme.text.opacity(0.92))
                         .lineSpacing(8)
                         .lineLimit(5)
-                        .frame(maxWidth: 1050, alignment: .leading)
+                        .frame(maxWidth: 1020, alignment: .leading)
+                        .padding(.top, 18)
                 }
                 actorsLine
-                HStack(spacing: 16) {
+                HStack(spacing: 18) {
                     playButton(d)
                     favButton(d)
                 }
+                .padding(.top, 26)
             }
             Spacer(minLength: 0)
         }
@@ -689,12 +785,16 @@ struct JoeMovieDetail: View {
     @ViewBuilder
     private var actorsLine: some View {
         if let tmdb, !tmdb.cast.isEmpty {
+            // Design-A detail cast line: 24px in the meta colour,
+            // margin-top 14 (the padding lives inside the
+            // conditional so an absent cast collapses fully).
             Text("Diễn viên: " + tmdb.cast.prefix(6)
                 .map { $0.name }.joined(separator: ", "))
-                .font(.system(size: 25))
-                .foregroundStyle(theme.heroMeta)
+                .font(.system(size: 24))
+                .foregroundStyle(theme.meta)
                 .lineLimit(2)
                 .frame(maxWidth: 1050, alignment: .leading)
+                .padding(.top, 14)
         }
     }
 
@@ -906,7 +1006,9 @@ struct JoeMovieDetail: View {
     /// and the Torrent chip (v2.0.5: a real control over the
     /// shared membership model — see sourceChip/torrentChip).
     private var sourceChips: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // Design-A: the heading→chips gap is the rail-title
+        // margin-bottom, 18.
+        VStack(alignment: .leading, spacing: 18) {
             Text("Nguồn phát")
                 .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(theme.text)
@@ -966,22 +1068,24 @@ struct JoeMovieDetail: View {
             }
         }
         .frame(width: size.width, height: size.height)
-        // UI-6 defect D-13: concentric radii — the art's clip
-        // follows the frame it sits in (A: square 0, accepted;
-        // D: the wall's 18 stroke radius; F: rCard − artInset).
+        // Concentric radii — the art's clip follows the frame it
+        // sits in. Design values (posterframe img radius):
+        // A 2px (the approved drawing — an earlier "A: square 0,
+        // accepted" note is superseded by the drawing itself);
+        // D: the wall's 18 stroke radius; F: rCard − artInset.
         .clipShape(RoundedRectangle(cornerRadius: theme.id == .billboard
-                                    ? 0
+                                    ? 2
                                     : (theme.id == .posterWall
                                        ? 18
                                        : max(theme.rCard - theme.artInset, 0))))
         if theme.id == .posterWall {
+            // Design-D detail: the poster's frame line is a
+            // 2px OUTSET shadow — box-shadow: 0 0 0 2px
+            // rgba(255,255,255,.38) — and theme.stroke carries
+            // exactly that colour under D.
             image
-                // v2.0.6 (Team Ring): the hairline frames the
-                // poster from OUTSIDE (same colour/width) —
-                // inside, it painted over the poster's own
-                // outermost 2 pt of art on every edge.
                 .overlay(RoundedRectangle(cornerRadius: 18)
-                    .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                    .joeOutsetStrokeBorder(theme.stroke, lineWidth: 2))
         } else {
             image
                 .padding(theme.artInset)
@@ -1072,13 +1176,8 @@ struct JoeMovieDetail: View {
             // 430), so the dimension is flagged in the wave
             // report rather than silently changed here.
             .clipShape(RoundedRectangle(cornerRadius: 18))
-            // v2.0.6 (Team Ring): §7.4 fixes the stroke's
-            // colour and width, not its side of the edge; the
-            // band now sits OUTSIDE the strip (same values),
-            // framing the backdrop instead of painting over
-            // its outermost 2 pt of image.
             .overlay(RoundedRectangle(cornerRadius: 18)
-                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
         }
     }
 
@@ -1118,11 +1217,8 @@ struct JoeMovieDetail: View {
             }
             .frame(width: 110, height: 110)
             .clipShape(Circle())
-            // v2.0.6 (Team Ring): hairline outset, as on every
-            // clipped-image frame — it frames the photo instead
-            // of painting over its edge pixels.
             .overlay(Circle()
-                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
             Text(member.name)
                 .font(.system(size: 23, weight: .semibold))
                 .foregroundStyle(theme.text)
@@ -1324,17 +1420,23 @@ struct JoeMovieDetail: View {
             watch.toggleFavorite(e)
         } label: {
             // UI-6 defect D-10: built on the shared label
-            // metrics (JoeSecondaryLabel: 29 pt semibold,
-            // 30 pt horizontal padding, fixed 58 height) so
-            // the favourite toggle can never drift from the
-            // other action labels again.
+            // metrics (JoeSecondaryLabel — design .btn: 29 pt
+            // semibold, padding 17 vertical / 36 horizontal,
+            // resting inset stroke 1.5 theme.stroke, focused
+            // ring inside at ringWidth) so the favourite toggle
+            // can never drift from the other action labels
+            // again. The ring reads this button's own
+            // focusedFav binding — the same focus value the
+            // environment ring would see.
             Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
                 .font(.system(size: 29, weight: .semibold))
                 .foregroundStyle(isFav ? JoeTheme.accentRed : theme.text)
-                .padding(.horizontal, 30)
-                .frame(height: 58)
+                .padding(.horizontal, 36)
+                .padding(.vertical, 17)
                 .background(Capsule().fill(theme.surface2))
-                .overlay(JoeFocusRing(shape: Capsule()))
+                .overlay(Capsule().strokeBorder(
+                    focusedFav ? theme.focus : theme.stroke,
+                    lineWidth: focusedFav ? theme.ringWidth : 1.5))
         }
         .joeCardButton()
         // v2.0.5 (N1, pair h): the favourite button's binding
@@ -1387,14 +1489,20 @@ struct JoeMovieDetail: View {
     /// heading, the render's call). Design F uses
     /// serverGroups directly beside its inline label.
     private func servers(_ d: Detail, heading: String? = nil,
-                         headingSize: CGFloat = 34) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
+                         headingSize: CGFloat = 34,
+                         centered: Bool = false) -> some View {
+        // Design-A: heading→groups gap = rail-title
+        // margin-bottom 18 (with no heading the stack has a
+        // single child and the spacing never paints).
+        // Design-D centres the block (its detail column is
+        // centred end to end); A and F keep the leading form.
+        VStack(alignment: centered ? .center : .leading, spacing: 18) {
             if let heading {
                 Text(heading)
                     .font(.system(size: headingSize, weight: .bold))
                     .foregroundStyle(theme.text)
             }
-            serverGroups(d)
+            serverGroups(d, centered: centered)
         }
     }
 
@@ -1402,16 +1510,20 @@ struct JoeMovieDetail: View {
     /// chips are content-sized CAPSULES in a wrapping flow row
     /// (the renders' shape, and the owner's photo of the
     /// shipped design) — no stretched grid cells.
-    private func serverGroups(_ d: Detail) -> some View {
-        VStack(alignment: .leading, spacing: 34) {
+    private func serverGroups(_ d: Detail, centered: Bool = false) -> some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 34) {
             ForEach(Array(d.servers.enumerated()), id: \.offset) { serverIndex, server in
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: centered ? .center : .leading, spacing: 14) {
                     if d.servers.count > 1 || !server.name.isEmpty {
                         Text(server.name)
                             .font(.system(size: 25, weight: .semibold))
                             .foregroundStyle(theme.meta)
                     }
-                    FlowLayout(spacing: 16) {
+                    // Design chip-row gap: 14 (design-A detail
+                    // episode chips; the flow layout's spacing is
+                    // both the horizontal and vertical gap).
+                    // Design-D centres each row.
+                    FlowLayout(spacing: 14, centered: centered) {
                         ForEach(Array(server.episodes.enumerated()), id: \.offset) { epIndex, ep in
                             epChip(d, ep: ep, serverIndex: serverIndex,
                                    episodeIndex: epIndex)
@@ -1446,9 +1558,8 @@ struct JoeMovieDetail: View {
             // content-sized, 24 pt, 22/11 padding; the
             // preselected episode is a SOLID accent fill with
             // onAccent text (not a 30% tint); focus is the
-            // theme ring value on the always-installed
-            // capsule stroke (v2.0.6, Team Ring: the focused
-            // band is outset — see the overlay below).
+            // theme ring value inside the always-installed
+            // capsule stroke.
             Text(ep.name)
                 .font(.system(size: 24, weight: preselected ? .semibold : .medium))
                 .foregroundStyle(!playable ? theme.text.opacity(0.35)
@@ -1458,13 +1569,7 @@ struct JoeMovieDetail: View {
                 .padding(.vertical, 11)
                 .background(Capsule()
                     .fill(preselected ? theme.accent : theme.surface2))
-                // v2.0.6 (Team Ring): focused band outset
-                // (inset −ringWidth); the resting 1.5 pt
-                // stroke is unchanged — it paints only the
-                // capsule fill's edge, and the text is inset
-                // 22 pt horizontally, beyond its reach.
                 .overlay(Capsule()
-                    .inset(by: focused ? -theme.ringWidth : 0)
                     .strokeBorder(focused ? theme.focus
                                   : (preselected ? Color.clear : theme.stroke),
                                   lineWidth: focused ? theme.ringWidth : 1.5))

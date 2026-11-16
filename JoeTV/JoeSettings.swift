@@ -15,6 +15,7 @@ import UIKit
 ///   be worse than omitting it. Playback is AVPlayer everywhere.
 struct JoeSettingsView: View {
     @EnvironmentObject private var nav: JoeNavigator
+    @EnvironmentObject private var watch: WatchStore
     @Environment(\.joeTheme) private var theme
     /// v2.0.0 (UI-5): the design picker writes the same
     /// @AppStorage key the root reads; the Settings tree itself
@@ -42,6 +43,11 @@ struct JoeSettingsView: View {
     @FocusState private var probeFocused: Bool
     @FocusState private var kkProbeFocused: Bool
     @FocusState private var themeChipFocused: String?
+    @FocusState private var cwResetFocused: Bool
+    /// Confirmation for the history reset (historyBlock) —
+    /// the app's standard destructive shape, the exit
+    /// dialog's: destructive confirm + cancel.
+    @State private var cwResetConfirm = false
 
     private enum KKRouteStatus {
         case idle, probing, ok(ms: Int), down
@@ -117,6 +123,8 @@ struct JoeSettingsView: View {
                     .font(.system(size: 25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
+
+                historyBlock
 
                 diagnosticsBlock
 
@@ -347,6 +355,63 @@ struct JoeSettingsView: View {
         kkStatus = .probing
         let r = await SourceProbe.probeKK()
         kkStatus = r.ok ? .ok(ms: r.millis) : .down
+    }
+
+    /// Opened-movies history reset (v2.0.7, owner requirement:
+    /// all three themes lacked any reset for accidentally
+    /// opened films). Every opened film lands in Continue
+    /// Watching (the store caps it at 40 entries) and until
+    /// now the ONLY removal route was the per-card long-press
+    /// menu — a rail full of mis-taps could never be cleared.
+    /// This block is the one-press route, and it lives here
+    /// rather than in a theme's home for two structural
+    /// reasons: this screen is the ONE structure shared by
+    /// all three themes (so one button cures all three), and
+    /// the homes' CW rail cards carry the first-rail move
+    /// handler whose arithmetic is built from rail entries
+    /// only — a non-entry control inside that rail would be
+    /// skipped by its own DOWN routing. The button clears
+    /// the whole progress history (every provider AND the
+    /// torrent entries — both tabs read the same store);
+    /// favorites live in a separate array and are never
+    /// touched. Focus: a plain member of this screen's single
+    /// column, whose movement is geometric (the convergence
+    /// note on the body), exactly like the "Kiểm tra lại" and
+    /// "Kiểm tra ngay" buttons — no boundary handler, no dead
+    /// end; it is disabled while the history is empty (the
+    /// "Kiểm tra lại" disabled-while-probing precedent), so
+    /// it can never hold focus with nothing to do. The
+    /// confirmation is the app's standard destructive shape
+    /// (the exit dialog's): destructive confirm + cancel.
+    @ViewBuilder
+    private var historyBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Lịch sử đã mở")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            Text(watch.progress().isEmpty
+                 ? "Chưa có phim nào trong mục Đang xem dở."
+                 : "Đang lưu \(watch.progress().count) mục xem tiếp — gồm cả những phim chỉ mở lỡ một lần. Xoá hết để danh sách sạch lại; phim Yêu thích không bị xoá.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+            Button {
+                cwResetConfirm = true
+            } label: {
+                JoePrimaryLabel(title: "Xoá hết lịch sử đã mở")
+            }
+            .joeCardButton()
+            .focused($cwResetFocused)
+            .disabled(watch.progress().isEmpty)
+        }
+        .alert("Xoá hết lịch sử đã mở?", isPresented: $cwResetConfirm) {
+            Button("Xoá hết", role: .destructive) {
+                watch.clearAllProgress()
+            }
+            Button("Huỷ", role: .cancel) { }
+        } message: {
+            Text("Mọi mục trong Đang xem dở sẽ bị xoá. Phim Yêu thích vẫn được giữ nguyên.")
+        }
     }
 
     /// Source diagnostics (§7.9, board contract): one lightweight

@@ -292,6 +292,25 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// rule): aspect ratio is preserved by construction, so no slot
     /// downstream can receive a stretched or pre-cropped bitmap.
     private static func decode(_ data: Data, maxPixel: Int) -> UIImage? {
+        // WebP bodies go straight to the app's libwebp
+        // decoder (v2.0.7, Team Poster-Fix). The v2.0.6 order
+        // tried ImageIO first and reached libwebp only when
+        // ImageIO returned nil — but what tvOS's ImageIO
+        // actually hands back for a WebP body on device is
+        // unproven, and WebP-poster titles are exactly the
+        // class whose detail posters rendered top-cut on the
+        // owner's TV while a JPEG through the same slot
+        // rendered intact (Team Poster-Trace, 2026-11-16:
+        // every provider and TMDB serve the same intact art,
+        // so no selection/gate/fallback stage can explain the
+        // cut — the decode leg is the exposed stage). Gated
+        // on the RIFF/WEBP magic — never on a URL suffix, the
+        // CDNs serve these files under opaque names. A
+        // non-WebP body keeps the ImageIO path below,
+        // unchanged.
+        if isWebP(data) {
+            return decodeWebP(data, maxPixel: maxPixel)
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -302,13 +321,7 @@ final class JoeImagePipeline: @unchecked Sendable {
            let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return UIImage(cgImage: cg)
         }
-        // WebP fallback (v2.0.6, Team Poster): ImageIO has no
-        // WebP codec, so a WebP body lands here as nil. Gated
-        // on the RIFF/WEBP magic — never on a URL suffix, the
-        // CDNs serve these files under opaque names — so a
-        // non-WebP body keeps failing exactly as before.
-        guard isWebP(data) else { return nil }
-        return decodeWebP(data, maxPixel: maxPixel)
+        return nil
     }
 
     /// RIFF/WEBP magic: bytes 0–3 "RIFF", bytes 8–11 "WEBP".
@@ -321,8 +334,9 @@ final class JoeImagePipeline: @unchecked Sendable {
         }
     }
 
-    /// libwebp decode for the bodies ImageIO cannot read
-    /// (v2.0.6, Team Poster). Tủ Phim serves its posters
+    /// libwebp decode for WebP bodies (v2.0.6, Team Poster;
+    /// since v2.0.7 decode() routes WebP here FIRST, before
+    /// ImageIO is ever consulted). Tủ Phim serves its posters
     /// ONLY as WebP (cdn.phimsrv.com — measured 2026-11-16:
     /// every variant, original and 300 alike, is .webp) and
     /// some KKPhim posters are WebP too (2 of 4 sampled the
@@ -512,17 +526,40 @@ struct JoeRemoteImage<Placeholder: View>: View {
         if let img = await JoeImagePipeline.shared.image(
                for: url, targetPixels: targetPixels),
            slotClass.accepts(img) {
+            logResolve(leg: "primary", source: url, image: img)
             return img
         }
         var fb = fallbackURL
         if fb == nil { fb = await fallbackProvider?() }
-        guard let fb, fb != url else { return nil }
+        guard let fb, fb != url else {
+            logResolve(leg: "placeholder", source: url, image: nil)
+            return nil
+        }
         if let img = await JoeImagePipeline.shared.image(
                for: fb, targetPixels: targetPixels),
            slotClass.accepts(img) {
+            logResolve(leg: "fallback", source: fb, image: img)
             return img
         }
+        logResolve(leg: "placeholder", source: fb, image: nil)
         return nil
+    }
+
+    /// One diagnostic line per resolve (v2.0.7, Team
+    /// Poster-Fix): which leg painted — primary, the fallback
+    /// leg (the TMDB poster provider / fixed alternate), or
+    /// neither (placeholder) — where the bitmap came from,
+    /// and its decoded pixel size, so one device session can
+    /// convict or clear the decode leg a poster actually
+    /// took. Source is host + filename tail ONLY, per the
+    /// PlaybackLog rule: no full URLs and no tokens ever
+    /// reach the log. Emitted through the app's one logger.
+    private func logResolve(leg: String, source: URL?, image: UIImage?) {
+        let host = source?.host ?? "?"
+        let tail = source?.lastPathComponent ?? "—"
+        let px = image?.cgImage.map { "\($0.width)x\($0.height)" } ?? "none"
+        PlaybackLog.logger.info(
+            "image resolve leg=\(leg, privacy: .public) host=\(host, privacy: .public) tail=\(tail, privacy: .public) px=\(px, privacy: .public)")
     }
 }
 

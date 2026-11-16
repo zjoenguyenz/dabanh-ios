@@ -190,7 +190,7 @@ extension InsettableShape {
     }
 }
 
-// MARK: - Focus ring (value-only: colour/width change on an always-installed shape)
+// MARK: - Focus ring (value-only: colour/width change inside an always-installed shape)
 
 struct JoeFocusRing<S: InsettableShape>: View {
     let shape: S
@@ -199,12 +199,8 @@ struct JoeFocusRing<S: InsettableShape>: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
-        // v2.0.6 (Team Ring): the band paints OUTSIDE the
-        // label's bounds (joeOutsetStrokeBorder), not inside
-        // them — an inside band paints over the label's own
-        // fill edge and, on flush-edged labels, its content.
-        shape.joeOutsetStrokeBorder(isFocused ? theme.focus : .clear,
-                                    lineWidth: isFocused ? (lineWidth ?? theme.ringWidth) : 0)
+        shape.strokeBorder(isFocused ? theme.focus : .clear,
+                           lineWidth: isFocused ? (lineWidth ?? theme.ringWidth) : 0)
     }
 }
 
@@ -218,21 +214,26 @@ struct JoePrimaryLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        // Design .btn.primary (themes2 shared stylesheet): 29px
+        // semibold, padding 17px 36px, capsule, accent2 fill, NO
+        // resting stroke; focused ring = JoeFocusRing (inside).
         HStack(spacing: 10) {
             if let systemImage {
-                Image(systemName: systemImage).font(.system(size: 24, weight: .bold))
+                Image(systemName: systemImage).font(.system(size: 24, weight: .semibold))
             }
-            Text(title).font(.system(size: 29, weight: .bold))
+            Text(title).font(.system(size: 29, weight: .semibold))
         }
         .foregroundStyle(theme.onAccent)
-        .padding(.horizontal, 30)
-        .frame(height: 58)
+        .padding(.horizontal, 36)
+        .padding(.vertical, 17)
         .background(Capsule().fill(theme.accent2))
         .overlay(JoeFocusRing(shape: Capsule()))
     }
 }
 
-/// Secondary action label (surface fill; focus shown by ring + title colour).
+/// Secondary action label (surface fill; focus shown by the
+/// ring only — the drawings' .btn.focused never recolours the
+/// text, in any of the three designs).
 struct JoeSecondaryLabel: View {
     let title: String
     var systemImage: String? = nil
@@ -240,17 +241,25 @@ struct JoeSecondaryLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        // Design .btn: 29px semibold, padding 17px 36px, capsule,
+        // surface2 fill, resting inset stroke 1.5 theme.stroke;
+        // focused ring = inside strokeBorder ringWidth theme.focus
+        // (an explicit strokeBorder replaces JoeFocusRing here
+        // because the drawing's resting state carries the 1.5
+        // stroke, which JoeFocusRing paints clear at rest).
         HStack(spacing: 10) {
             if let systemImage {
                 Image(systemName: systemImage).font(.system(size: 24, weight: .semibold))
             }
             Text(title).font(.system(size: 29, weight: .semibold))
         }
-        .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
-        .padding(.horizontal, 30)
-        .frame(height: 58)
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 36)
+        .padding(.vertical, 17)
         .background(Capsule().fill(theme.surface2))
-        .overlay(JoeFocusRing(shape: Capsule()))
+        .overlay(Capsule().strokeBorder(
+            isFocused ? theme.focus : theme.stroke,
+            lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 
@@ -262,14 +271,25 @@ struct JoeChipLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        // Design .chip: 24px, medium at rest / semibold when selected
+        // or focused, padding 11px 22px, capsule; resting inset
+        // stroke 1.5 theme.stroke (none when selected — the accent
+        // fill replaces it); focused ring = inside strokeBorder
+        // ringWidth theme.focus. Same construction as the episode
+        // chip in JoeMovieDetail (the drawing's reference chip).
+        // Focused text keeps the resting colour — the drawings'
+        // .chip.focused changes weight and ring only, never the
+        // text colour (the episode chip agrees).
         Text(title)
-            .font(.system(size: 24, weight: selected ? .bold : .semibold))
-            .foregroundStyle(selected ? theme.onAccent : (isFocused ? theme.focusTitle : theme.text))
+            .font(.system(size: 24, weight: (selected || isFocused) ? .semibold : .medium))
+            .foregroundStyle(selected ? theme.onAccent : theme.text)
             .lineLimit(1)
             .padding(.horizontal, 22)
-            .frame(height: 48)
+            .padding(.vertical, 11)
             .background(Capsule().fill(selected ? theme.accent : theme.surface2))
-            .overlay(JoeFocusRing(shape: Capsule()))
+            .overlay(Capsule().strokeBorder(
+                isFocused ? theme.focus : (selected ? .clear : theme.stroke),
+                lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 
@@ -280,18 +300,21 @@ struct JoeFieldChrome: ViewModifier {
     @Environment(\.joeTheme) private var theme
 
     func body(content: Content) -> some View {
+        // Design .field: padding 20px 28px, radius rField, light
+        // fill; the focused ring in the drawing is an OUTSET shadow
+        // (box-shadow: 0 0 0 ringWidth focus — the only outset ring
+        // in the whole design system), so it is painted with
+        // joeOutsetStrokeBorder, not an inside strokeBorder. Caret
+        // = theme.accent2 (design caret: A #D9232E, D #FFD60A,
+        // F #0E7A64 — accent2 carries exactly that colour in all
+        // three themes).
         content
             .foregroundStyle(ThemeTokens.fieldText)
-            .padding(.horizontal, 24)
-            .frame(height: 64)
+            .tint(theme.accent2)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
             .background(RoundedRectangle(cornerRadius: theme.rField)
                 .fill(ThemeTokens.fieldBg))
-            // v2.0.6 (Team Ring): band outset like every focus
-            // ring — the field's text is inset 24 pt so the
-            // inside band never reached it, but it painted
-            // over the field fill's own edge; the shared rule
-            // is that a focus band never paints over its
-            // element at all.
             .overlay(RoundedRectangle(cornerRadius: theme.rField)
                 .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
                                        lineWidth: focused ? theme.ringWidth : 0))
@@ -308,8 +331,7 @@ extension View {
 //
 // v2.0.5 (owner errors 1+2): every Button in the app used the
 // bare .card style, so TWO focus visuals stacked — the app's
-// JoeFocusRing (v2.0.6: drawn OUTSIDE the label's bounds;
-// in v2.0.5 it was drawn inside them) AND the
+// JoeFocusRing (drawn inside the label's own bounds) AND the
 // tvOS system card effect (a scale + outset shadow platter
 // larger than the button), which is what clipped the "2026"
 // line on Poster Wall cards, threw grey silhouettes around
@@ -393,6 +415,11 @@ extension View {
 /// a static Layout, no state, nothing focus-driven.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 16
+    /// Design D's detail rows are centred (justify-content:
+    /// center in the drawing); every other surface keeps the
+    /// leading rows. Placement-only: row breaks and heights
+    /// are identical either way.
+    var centered: Bool = false
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
                       cache: inout Void) -> CGSize {
@@ -416,19 +443,38 @@ struct FlowLayout: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
                        subviews: Subviews, cache: inout Void) {
+        // Group into rows first (the same breaks sizeThatFits
+        // makes), then place each row — centred rows start at
+        // the row's centred offset, leading rows at minX.
+        var rows: [[(Subviews.Element, CGSize)]] = []
+        var row: [(Subviews.Element, CGSize)] = []
         var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
         for sub in subviews {
             let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
+            if x + size.width > bounds.maxX, !row.isEmpty {
+                rows.append(row)
+                row = []
                 x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
             }
-            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            row.append((sub, size))
             x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+        }
+        if !row.isEmpty { rows.append(row) }
+
+        var y = bounds.minY
+        for row in rows {
+            let rowWidth = row.reduce(CGFloat(0)) { $0 + $1.1.width }
+                + spacing * CGFloat(max(row.count - 1, 0))
+            let rowHeight = row.map { $0.1.height }.max() ?? 0
+            var px = centered
+                ? bounds.minX + max(0, (bounds.width - rowWidth) / 2)
+                : bounds.minX
+            for (sub, size) in row {
+                sub.place(at: CGPoint(x: px, y: y),
+                          proposal: ProposedViewSize(size))
+                px += size.width + spacing
+            }
+            y += rowHeight + spacing
         }
     }
 }
@@ -438,9 +484,12 @@ struct FlowLayout: Layout {
 /// One card for every poster surface. Anatomy follows the active theme:
 ///  - A / F: PosterCard v2 — art and title/meta INSIDE one painted face
 ///    (UI-1 recipe verbatim: the text never touches the system platter).
-///  - D: poster-only art; title/meta BELOW the art on the opaque foundation
-///    (the label paints the foundation colour over its full frame, so the
-///    system platter can never lighten behind the text).
+///  - D carries BOTH of its drawing's card forms, chosen by the
+///    `form` value: horizontal rails render .card (the painted
+///    face — art full-bleed, title/meta inside, inset whole-card
+///    ring); vertical walls/grids render .pcard (bare art on the
+///    background, title/meta BELOW the art, the focus ring an
+///    outset band around the ART alone).
 /// Focus changes values only (title colour, ring colour/width) inside shapes
 /// that are always installed. No scale, no focus-conditional structure.
 struct PosterCard: View {
@@ -459,6 +508,18 @@ struct PosterCard: View {
     var quality: String = ""        // quality tag (FHD / HD / CAM …)
     var progress: Double? = nil
     var subline: String? = nil
+    /// Which of design D's two card forms a horizontal rail
+    /// (.rail — the .card face) or a vertical wall/grid (.wall
+    /// — the .pcard) renders. Read only under posterWall: A
+    /// and F paint the face in every context. Default .wall —
+    /// the form every D card took before the distinction
+    /// existed (wall home, browse/search grids).
+    var form: Form = .wall
+
+    enum Form {
+        case rail
+        case wall
+    }
 
     // v2.0.5 (N4): ONE focus source of truth — the card reads
     // its own focus from the environment, exactly like every
@@ -471,11 +532,21 @@ struct PosterCard: View {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.joeTheme) private var theme
 
-    private var artRadius: CGFloat { max(theme.rCard - theme.artInset, 0) }
+    // Design .card .art border-radius: A 2px, D 18px, F 10px.
+    // rCard − artInset reproduces D (18−0) and F (22−12) exactly,
+    // but for A it yields 0 (10−10) while the approved drawing
+    // specifies 2 — hence the billboard floor of 2.
+    private var artRadius: CGFloat {
+        max(theme.rCard - theme.artInset, theme.id == .billboard ? 2 : 0)
+    }
 
     var body: some View {
         if theme.id == .posterWall {
-            wallBody
+            if form == .rail {
+                railBody
+            } else {
+                wallBody
+            }
         } else {
             faceBody
         }
@@ -507,13 +578,23 @@ struct PosterCard: View {
 
     private var art: some View {
         ZStack {
-            Color.black.opacity(0.45)
+            // Design .card .art background: rgba(0,0,0,.35) in all
+            // three drawings; design-D's .pcard .art instead
+            // rests on the theme surface (#1A1A1A — the wall
+            // render's placeholder tile). Placeholder glyph
+            // .ph span: 64px in the theme's meta colour at
+            // opacity .55 (both card forms agree).
+            if theme.id == .posterWall && form == .wall {
+                theme.surface2
+            } else {
+                Color.black.opacity(0.35)
+            }
             JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true,
                            slotClass: .portrait,
                            fallbackProvider: tmdbFallback) {
                 Image(systemName: "film")
-                    .font(.system(size: 44))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .font(.system(size: 64))
+                    .foregroundStyle(theme.meta.opacity(0.55))
             }
         }
         .frame(width: theme.cardArtW, height: theme.cardArtH)
@@ -522,8 +603,8 @@ struct PosterCard: View {
                 Text(quality)
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(theme.badgeText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
                     .background(Capsule().fill(theme.badgeBg))
                     .padding(10)
             }
@@ -533,8 +614,8 @@ struct PosterCard: View {
                 Text(badge)
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(theme.id == .sourceBoard ? theme.focus : .white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
                     .background(Capsule().fill(theme.badgeBg))
                     .padding(.leading, 10)
                     .padding(.bottom, progress != nil ? 16 : 10)
@@ -568,7 +649,7 @@ struct PosterCard: View {
                     .font(.system(size: theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
-                    .padding(.top, 3)
+                    .padding(.top, 5)
             }
             if let subline {
                 Text(subline)
@@ -583,32 +664,44 @@ struct PosterCard: View {
         .padding(.bottom, 14)
         .frame(width: theme.cardWidth, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: theme.rCard).fill(theme.surfaceGradient))
-        // v2.0.6 (Team Ring): the FOCUSED band is outset
-        // (inset by −ringWidth, so it paints outside the
-        // card's bounds); the resting 1.5 pt hairline is
-        // byte-identical to before — it paints only the
-        // surface-fill edge, and every content element is
-        // inset by artInset (10/12 pt), far beyond its reach.
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .inset(by: isFocused ? -theme.ringWidth : 0)
             .strokeBorder(isFocused ? theme.focus : theme.stroke,
                           lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 
+    /// Design D's wall card (.pcard in design-D's drawings):
+    /// the bare art on the screen background — the card paints
+    /// NO surface and carries NO whole-card ring. The focus
+    /// ring belongs to the ART alone: box-shadow 0 0 0 6px
+    /// #FFD60A, an OUTSET band around the art (one of the
+    /// design system's two outset rings; the field's is the
+    /// other), painted here with joeOutsetStrokeBorder over
+    /// the clipped art. Title (27 semibold, margin-top 14)
+    /// and meta (25, margin-top 5) sit BELOW the art, outside
+    /// the ring; the focused title takes the focus colour.
+    /// (The v2.0.3 whole-card ring — and the foundation paint
+    /// under the text, a system-platter defence from before
+    /// .joeCardButton disabled that effect centrally — both
+    /// contradicted the drawing: the owner's photo showed the
+    /// frame hanging past the text block, its corner floating
+    /// in empty space below the title.)
     private var wallBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             art
+                .overlay(RoundedRectangle(cornerRadius: artRadius)
+                    .joeOutsetStrokeBorder(isFocused ? theme.focus : .clear,
+                                           lineWidth: isFocused ? theme.ringWidth : 0))
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
-                .padding(.top, 12)
+                .padding(.top, 14)
             if !meta.isEmpty {
                 Text(meta)
                     .font(.system(size: theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
-                    .padding(.top, 3)
+                    .padding(.top, 5)
             }
             if let subline {
                 Text(subline)
@@ -619,24 +712,49 @@ struct PosterCard: View {
             }
         }
         .frame(width: theme.cardWidth, alignment: .leading)
-        .background(theme.bg)
-        // v2.0.3: the focus ring overlays the WHOLE card — the
-        // bounds the focus engine (and the owner) sees. It used
-        // to ride the art alone, so in this theme the app's ring
-        // and the card's actual bounds disagreed (the ring
-        // stopped at the art's bottom edge while the card runs
-        // on through the title block). Same shape, colour and
-        // width values as before; only the bounds are corrected.
-        // v2.0.6 (Team Ring): the bounds are unchanged, but the
-        // band now paints OUTSIDE them (joeOutsetStrokeBorder).
-        // In this theme artInset is 0 and the title/meta text
-        // sits flush at the card's left edge, so the inside
-        // band (6 pt) painted over the art's edges and the
-        // first glyphs of the title and year — the owner's
-        // "Viền nó đè chữ". Outside, it can cover neither.
+    }
+
+    /// Design D's rail card (.card in design-D's stylesheet):
+    /// the painted face — art full-bleed across the top,
+    /// title/meta INSIDE the face below the art, the focus
+    /// ring an INSET band around the whole card, resting
+    /// stroke 1.5. The face's text sizes are the drawing's
+    /// own .card values (title 25px margin-top 12, meta 23px
+    /// margin-top 5, bottom padding 14) — NOT the theme
+    /// tokens, which carry the .pcard sizes (27/25). The
+    /// horizontal padding rides theme.artInset (0 under D,
+    /// the drawing's padding 0 0 14px).
+    private var railBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            art
+            Text(title)
+                .font(.system(size: 25, weight: .semibold))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 12)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 5)
+            }
+            if let subline {
+                Text(subline)
+                    .font(.system(size: 21))
+                    .foregroundStyle(JoeTheme.accentRed)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .padding(.horizontal, theme.artInset)
+        .padding(.top, theme.artInset)
+        .padding(.bottom, 14)
+        .frame(width: theme.cardWidth, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: theme.rCard).fill(theme.surfaceGradient))
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .joeOutsetStrokeBorder(isFocused ? theme.focus : .clear,
-                                   lineWidth: isFocused ? theme.ringWidth : 0))
+            .strokeBorder(isFocused ? theme.focus : theme.stroke,
+                          lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 

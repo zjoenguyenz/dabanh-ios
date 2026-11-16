@@ -432,7 +432,9 @@ struct JoeFilterBar: View {
                 .foregroundStyle(theme.meta)
                 .frame(width: 170, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) { content() }
+                // Design chip-row gap: 14 (the drawings' chip
+                // rows — detail sources, search facets).
+                HStack(spacing: 14) { content() }
                     .padding(.horizontal, 4)
                     .padding(.vertical, 6)
             }
@@ -695,7 +697,12 @@ struct JoeBrowseView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        .padding(.horizontal, 4)
+                        // Design D's wall ring is an OUTSET band
+                        // around the art (6 pt): the grid's edge
+                        // clearance grows past it under D so the
+                        // outer columns' rings are never clipped
+                        // by the scroll frame.
+                        .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
                         .focusSection()
                     }
                 }
@@ -874,7 +881,10 @@ struct JoeWallHomeView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 4)
+                    // The wall grid is a D-only surface: its
+                    // outset art rings (6 pt) need the wider
+                    // edge clearance (see JoeBrowseView).
+                    .padding(.horizontal, 8)
                     .focusSection()
                 }
                 if !filter.filtersActive {
@@ -1025,7 +1035,8 @@ struct JoeWallHomeView: View {
                             tmdbType: movie.tmdbType,
                             meta: movie.cardMeta,
                             badge: Providers.badge(movie.provider),
-                            quality: movie.quality)
+                            quality: movie.quality,
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($entryFocus, equals: "sec|" + section.scope + "|" + movie.id)
@@ -1049,7 +1060,8 @@ struct JoeWallHomeView: View {
                             meta: entry.epLabel,
                             badge: Providers.badge(entry.source),
                             progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($entryFocus, equals: "cw|" + entry.key)
@@ -1078,7 +1090,8 @@ struct JoeWallHomeView: View {
                             title: entry.title,
                             posterURL: entry.posterURL,
                             meta: entry.year,
-                            badge: Providers.badge(entry.source))
+                            badge: Providers.badge(entry.source),
+                            form: .rail)
                     }
                     .joeCardButton()
                     .focused($entryFocus, equals: "fav|" + entry.key)
