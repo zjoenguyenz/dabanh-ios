@@ -54,7 +54,6 @@ jobs:
           printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n    static let premiumizeToken = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" "$PREMIUMIZE_TOKEN" > JoeTV/BundledTokens.swift
 
       - name: Generate Xcode project
-      
         run: xcodegen generate
 
       - name: Build (unsigned)
