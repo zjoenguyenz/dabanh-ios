@@ -228,7 +228,8 @@ struct JoePrimaryLabel: View {
     var body: some View {
         // Design .btn.primary (themes2 shared stylesheet): 29px
         // semibold, padding 17px 36px, capsule, accent2 fill, NO
-        // resting stroke; focused ring = JoeFocusRing (inside).
+        // resting stroke; focused ring = inside strokeBorder
+        // (the JoeFocusRing values, spelt out — see below).
         HStack(spacing: 10) {
             if let systemImage {
                 Image(systemName: systemImage).font(.system(size: 24, weight: .semibold))
@@ -239,7 +240,26 @@ struct JoePrimaryLabel: View {
         .padding(.horizontal, 36)
         .padding(.vertical, 17)
         .background(Capsule().fill(theme.accent2))
-        .overlay(JoeFocusRing(shape: Capsule()))
+        // v2.0.9 (owner defect, theme D only — the JoeChipLabel
+        // ruling extended to the primary button): the label is
+        // PERMANENTLY accent2-filled, and in D's tokens accent2
+        // == focus == #FFD60A, so the drawn yellow focus ring
+        // painted over the yellow fill in the same yellow and
+        // focus on "Xem ngay" was invisible — the same
+        // collision the owner convicted on the selected chips
+        // ("Cùng màu nên ko nhận ra đc"; his follow-up order
+        // folds this button into the same fix). In D the
+        // focused frame is OPAQUE WHITE (trắng đục); A/F keep
+        // theme.focus exactly as JoeFocusRing painted it
+        // (their accent2 and focus colours differ), and the
+        // resting state stays clear/0 — A/F rendering is
+        // byte-identical to before. JoeFocusRing itself is
+        // untouched: its other callers are not accent-filled.
+        .overlay(Capsule().strokeBorder(
+            isFocused
+                ? (theme.id == .posterWall ? Color.white : theme.focus)
+                : .clear,
+            lineWidth: isFocused ? theme.ringWidth : 0))
     }
 }
 
