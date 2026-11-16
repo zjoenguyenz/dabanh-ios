@@ -623,8 +623,11 @@ private struct TopLinkLabel: View {
                     .frame(height: 4)
                     .padding(.horizontal, 18)
             }
+            // v2.0.6 (Team Ring): band outset like every
+            // focus ring (width still a constant 3 — only the
+            // colour changes with focus, as before).
             .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(isFocused ? theme.focus : .clear, lineWidth: 3))
+                .joeOutsetStrokeBorder(isFocused ? theme.focus : .clear, lineWidth: 3))
     }
 }
 

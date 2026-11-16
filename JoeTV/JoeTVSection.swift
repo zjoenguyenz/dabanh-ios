@@ -347,7 +347,12 @@ struct JoeTVSection: View {
                 }
             }
             .frame(width: 273, height: 150)
+            // v2.0.6 (Team Ring): the FOCUSED band is outset
+            // (inset by −ringWidth); the resting 2 pt border
+            // is unchanged — the tile's legible content (the
+            // title text) is inset 12 pt, beyond its reach.
             .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+                .inset(by: focused ? -theme.ringWidth : 0)
                 .strokeBorder(focused ? theme.focus : theme.stroke,
                               lineWidth: focused ? theme.ringWidth : 2))
         }

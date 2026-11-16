@@ -153,8 +153,22 @@ enum VsClient {
         m.name = JSON.str(o, "name")
         m.slug = JSON.str(o, "slug")
         m.originName = JSON.str(o, "origin_name")
-        m.poster = JSON.str(o, "poster_url")
-        m.thumb = JSON.str(o, "thumb_url")
+        // ★ Field names are SWAPPED vs content on this API
+        // (live-measured 2026-11-16, 5 titles incl. Love
+        // Bound): poster_url serves the LANDSCAPE 16:9 still
+        // (1280×720 … 3840×2160 — aspect 1.778 on every
+        // sample) while thumb_url serves the PORTRAIT poster
+        // (701×1000 … 2000×3000 — aspect 0.667–0.750). Map
+        // by CONTENT, never by name — the same fix TpClient
+        // took for the same disease. The old name-based read
+        // put a 16:9 bitmap in the portrait field of every
+        // VS record: the slot aspect gate rejected it and
+        // the card/detail silently fell back to the TMDB
+        // poster. parseMovie is the ONE mapping site — the
+        // list/search parsers and detail() all flow through
+        // it, so this swap covers every surface.
+        m.poster = JSON.str(o, "thumb_url")
+        m.thumb = JSON.str(o, "poster_url")
         // NO silent thumb→poster substitution (removed
         // 2026-11-16, same law as KkClient): a landscape thumb
         // copied into the portrait field letterboxes into a

@@ -116,6 +116,12 @@ struct JoeMovieDetail: View {
                         .focused($focusedRetry)
                     }
                     .padding(.top, 60)
+                    // v2.0.6 (leader hardening, error-8b doctrine):
+                    // the landing on this surface is DECLARED, not
+                    // left to load()'s one-shot focusedRetry write
+                    // racing the branch swap — the same cure the
+                    // player slate got in v2.0.5.
+                    .defaultFocus($focusedRetry, true)
                 } else {
                     placeholderHeader
                     ProgressView("Đang tải danh sách tập…")
@@ -970,8 +976,12 @@ struct JoeMovieDetail: View {
                                        : max(theme.rCard - theme.artInset, 0))))
         if theme.id == .posterWall {
             image
+                // v2.0.6 (Team Ring): the hairline frames the
+                // poster from OUTSIDE (same colour/width) —
+                // inside, it painted over the poster's own
+                // outermost 2 pt of art on every edge.
                 .overlay(RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                    .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
         } else {
             image
                 .padding(theme.artInset)
@@ -1062,8 +1072,13 @@ struct JoeMovieDetail: View {
             // 430), so the dimension is flagged in the wave
             // report rather than silently changed here.
             .clipShape(RoundedRectangle(cornerRadius: 18))
+            // v2.0.6 (Team Ring): §7.4 fixes the stroke's
+            // colour and width, not its side of the edge; the
+            // band now sits OUTSIDE the strip (same values),
+            // framing the backdrop instead of painting over
+            // its outermost 2 pt of image.
             .overlay(RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
         }
     }
 
@@ -1103,8 +1118,11 @@ struct JoeMovieDetail: View {
             }
             .frame(width: 110, height: 110)
             .clipShape(Circle())
+            // v2.0.6 (Team Ring): hairline outset, as on every
+            // clipped-image frame — it frames the photo instead
+            // of painting over its edge pixels.
             .overlay(Circle()
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
             Text(member.name)
                 .font(.system(size: 23, weight: .semibold))
                 .foregroundStyle(theme.text)
@@ -1428,8 +1446,9 @@ struct JoeMovieDetail: View {
             // content-sized, 24 pt, 22/11 padding; the
             // preselected episode is a SOLID accent fill with
             // onAccent text (not a 30% tint); focus is the
-            // theme ring value inside the always-installed
-            // capsule stroke.
+            // theme ring value on the always-installed
+            // capsule stroke (v2.0.6, Team Ring: the focused
+            // band is outset — see the overlay below).
             Text(ep.name)
                 .font(.system(size: 24, weight: preselected ? .semibold : .medium))
                 .foregroundStyle(!playable ? theme.text.opacity(0.35)
@@ -1439,7 +1458,13 @@ struct JoeMovieDetail: View {
                 .padding(.vertical, 11)
                 .background(Capsule()
                     .fill(preselected ? theme.accent : theme.surface2))
+                // v2.0.6 (Team Ring): focused band outset
+                // (inset −ringWidth); the resting 1.5 pt
+                // stroke is unchanged — it paints only the
+                // capsule fill's edge, and the text is inset
+                // 22 pt horizontally, beyond its reach.
                 .overlay(Capsule()
+                    .inset(by: focused ? -theme.ringWidth : 0)
                     .strokeBorder(focused ? theme.focus
                                   : (preselected ? Color.clear : theme.stroke),
                                   lineWidth: focused ? theme.ringWidth : 1.5))

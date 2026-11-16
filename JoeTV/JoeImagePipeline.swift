@@ -1,6 +1,7 @@
 import SwiftUI
 import ImageIO
 import UIKit
+import libwebp
 
 // MARK: - Joe TV image pipeline (Team UI-5, per UI-1 Part B)
 //
@@ -297,10 +298,108 @@ final class JoeImagePipeline: @unchecked Sendable {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
             kCGImageSourceShouldCacheImmediately: true
         ]
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        if let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return UIImage(cgImage: cg)
+        }
+        // WebP fallback (v2.0.6, Team Poster): ImageIO has no
+        // WebP codec, so a WebP body lands here as nil. Gated
+        // on the RIFF/WEBP magic — never on a URL suffix, the
+        // CDNs serve these files under opaque names — so a
+        // non-WebP body keeps failing exactly as before.
+        guard isWebP(data) else { return nil }
+        return decodeWebP(data, maxPixel: maxPixel)
+    }
+
+    /// RIFF/WEBP magic: bytes 0–3 "RIFF", bytes 8–11 "WEBP".
+    private static func isWebP(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            guard raw.count >= 12, let base = raw.baseAddress else { return false }
+            let b = base.assumingMemoryBound(to: UInt8.self)
+            return b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
+                && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50
+        }
+    }
+
+    /// libwebp decode for the bodies ImageIO cannot read
+    /// (v2.0.6, Team Poster). Tủ Phim serves its posters
+    /// ONLY as WebP (cdn.phimsrv.com — measured 2026-11-16:
+    /// every variant, original and 300 alike, is .webp) and
+    /// some KKPhim posters are WebP too (2 of 4 sampled the
+    /// same day). Pre-fix every such slot failed the load and
+    /// silently fell back to the TMDB poster — a DIFFERENT
+    /// poster whose own top is cropped on Love Bound (the
+    /// owner's detail-page photos, 2026-11-16: missing logo
+    /// band + foreheads vs the official poster).
+    ///
+    /// Contract, kept as close to the ImageIO path as the C
+    /// API allows: the returned bitmap's longest side is
+    /// ≤ maxPixel with the aspect untouched (proportional
+    /// scale — never a stretch, never a crop), so the
+    /// decoded cache and the slots' aspect gates see exactly
+    /// what they see for a JPEG. One honest difference:
+    /// libwebp's simple API decodes at native size first, so
+    /// the native bitmap exists transiently inside this call
+    /// only — never cached, never returned. (The decoder
+    /// config API could scale in-decoder, but its
+    /// initialiser is a static-inline C function the Swift
+    /// importer cannot call reliably, so it was rejected.)
+    /// A sanity cap keeps a pathological file from
+    /// materialising an unbounded bitmap. Any failure
+    /// returns nil: the load classifies, retries and falls
+    /// back exactly as it did before this path existed.
+    private static func decodeWebP(_ data: Data, maxPixel: Int) -> UIImage? {
+        var infoW: Int32 = 0
+        var infoH: Int32 = 0
+        let infoOK = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return WebPGetInfo(base.assumingMemoryBound(to: UInt8.self),
+                               data.count, &infoW, &infoH) != 0
+        }
+        guard infoOK, infoW > 0, infoH > 0,
+              Int64(infoW) * Int64(infoH) <= 64_000_000 else { return nil }
+
+        var outW: Int32 = 0
+        var outH: Int32 = 0
+        let pixels = data.withUnsafeBytes { raw -> UnsafeMutablePointer<UInt8>? in
+            guard let base = raw.baseAddress else { return nil }
+            return WebPDecodeRGBA(base.assumingMemoryBound(to: UInt8.self),
+                                  data.count, &outW, &outH)
+        }
+        guard let pixels, outW > 0, outH > 0 else { return nil }
+        defer { WebPFree(pixels) }
+
+        let w = Int(outW), h = Int(outH)
+        let bytesPerRow = w * 4
+        // Copy out of the libwebp buffer before it is freed:
+        // the CGImage's provider retains this Data, so the
+        // bitmap stays valid for the decoded cache's lifetime.
+        let copy = Data(bytes: pixels, count: bytesPerRow * h)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)
+            ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(
+            rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let provider = CGDataProvider(data: copy as CFData),
+              let full = CGImage(width: w, height: h,
+                                 bitsPerComponent: 8, bitsPerPixel: 32,
+                                 bytesPerRow: bytesPerRow, space: space,
+                                 bitmapInfo: bitmapInfo, provider: provider,
+                                 decode: nil, shouldInterpolate: true,
+                                 intent: .defaultIntent) else { return nil }
+
+        let longest = max(w, h)
+        guard longest > maxPixel else { return UIImage(cgImage: full) }
+        let scale = Double(maxPixel) / Double(longest)
+        let tw = max(1, Int((Double(w) * scale).rounded()))
+        let th = max(1, Int((Double(h) * scale).rounded()))
+        guard let ctx = CGContext(data: nil, width: tw, height: th,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: bitmapInfo.rawValue)
         else { return nil }
-        return UIImage(cgImage: cg)
+        ctx.interpolationQuality = .high
+        ctx.draw(full, in: CGRect(x: 0, y: 0, width: tw, height: th))
+        guard let scaled = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: scaled)
     }
 }
 

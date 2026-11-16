@@ -167,7 +167,30 @@ enum JoeTheme {
     static let background = Color.black                               // player foundation
 }
 
-// MARK: - Focus ring (value-only: colour/width change inside an always-installed shape)
+// MARK: - Outset stroke (v2.0.6, Team Ring)
+
+extension InsettableShape {
+    /// A strokeBorder band moved OUTSIDE the shape's bounds:
+    /// inset(by:) with a negative amount expands the path by
+    /// `lineWidth`, and strokeBorder then paints its band
+    /// inside that expanded path — so the band occupies the
+    /// margin OUTSIDE the bounds, its inner edge flush with
+    /// the bounds edge, and it can never paint over the
+    /// element's own content. (The v2.0.5 defect: an inside
+    /// strokeBorder ring ate the first glyphs of Poster Wall
+    /// card titles and the edge pixels of flush art, whose
+    /// content sits at the bounds edge.) Overlay-only — the
+    /// layout frame never changes — and a lineWidth of 0
+    /// expands by 0 and paints nothing, so resting states
+    /// keep the identical view structure (value-only, like
+    /// the width change it replaces).
+    func joeOutsetStrokeBorder<Style: ShapeStyle>(_ style: Style,
+                                                  lineWidth: CGFloat) -> some View {
+        inset(by: -lineWidth).strokeBorder(style, lineWidth: lineWidth)
+    }
+}
+
+// MARK: - Focus ring (value-only: colour/width change on an always-installed shape)
 
 struct JoeFocusRing<S: InsettableShape>: View {
     let shape: S
@@ -176,8 +199,12 @@ struct JoeFocusRing<S: InsettableShape>: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
-        shape.strokeBorder(isFocused ? theme.focus : .clear,
-                           lineWidth: isFocused ? (lineWidth ?? theme.ringWidth) : 0)
+        // v2.0.6 (Team Ring): the band paints OUTSIDE the
+        // label's bounds (joeOutsetStrokeBorder), not inside
+        // them — an inside band paints over the label's own
+        // fill edge and, on flush-edged labels, its content.
+        shape.joeOutsetStrokeBorder(isFocused ? theme.focus : .clear,
+                                    lineWidth: isFocused ? (lineWidth ?? theme.ringWidth) : 0)
     }
 }
 
@@ -259,9 +286,15 @@ struct JoeFieldChrome: ViewModifier {
             .frame(height: 64)
             .background(RoundedRectangle(cornerRadius: theme.rField)
                 .fill(ThemeTokens.fieldBg))
+            // v2.0.6 (Team Ring): band outset like every focus
+            // ring — the field's text is inset 24 pt so the
+            // inside band never reached it, but it painted
+            // over the field fill's own edge; the shared rule
+            // is that a focus band never paints over its
+            // element at all.
             .overlay(RoundedRectangle(cornerRadius: theme.rField)
-                .strokeBorder(focused ? theme.focus : .clear,
-                              lineWidth: focused ? theme.ringWidth : 0))
+                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
+                                       lineWidth: focused ? theme.ringWidth : 0))
     }
 }
 
@@ -275,7 +308,8 @@ extension View {
 //
 // v2.0.5 (owner errors 1+2): every Button in the app used the
 // bare .card style, so TWO focus visuals stacked — the app's
-// JoeFocusRing (drawn inside the label's own bounds) AND the
+// JoeFocusRing (v2.0.6: drawn OUTSIDE the label's bounds;
+// in v2.0.5 it was drawn inside them) AND the
 // tvOS system card effect (a scale + outset shadow platter
 // larger than the button), which is what clipped the "2026"
 // line on Poster Wall cards, threw grey silhouettes around
@@ -549,7 +583,14 @@ struct PosterCard: View {
         .padding(.bottom, 14)
         .frame(width: theme.cardWidth, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: theme.rCard).fill(theme.surfaceGradient))
+        // v2.0.6 (Team Ring): the FOCUSED band is outset
+        // (inset by −ringWidth, so it paints outside the
+        // card's bounds); the resting 1.5 pt hairline is
+        // byte-identical to before — it paints only the
+        // surface-fill edge, and every content element is
+        // inset by artInset (10/12 pt), far beyond its reach.
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+            .inset(by: isFocused ? -theme.ringWidth : 0)
             .strokeBorder(isFocused ? theme.focus : theme.stroke,
                           lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
@@ -586,9 +627,16 @@ struct PosterCard: View {
         // stopped at the art's bottom edge while the card runs
         // on through the title block). Same shape, colour and
         // width values as before; only the bounds are corrected.
+        // v2.0.6 (Team Ring): the bounds are unchanged, but the
+        // band now paints OUTSIDE them (joeOutsetStrokeBorder).
+        // In this theme artInset is 0 and the title/meta text
+        // sits flush at the card's left edge, so the inside
+        // band (6 pt) painted over the art's edges and the
+        // first glyphs of the title and year — the owner's
+        // "Viền nó đè chữ". Outside, it can cover neither.
         .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .strokeBorder(isFocused ? theme.focus : .clear,
-                          lineWidth: isFocused ? theme.ringWidth : 0))
+            .joeOutsetStrokeBorder(isFocused ? theme.focus : .clear,
+                                   lineWidth: isFocused ? theme.ringWidth : 0))
     }
 }
 

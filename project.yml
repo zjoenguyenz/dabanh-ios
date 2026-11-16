@@ -19,6 +19,16 @@ packages:
   KSPlayer:
     url: https://github.com/kingslay/KSPlayer.git
     exactVersion: "2.3.4"
+  # v2.0.6: libwebp for the image pipeline's WebP fallback —
+  # Tủ Phim posters exist ONLY as WebP and some KKPhim
+  # posters are WebP too, and tvOS ImageIO has no WebP
+  # codec, so those slots silently fell back to a different
+  # (TMDB) poster. JoeImagePipeline calls libwebp's C
+  # decode API directly; no SDWebImage core is pulled in.
+  # Pinned exactly, like KSPlayer.
+  libwebp:
+    url: https://github.com/SDWebImage/libwebp-Xcode.git
+    exactVersion: "1.6.0"
 targets:
   DaBanh:
     type: application
@@ -159,13 +169,14 @@ targets:
       - JoeTV/Assets.xcassets
     dependencies:
       - package: KSPlayer
+      - package: libwebp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "2.0.5"
-        CURRENT_PROJECT_VERSION: "18"
+        MARKETING_VERSION: "2.0.6"
+        CURRENT_PROJECT_VERSION: "19"
     info:
       path: InfoJoeTV.plist
       properties:

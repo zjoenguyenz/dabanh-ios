@@ -13,9 +13,11 @@ struct Movie: Identifiable, Hashable, Codable {
     var slug = ""
     var originName = ""
     var poster = ""
-    /// Landscape art (KK/VS thumb_url), kept apart from the
-    /// portrait poster: the detail screen's full-width backdrop
-    /// strip shows it instantly, before the TMDB backdrop lands.
+    /// Landscape art (KK's thumb_url; VS's poster_url — the
+    /// VS field names are swapped vs content, see VsClient),
+    /// kept apart from the portrait poster: the detail
+    /// screen's full-width backdrop strip shows it instantly,
+    /// before the TMDB backdrop lands.
     var thumb = ""
     var year = ""
     var type = ""

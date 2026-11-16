@@ -698,8 +698,11 @@ struct JoeTorrentDetail: View {
             }
             .frame(width: 240, height: 360)
             .clipShape(RoundedRectangle(cornerRadius: theme.rCard))
+            // v2.0.6 (Team Ring): hairline outset, as on every
+            // clipped-image frame — it frames the poster instead
+            // of painting over its edge pixels.
             .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                .joeOutsetStrokeBorder(Color.white.opacity(0.14), lineWidth: 2))
 
             VStack(alignment: .leading, spacing: 16) {
                 Text(meta.name)

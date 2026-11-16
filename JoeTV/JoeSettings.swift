@@ -25,6 +25,7 @@ struct JoeSettingsView: View {
     @State private var addonURL: String = TorrentSettings.addonURL
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken
+    @State private var premiumizeToken: String = TorrentSettings.premiumizeToken
     @State private var subAddonURL: String = TorrentSettings.subAddonURL.isEmpty
         ? TorrentSettings.opensubtitlesDefault : TorrentSettings.subAddonURL
     @State private var tmdbKey: String = UserDefaults.standard.string(forKey: "tmdb_api_key") ?? ""
@@ -66,7 +67,7 @@ struct JoeSettingsView: View {
                 tunnelStatusBlock
 
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
-                      hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox của anh. Để trống thì app tự dựng link từ token bên dưới.",
+                      hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
                       text: $addonURL, id: "addon", secure: false, allowsPaste: true)
                 field(title: "Token Real-Debrid",
                       hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
@@ -74,6 +75,9 @@ struct JoeSettingsView: View {
                 field(title: "Token TorBox",
                       hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
                       text: $torboxToken, id: "tb", secure: true, allowsPaste: true)
+                field(title: "Token Premiumize",
+                      hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
+                      text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true)
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
@@ -163,6 +167,7 @@ struct JoeSettingsView: View {
         .onChange(of: addonURL) { save() }
         .onChange(of: rdToken) { save() }
         .onChange(of: torboxToken) { save() }
+        .onChange(of: premiumizeToken) { save() }
         .onChange(of: subAddonURL) { save() }
         .onChange(of: tmdbKey) { save() }
     }
@@ -443,6 +448,7 @@ struct JoeSettingsView: View {
         TorrentSettings.addonURL = addonURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.rdToken = rdToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.torboxToken = torboxToken.trimmingCharacters(in: .whitespaces)
+        TorrentSettings.premiumizeToken = premiumizeToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.subAddonURL = subAddonURL.trimmingCharacters(in: .whitespaces)
         UserDefaults.standard.set(tmdbKey.trimmingCharacters(in: .whitespaces),
                                   forKey: "tmdb_api_key")

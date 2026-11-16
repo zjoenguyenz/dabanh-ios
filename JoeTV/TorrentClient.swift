@@ -20,11 +20,16 @@ import OSLog
 ///       Entries WITHOUT url are raw torrents; a debrid-configured
 ///       addon returns direct HTTPS urls for cached releases, and
 ///       url-less entries can be resolved through the owner's
-///       Real-Debrid account (RdClient below).
+///       Real-Debrid account (RdClient below). TorBox and
+///       Premiumize (added 2026-11-16) have no direct client
+///       here by design — like TorBox since it shipped, they
+///       work purely through the Torrentio config segments in
+///       TorrentSettings.effectiveBase.
 enum TorrentSettings {
     static let keyAddonURL = "addon_url"
     static let keyRDToken = "rd_token"
     static let keyTorBoxToken = "torbox_token"
+    static let keyPremiumizeToken = "premiumize_token"
     static let keySubAddonURL = "sub_addon_url"
     static let opensubtitlesDefault = "https://opensubtitles-v3.strem.io/manifest.json"
 
@@ -40,6 +45,10 @@ enum TorrentSettings {
         get { UserDefaults.standard.string(forKey: keyTorBoxToken) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: keyTorBoxToken) }
     }
+    static var premiumizeToken: String {
+        get { UserDefaults.standard.string(forKey: keyPremiumizeToken) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: keyPremiumizeToken) }
+    }
 
     /// v2.0.5 (N7 — baked-in tokens, owner order 2026-11-16):
     /// the EFFECTIVE tokens resolve exactly like the TMDB
@@ -50,7 +59,10 @@ enum TorrentSettings {
     /// a reinstall never asks the owner to re-type a token
     /// with the TV remote. The raw accessors above stay the
     /// Settings editor's view of storage — unchanged keys,
-    /// unchanged save() behaviour.
+    /// unchanged save() behaviour. Premiumize (owner order
+    /// 2026-11-16: a third resolver next to RD + TorBox)
+    /// follows the identical rule, its bundled value coming
+    /// from the PREMIUMIZE_TOKEN Actions secret.
     static var effectiveRDToken: String {
         let stored = rdToken.trimmingCharacters(in: .whitespaces)
         return stored.isEmpty ? BundledTokens.rdToken : stored
@@ -58,6 +70,10 @@ enum TorrentSettings {
     static var effectiveTorBoxToken: String {
         let stored = torboxToken.trimmingCharacters(in: .whitespaces)
         return stored.isEmpty ? BundledTokens.torboxToken : stored
+    }
+    static var effectivePremiumizeToken: String {
+        let stored = premiumizeToken.trimmingCharacters(in: .whitespaces)
+        return stored.isEmpty ? BundledTokens.premiumizeToken : stored
     }
     static var subAddonURL: String {
         get { UserDefaults.standard.string(forKey: keySubAddonURL) ?? "" }
@@ -79,17 +95,38 @@ enum TorrentSettings {
     /// An invalid pasted value now falls through to the token
     /// bases; if none is valid either, the result is nil and
     /// the configuration check is honest.
+    /// Premiumize (owner order 2026-11-16): the token-built
+    /// base now carries EVERY configured debrid in ONE
+    /// Torrentio config — Torrentio's own config grammar is
+    /// `|`-joined key=value pairs and its server collects
+    /// all debrid credentials present, querying them in
+    /// config order (verified 2026-11-16 against the live
+    /// configure page's apiKeys map and the torrentio-scraper
+    /// server source: providers/premiumize.rs fixes the key
+    /// as "premiumize", and config.rs unit-tests a combined
+    /// torbox|realdebrid config). The segment order keeps
+    /// the established priority — Real-Debrid first, then
+    /// TorBox, then Premiumize — and a single configured
+    /// token still builds byte-for-byte the base it built
+    /// before (RD-only and TorBox-only are unchanged); the
+    /// pasted-URL precedence and validity rule above are
+    /// untouched.
     static var effectiveBase: String? {
         let url = addonURL.trimmingCharacters(in: .whitespaces)
         if !url.isEmpty {
             let base = stripSlash(url)
             if isValidAddonBase(base) { return base }
         }
+        var segments: [String] = []
         let rd = effectiveRDToken
-        if !rd.isEmpty { return torrentio + "/realdebrid=" + rd }
+        if !rd.isEmpty { segments.append("realdebrid=" + rd) }
         let tb = effectiveTorBoxToken
-        if !tb.isEmpty { return torrentio + "/torbox=" + tb }
-        return nil
+        if !tb.isEmpty { segments.append("torbox=" + tb) }
+        let pm = effectivePremiumizeToken
+        if !pm.isEmpty { segments.append("premiumize=" + pm) }
+        return segments.isEmpty
+            ? nil
+            : torrentio + "/" + segments.joined(separator: "|")
     }
 
     /// A usable addon base is an absolute http/https URL with
