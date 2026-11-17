@@ -549,8 +549,9 @@ struct JoeTVBView: View {
 // only — it never calls the providers and never touches the
 // global catalogue, and it works fully offline from the file
 // the tab already holds. The field row is JoeSearchView's
-// construction verbatim in shape (light field, Tìm, Quay lại,
-// the field as the layer's declared focus); ranking mirrors
+// construction verbatim in shape; v2.0.17: its top area is
+// the same letter strip + query display as JoeSearchView's
+// (the system field is gone in both), and ranking mirrors
 // the existing search's tiers over Providers.normalizeTitle:
 // exact normalized match first, then prefix, then contains
 // (JoeSearch.renderPool's exact-tier promotion, extended with
@@ -567,8 +568,9 @@ struct JoeTVBSearchView: View {
     @State private var searched = false
     @FocusState private var cardFocus: String?
 
-    private enum TopFocus: Hashable { case field, search, back }
-    @FocusState private var topFocus: TopFocus?
+    /// The top area's focus landing (v2.0.17): the shared
+    /// letter strip's keys + Quay lại — JoeSearchKeyFocus.
+    @FocusState private var keyFocus: JoeSearchKeyFocus?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -581,6 +583,10 @@ struct JoeTVBSearchView: View {
                     Spacer()
                 }
             }
+            // v2.0.17: the shared letter strip — typing here
+            // searches the snapshot live, like the Phim
+            // search (this one is instant: it is all local).
+            JoeLetterStrip(query: $query, focus: $keyFocus)
             if searched && results.isEmpty {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
@@ -589,42 +595,39 @@ struct JoeTVBSearchView: View {
             resultsArea
                 .focusSection()
         }
+        // v2.0.17: strip edits search live (no debounce —
+        // the snapshot is on-device; runSearch is sync).
+        .onChange(of: query) { _, _ in liveSearch() }
         // Menu closes the search layer: the handler is
         // unconditional and lives on the layer itself (the
         // JoeSearchView placement), so it exists exactly while
         // the layer does.
         .onExitCommand { onClose() }
-        // The query field is the layer's declared initial
-        // focus (the JoeSearchView construction).
-        .defaultFocus($topFocus, .field)
+        // The strip's first key is the layer's declared
+        // initial focus (v2.0.17, the JoeSearchView
+        // construction — the system field is gone there too).
+        .defaultFocus($keyFocus, .key("a"))
     }
 
     private var fieldRow: some View {
         HStack(spacing: 18) {
-            TextField("", text: $query,
-                      prompt: Text("Tên phim, diễn viên…")
-                        .foregroundColor(ThemeTokens.fieldPlaceholder))
-                .textFieldStyle(.plain)
-                .font(.system(size: ThemeTokens.fieldTextSize))
-                .joeFieldChrome(focused: topFocus == .field)
-                .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
-                .focused($topFocus, equals: .field)
-                .onSubmit { runSearch() }
-            Button {
-                runSearch()
-            } label: {
-                JoeSecondaryLabel(title: "Tìm")
+            HStack(spacing: 14) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 26, weight: .semibold))
+                Text(query.isEmpty ? "Tên phim, diễn viên…" : query)
+                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .lineLimit(1)
             }
-            .joeCardButton()
-            .focused($topFocus, equals: .search)
-            .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .joeFieldChrome(focused: false)
+            .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
             Button {
                 onClose()
             } label: {
                 JoeSecondaryLabel(title: "⟵ Quay lại")
             }
             .joeCardButton()
-            .focused($topFocus, equals: .back)
+            .focused($keyFocus, equals: .back)
         }
         .focusSection()
     }
@@ -660,6 +663,18 @@ struct JoeTVBSearchView: View {
         // horizontal 8 under D — past the 6 pt outset ring)
         // are unchanged, so a focused card's ring keeps its
         // room inside the frame.
+    }
+
+    /// v2.0.17: the strip's per-edit search — an emptied
+    /// query clears back to the un-searched state instead of
+    /// leaving the last round's results standing.
+    private func liveSearch() {
+        if query.trimmingCharacters(in: .whitespaces).isEmpty {
+            results = []
+            searched = false
+        } else {
+            runSearch()
+        }
     }
 
     private func runSearch() {

@@ -41,15 +41,20 @@ struct JoeSearchView: View {
     // debounce (scheduleTypeAhead below); when it fires,
     // the round for the current text runs — local hits
     // paint first, provider branches merge behind them,
-    // never wiping the screen. The Tìm press / onSubmit
-    // are now just the immediate form of the same round.
+    // never wiping the screen. v2.0.17: the edits now come
+    // from the on-screen letter strip (JoeLetterStrip,
+    // below) — the system TextField and its full-screen
+    // keyboard are gone, so the grid the rounds paint stays
+    // visible while typing (the owner's Netflix comparison,
+    // 2026-11-17). The debounce and the rounds are unchanged.
     @State private var typeAheadTask: Task<Void, Never>?
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
 
-    /// The top row's three focusable elements, in visual order.
-    private enum TopFocus: Hashable { case field, search, back }
-    @FocusState private var topFocus: TopFocus?
+    /// The top area's focus landing (v2.0.17): a letter-strip
+    /// key or the Quay lại button — see JoeSearchKeyFocus.
+    /// The TextField that used to own this landing is gone.
+    @FocusState private var keyFocus: JoeSearchKeyFocus?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -67,6 +72,9 @@ struct JoeSearchView: View {
                     Spacer()
                 }
             }
+            // v2.0.17: the letter strip — typing lives here
+            // now, under the query display, always visible.
+            JoeLetterStrip(query: $query, focus: $keyFocus)
             // v2.0.13: NO filter bar on this screen — the
             // Phase 6 facet rows that sat here are removed
             // whole (owner order above). The field row above
@@ -113,8 +121,8 @@ struct JoeSearchView: View {
                     }
                     .joeCardButton()
                     .focused($retryFocused)
-                    // (Its UP-to-field routing is geometric:
-                    // the field is the nearest focusable above.
+                    // (Its UP-to-strip routing is geometric:
+                    // the letter strip is the nearest focusable above.
                     // The conditional trap that used to force
                     // it is removed — see the note at the top
                     // row.)
@@ -149,6 +157,9 @@ struct JoeSearchView: View {
             resultsArea
                 .focusSection()
         }
+        // v2.0.17: strip edits drive the type-ahead round —
+        // the onChange that used to sit on the TextField.
+        .onChange(of: query) { _, _ in scheduleTypeAhead() }
         // Menu closes the search layer (convergence, Team 7):
         // the handler is unconditional and lives on the layer
         // itself, so it exists exactly while the layer does —
@@ -168,56 +179,45 @@ struct JoeSearchView: View {
         // device the owner could not get into search at all.
         // D4-safe: the declaration installs nothing in response
         // to focus state and no structure depends on it.
-        .defaultFocus($topFocus, .field)
+        // v2.0.17: the landing is the strip's first key — the
+        // field this declaration used to name no longer exists.
+        .defaultFocus($keyFocus, .key("a"))
     }
 
-    /// The query row: light field + Tìm + Quay lại. In A/F the
-    /// row is centred by the body; its field is narrower so the
-    /// whole row stays inside the renders' 1150 max width.
+    /// The query row (v2.0.17): the query as a light display
+    /// (the field's chrome, never focused — there is no
+    /// system field any more) + Quay lại. Typing happens on
+    /// the letter strip directly below; the Tìm button is
+    /// gone because typing IS the search (v2.0.13's rule,
+    /// now visible while it happens). In A/F the row is
+    /// centred by the body; D runs it full width.
     private var fieldRow: some View {
         HStack(spacing: 18) {
-            TextField("", text: $query,
-                      prompt: Text("Tên phim…")
-                        .foregroundColor(ThemeTokens.fieldPlaceholder))
-                .textFieldStyle(.plain)
-                .font(.system(size: ThemeTokens.fieldTextSize))
-                .joeFieldChrome(focused: topFocus == .field)
-                // UI-6 defects D-22 (31 pt field text, above)
-                // and D-19: D's field runs the FULL width of
-                // the wall (the render's block field); A/F keep
-                // their centred 700.
-                .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
-                .focused($topFocus, equals: .field)
-                .onSubmit { runSearch() }
-                // v2.0.13: typing IS the search — every
-                // edit re-arms the debounced type-ahead
-                // round (scheduleTypeAhead). onSubmit and
-                // the Tìm button remain as the immediate,
-                // un-debounced form of the same round.
-                .onChange(of: query) { _, _ in scheduleTypeAhead() }
-            Button {
-                runSearch()
-            } label: {
-                JoeSecondaryLabel(title: searching ? "Đang tìm…" : "Tìm")
+            HStack(spacing: 14) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 26, weight: .semibold))
+                Text(query.isEmpty ? "Tên phim…" : query)
+                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .lineLimit(1)
             }
-            .joeCardButton()
-            .focused($topFocus, equals: .search)
-            .disabled(searching || query.trimmingCharacters(in: .whitespaces).isEmpty)
+            // The inner frame makes the display greedy, so
+            // the chrome paints the field's full width (D-19:
+            // D full width; A/F keep their centred 700).
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .joeFieldChrome(focused: false)
+            .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
             Button {
                 nav.searchOpen = false
             } label: {
                 JoeSecondaryLabel(title: "⟵ Quay lại")
             }
             .joeCardButton()
-            .focused($topFocus, equals: .back)
+            .focused($keyFocus, equals: .back)
         }
-        // v2.0.5 (N1, pair k): the query row is a declared
-        // focus region; the results area is a region of its
-        // own (the facet rows that sat between them until
-        // v2.0.13 were a third). v2.0.8
-        // (Phase 1): movement between the regions is the
-        // engine's geometric search — resultMove's declared
-        // UP landing on this row's field is deleted.
+        // The row stays a declared focus region (v2.0.5 N1);
+        // the strip below is a region of its own, and
+        // movement between the regions is the engine's
+        // geometric search, as it has been since v2.0.8.
         .focusSection()
     }
 
@@ -662,6 +662,95 @@ private final class JoeSearchSession: @unchecked Sendable {
             snapshots.removeFirst(snapshots.count - 12)
         }
         lock.unlock()
+    }
+}
+
+/// Focus identity for the search screens' top area
+/// (v2.0.17): a letter-strip key (its id IS its label —
+/// "a"…"z", "1"…"0", "space", "del", "mode") or the Quay
+/// lại button. Shared by JoeSearchView and JoeTVBSearchView,
+/// whose top areas are twins.
+enum JoeSearchKeyFocus: Hashable {
+    case key(String)
+    case back
+}
+
+/// The Netflix-anatomy letter strip (v2.0.17 — the owner's
+/// order, his Netflix photo as the drawing): ONE row of keys
+/// on the search screen itself — a mode key, a space key,
+/// the letters, a delete key — mutating the bound query;
+/// the host's onChange fires its search round per edit, so
+/// results repaint in this same screen while typing. The
+/// system TextField it replaces summoned the full-screen
+/// keyboard and hid the results until "done" (the owner's
+/// screen recording, 2026-11-17). The second mode swaps the
+/// letters for the digits and the few symbols film titles
+/// carry.
+struct JoeLetterStrip: View {
+    @Binding var query: String
+    var focus: FocusState<JoeSearchKeyFocus?>.Binding
+    @State private var symbols = false
+
+    private var letters: [String] {
+        symbols
+            ? ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+               "-", "'", ".", "&", ":"]
+            : Array("abcdefghijklmnopqrstuvwxyz").map(String.init)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            key(id: "mode", label: symbols ? "abc" : "123", width: 96) {
+                symbols.toggle()
+            }
+            key(id: "space", label: "space", width: 128) {
+                append(" ")
+            }
+            ForEach(letters, id: \.self) { letter in
+                key(id: letter, label: letter, width: 42) {
+                    append(letter)
+                }
+            }
+            key(id: "del", label: "⌫", width: 96) {
+                if !query.isEmpty { query.removeLast() }
+            }
+        }
+        .focusSection()
+    }
+
+    private func append(_ s: String) {
+        guard query.count < 48 else { return }
+        query += s
+    }
+
+    private func key(id: String, label: String, width: CGFloat,
+                     action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            JoeKeyCap(label: label, width: width,
+                      focused: focus.wrappedValue == .key(id))
+        }
+        .joeCardButton()
+        .focused(focus, equals: .key(id))
+    }
+}
+
+/// One strip key's face: a quiet plate unfocused, the
+/// theme's focus colour filled when focused — the label
+/// paints its own focus, because the house button style
+/// (JoeCardButton) deliberately paints nothing.
+private struct JoeKeyCap: View {
+    let label: String
+    let width: CGFloat
+    let focused: Bool
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 28, weight: .medium))
+            .foregroundStyle(focused ? .black : theme.text)
+            .frame(width: width, height: 58)
+            .background(RoundedRectangle(cornerRadius: 12)
+                .fill(focused ? theme.focus : Color.white.opacity(0.08)))
     }
 }
 
