@@ -260,9 +260,21 @@ struct JoeSearchView: View {
                 }
                 .padding(.vertical, 8)
             }
-            // v2.0.8 (Phase 4): focus rings are never clipped
-            // by the scroll container.
-            .scrollClipDisabled()
+            // v2.0.12 (search overlap fix): this container
+            // deliberately CLIPS at its frame — no
+            // .scrollClipDisabled() here. The facet bar is a
+            // PINNED sibling directly above this ScrollView
+            // in the body's VStack; with clipping disabled,
+            // results scrolling past the frame's top edge
+            // kept rendering into the bar's space, painting
+            // posters and provider headers over the chips
+            // (owner's 2.0.11 clip). The home's outer scroll
+            // (JoePhimHome.railHome) ships clipped with the
+            // same cards; the rails' own inner horizontal
+            // scrolls keep their clip-disabled construction
+            // (JoeTheme.Rail) — that escape is bounded inside
+            // this container, and this container's frame is
+            // now the hard boundary nothing crosses.
         } else {
             ScrollView(.vertical, showsIndicators: false) {
                 // Fixed 6 columns (was .adaptive(minimum: 240)).
@@ -285,10 +297,16 @@ struct JoeSearchView: View {
                 // rings are never clipped by the scroll frame.
                 .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
             }
-            // v2.0.8 (Phase 4): focus rings are never clipped
-            // by the scroll container (design D's wall-art
-            // ring is an outset band around the art).
-            .scrollClipDisabled()
+            // v2.0.12 (search overlap fix): CLIPS at its
+            // frame, same as the source-board branch above —
+            // no .scrollClipDisabled() on this container.
+            // The pinned facet bar sits directly above it in
+            // the stack; unclipped grid content scrolling
+            // past the top edge rendered over the chips.
+            // The grid's own edge clearances (vertical 8,
+            // horizontal 8 under D — past the 6 pt outset
+            // ring) are unchanged, so a focused card's ring
+            // keeps its room inside the frame.
         }
     }
 
