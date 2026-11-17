@@ -830,7 +830,24 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             }
         case .audio:
             if pickerAudioTracks.indices.contains(sender.tag) {
-                layer.player.select(track: pickerAudioTracks[sender.tag])
+                // KSPlayer 2.3.4's select(track:) takes an opaque
+                // `some MediaPlayerTrack` — an existential straight
+                // out of the picker array cannot satisfy it (that
+                // was CI run #39's only error). Hand it the concrete
+                // track the FFmpeg engine vends, via the concrete
+                // player, so the generic binds to a concrete type.
+                let chosen = pickerAudioTracks[sender.tag]
+                if let mePlayer = layer.player as? KSMEPlayer,
+                   let concrete = chosen as? FFmpegAssetTrack {
+                    mePlayer.select(track: concrete)
+                } else {
+                    // Any other engine: select() ultimately flips
+                    // isEnabled across the same media type (see
+                    // MEPlayerItem.select) — mirror that directly.
+                    for track in pickerAudioTracks {
+                        track.isEnabled = track === chosen
+                    }
+                }
             }
         }
         refreshTrackButtons()
