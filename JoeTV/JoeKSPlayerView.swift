@@ -215,12 +215,20 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        // While the track picker is open it owns the landing;
-        // otherwise the root view does, exactly as before the
-        // bar existed (Select/Left/Right keep their meaning
-        // until the user deliberately moves Down into the bar).
+        // While the track picker is open it owns the landing.
+        // While the transport bar is up, the play button owns
+        // it (v2.0.17): before this, focus stayed on the root
+        // view and Left/Right could only seek — the track
+        // buttons were reachable only by an undiscoverable
+        // Down-then-Up path, and the owner reported exactly
+        // that ("chỉ cho kéo tới kéo lui"). With focus IN the
+        // bar, Left/Right walk the button row and Down drops
+        // to the seek bar, where Left/Right step ∓30 s.
         if pickerIsOpen, let first = pickerButtons.first {
             return [first]
+        }
+        if controlsVisible {
+            return [playPauseButton]
         }
         return [view]
     }
@@ -442,7 +450,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         transportBar.layer.cornerRadius = 24
         controlsView.addSubview(transportBar)
 
-        playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+        playPauseButton.setImage(Self.transportSymbol("play.fill"), for: .normal)
         playPauseButton.tintColor = .white
         playPauseButton.backgroundColor = UIColor.white.withAlphaComponent(0.14)
         playPauseButton.layer.cornerRadius = 14
@@ -523,8 +531,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         let barY = bounds.height - max(view.safeAreaInsets.bottom, 36) - barHeight
         transportBar.frame = CGRect(x: inset, y: barY, width: barWidth, height: barHeight)
 
-        playPauseButton.frame = CGRect(x: 24, y: 16, width: 84, height: 56)
-        bufferingSpinner.frame = CGRect(x: 128, y: 34, width: 20, height: 20)
+        playPauseButton.frame = CGRect(x: 24, y: 12, width: 104, height: 64)
+        bufferingSpinner.frame = CGRect(x: 144, y: 34, width: 20, height: 20)
 
         // Track buttons hug the right edge, sized to their
         // current titles (set by refreshTrackButtons).
@@ -533,12 +541,12 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         let audioW = audioButton.isHidden ? 0 : max(audioButton.frame.width, 170)
         let subW = subtitleButton.isHidden ? 0 : max(subtitleButton.frame.width, 190)
         if !audioButton.isHidden {
-            audioButton.frame = CGRect(x: barWidth - 24 - audioW, y: 16,
-                                       width: audioW, height: 56)
+            audioButton.frame = CGRect(x: barWidth - 24 - audioW, y: 12,
+                                       width: audioW, height: 64)
         }
         if !subtitleButton.isHidden {
             subtitleButton.frame = CGRect(x: barWidth - 24 - audioW - (audioW > 0 ? 16 : 0) - subW,
-                                          y: 16, width: subW, height: 56)
+                                          y: 12, width: subW, height: 64)
         }
 
         currentTimeLabel.frame = CGRect(x: 24, y: 94, width: 150, height: 48)
@@ -581,6 +589,15 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             controlsVisible = true
             controlsView.isHidden = false
             refreshTransport()
+            // v2.0.17: the bar waking is the moment focus moves
+            // into it (onto the play button, per
+            // preferredFocusEnvironments) — but only when focus
+            // is not already inside the bar or the picker, so a
+            // press that merely re-arms the hide timer never
+            // yanks the user's place.
+            if !focusInControls, !pickerIsOpen {
+                setNeedsFocusUpdate()
+            }
         }
         scheduleControlsHide()
     }
@@ -630,13 +647,23 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         }
         seekBar.setNeedsDisplay()
         playPauseButton.setImage(
-            UIImage(systemName: layer.state.isPlaying ? "pause.fill" : "play.fill"),
+            Self.transportSymbol(layer.state.isPlaying ? "pause.fill" : "play.fill"),
             for: .normal)
         if !ready || layer.state == .buffering {
             bufferingSpinner.startAnimating()
         } else {
             bufferingSpinner.stopAnimating()
         }
+    }
+
+    /// The play/pause glyph at a size the focused platter
+    /// cannot swallow (v2.0.17): the bare system symbol
+    /// renders at its small default point size inside the
+    /// button, and the owner's close-up showed the focused
+    /// plate huge with the glyph invisible inside it.
+    private static func transportSymbol(_ name: String) -> UIImage? {
+        UIImage(systemName: name,
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 34, weight: .bold))
     }
 
     private static func clockText(_ seconds: TimeInterval) -> String {
