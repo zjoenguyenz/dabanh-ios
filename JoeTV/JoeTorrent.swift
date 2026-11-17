@@ -525,6 +525,11 @@ struct JoeTorrentDetail: View {
     @State private var streamsFailed = false
     @State private var notice: String?
     @State private var hasViSub = false
+    /// v2.0.16: the best Vietnamese subtitle itself (not only
+    /// the hasViSub flag) — play() attaches it to every ladder
+    /// candidate so the player loads it beside the embedded
+    /// tracks.
+    @State private var viSubtitleURL: URL?
     @State private var playerHolder: JoeMovieDetail.DirectorHolder?
     @FocusState private var focusedRow: String?
 
@@ -780,9 +785,9 @@ struct JoeTorrentDetail: View {
                     }
                 }
             } else if streams.isEmpty {
-                Text(TorrentSettings.isConfigured
+                Text(TorrentSettings.isConfigured || TorrentSettings.mfBase != nil
                      ? "Chưa có nguồn phát."
-                     : "Chưa cấu hình nguồn — vào Cài đặt nhập link Torrentio hoặc token Real-Debrid/TorBox.")
+                     : "Chưa cấu hình nguồn — vào Cài đặt nhập link Torrentio, token Real-Debrid/TorBox hoặc link MediaFusion.")
                     .font(.system(size: 25))
                     .foregroundStyle(theme.meta)
             } else {
@@ -845,7 +850,10 @@ struct JoeTorrentDetail: View {
     }
 
     private func streamTag(_ s: TorStream) -> String {
-        if s.playable { return "PHÁT NGAY" }
+        // v2.0.16: a playable row whose debrid is still
+        // fetching the release says so (the pooled ranking
+        // already sorts it below the cached rows).
+        if s.playable { return s.awaitingDisplay ? "CHỜ DEBRID" : "PHÁT NGAY" }
         if !s.infoHash.isEmpty { return "RD · GIẢI LINK" }
         return "TORRENT"
     }
@@ -873,25 +881,32 @@ struct JoeTorrentDetail: View {
     }
 
     private func loadStreams() async {
-        guard let base = TorrentSettings.effectiveBase else {
+        let torBase = TorrentSettings.effectiveBase
+        let mfBase = TorrentSettings.mfBase
+        guard torBase != nil || mfBase != nil else {
             streams = []
             streamsFailed = false
             return
         }
         loadingStreams = true
         defer { loadingStreams = false }
-        do {
-            streams = try await TorrentClient.fetchStreams(
-                addonBase: base, type: meta.type, id: videoId)
-            streamsFailed = false
-        } catch {
-            streams = []
-            streamsFailed = true
-        }
-        let subs = await TorrentClient.fetchSubtitles(
-            base: TorrentSettings.subtitleBase(addonBase: base),
+        // v2.0.16: the pooled fetch — Torrentio + MediaFusion
+        // in parallel, deduped to one row per release, ranked
+        // best-first, cut to 30 (the Sony 2.3.16 form the
+        // owner approved). The error surface stays honest:
+        // it shows only when the Torrentio leg failed AND
+        // nothing came back from either gateway.
+        let pooled = await TorrentClient.fetchPooledStreams(
+            torrentioBase: torBase, mfBase: mfBase,
             type: meta.type, id: videoId)
-        hasViSub = TorrentClient.bestVietnamese(subs) != nil
+        streams = pooled.streams
+        streamsFailed = pooled.primaryFailed && pooled.streams.isEmpty
+        let subs = await TorrentClient.fetchSubtitles(
+            base: TorrentSettings.subtitleBase(addonBase: torBase ?? mfBase ?? ""),
+            type: meta.type, id: videoId)
+        let bestVi = TorrentClient.bestVietnamese(subs)
+        hasViSub = bestVi != nil
+        viSubtitleURL = bestVi.flatMap { URL(string: $0.url) }
     }
 
     private func play(_ stream: TorStream) {
@@ -913,20 +928,33 @@ struct JoeTorrentDetail: View {
         let resume = watch.progressFor(key: entry.key)?.pos ?? 0
         let tapped = stream
         let type = meta.type
+        let viURL = viSubtitleURL
         let director = PlayDirector(
             store: watch,
             identity: PlayIdentity(entry: entry),
             resumeMs: resume,
             resolveLadder: { identity in
-                guard let base = TorrentSettings.effectiveBase else { return [] }
-                let fresh = (try? await TorrentClient.fetchStreams(
-                    addonBase: base, type: type, id: identity.entry.streamId)) ?? []
-                // The shared conversion (TorrentClient): the
-                // tapped stream leads — a hash entry earns its
-                // ONE Real-Debrid resolution there — then any
+                // v2.0.16: the ladder re-fetches the SAME
+                // pooled list the rows came from (Torrentio +
+                // MediaFusion, ranked) — pre-fix it re-asked
+                // Torrentio alone, so a tapped MediaFusion row
+                // was not even present in its own ladder. The
+                // shared conversion (TorrentClient): the tapped
+                // stream leads — a hash entry earns its ONE
+                // Real-Debrid resolution there — then any
                 // direct-URL streams in list order.
-                return await TorrentClient.playCandidates(
-                    streams: fresh, preferred: tapped)
+                let pooled = await TorrentClient.fetchPooledStreams(
+                    torrentioBase: TorrentSettings.effectiveBase,
+                    mfBase: TorrentSettings.mfBase,
+                    type: type, id: identity.entry.streamId)
+                var cands = await TorrentClient.playCandidates(
+                    streams: pooled.streams, preferred: tapped)
+                // The session's Vietnamese subtitle rides
+                // every candidate, so failover keeps it.
+                if let viURL {
+                    for i in cands.indices { cands[i].subtitleURL = viURL }
+                }
+                return cands
             },
             hopIdentity: nil)
         playerHolder = JoeMovieDetail.DirectorHolder(

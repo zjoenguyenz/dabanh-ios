@@ -27,6 +27,9 @@ struct JoeSettingsView: View {
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken
     @State private var premiumizeToken: String = TorrentSettings.premiumizeToken
+    /// v2.0.16: the MediaFusion gateway's field + kill-switch.
+    @State private var mfURL: String = TorrentSettings.mfURL
+    @State private var mfEnabled: Bool = TorrentSettings.mfEnabled
     @State private var subAddonURL: String = TorrentSettings.subAddonURL.isEmpty
         ? TorrentSettings.opensubtitlesDefault : TorrentSettings.subAddonURL
     @State private var tmdbKey: String = UserDefaults.standard.string(forKey: "tmdb_api_key") ?? ""
@@ -44,6 +47,7 @@ struct JoeSettingsView: View {
     @FocusState private var kkProbeFocused: Bool
     @FocusState private var themeChipFocused: String?
     @FocusState private var cwResetFocused: Bool
+    @FocusState private var mfToggleFocused: Bool
     /// Confirmation for the history reset (historyBlock) —
     /// the app's standard destructive shape, the exit
     /// dialog's: destructive confirm + cancel.
@@ -99,6 +103,24 @@ struct JoeSettingsView: View {
                 field(title: "Token Premiumize",
                       hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
                       text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true)
+                // v2.0.16: MediaFusion — the second torrent
+                // gateway. With its link pasted, the torrent
+                // detail pools both gateways' streams (ranked
+                // top-30) and the TV section gains the Thể Thao
+                // Torrent tab. The toggle is the kill-switch:
+                // off ⇒ MediaFusion is fully absent.
+                field(title: "Link MediaFusion (tuỳ chọn)",
+                      hint: "Dán link manifest MediaFusion của anh (trang cấu hình MediaFusion, đã gắn TorBox/Real-Debrid/Premiumize). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
+                      text: $mfURL, id: "mf", secure: false, allowsPaste: true)
+                Button {
+                    mfEnabled.toggle()
+                } label: {
+                    JoeSecondaryLabel(title: mfEnabled
+                                      ? "MediaFusion: đang bật ✓"
+                                      : "MediaFusion: đang tắt")
+                }
+                .joeCardButton()
+                .focused($mfToggleFocused)
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
@@ -197,6 +219,8 @@ struct JoeSettingsView: View {
         .onChange(of: rdToken) { save() }
         .onChange(of: torboxToken) { save() }
         .onChange(of: premiumizeToken) { save() }
+        .onChange(of: mfURL) { save() }
+        .onChange(of: mfEnabled) { save() }
         .onChange(of: subAddonURL) { save() }
         .onChange(of: tmdbKey) { save() }
     }
@@ -535,6 +559,8 @@ struct JoeSettingsView: View {
         TorrentSettings.rdToken = rdToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.torboxToken = torboxToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.premiumizeToken = premiumizeToken.trimmingCharacters(in: .whitespaces)
+        TorrentSettings.mfURL = mfURL.trimmingCharacters(in: .whitespaces)
+        TorrentSettings.mfEnabled = mfEnabled
         TorrentSettings.subAddonURL = subAddonURL.trimmingCharacters(in: .whitespaces)
         UserDefaults.standard.set(tmdbKey.trimmingCharacters(in: .whitespaces),
                                   forKey: "tmdb_api_key")

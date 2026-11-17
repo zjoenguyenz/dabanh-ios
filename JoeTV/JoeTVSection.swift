@@ -13,12 +13,27 @@ import SwiftUI
 struct JoeTVSection: View {
     @EnvironmentObject private var store: TVStore
     @EnvironmentObject private var nav: JoeNavigator
+    @EnvironmentObject private var watch: WatchStore
     @Environment(\.joeTheme) private var theme
     @Environment(\.scenePhase) private var scenePhase
     @State private var playRequest: PlayRequest?
     @State private var selectedGroup: String?
     @FocusState private var focusedChannel: Channel.ID?
     @FocusState private var focusedChip: String?
+
+    // v2.0.16: the Thể Thao Torrent tab — MediaFusion live
+    // sport events as a synthetic chip beside Live Events
+    // (owner: "Để tab thể thao torrent / Để kế bên live
+    // event luôn"), never a playlist group and never mixed
+    // into Live Events itself.
+    @State private var sportsOn = false
+    @State private var mfEvents: [TorMeta] = []
+    @State private var mfEventsLoaded = false
+    @State private var mfLoading = false
+    @State private var sportsHolder: JoeMovieDetail.DirectorHolder?
+    @FocusState private var focusedEvent: String?
+
+    private static let sportsChipID = "mf|thethao-torrent"
 
     private struct PlayRequest: Identifiable {
         let id = UUID()
@@ -44,18 +59,14 @@ struct JoeTVSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            hero
-                // Hero stabilisation (v1.5): focus changes swap the
-                // hero channel instantly — no implicit animation
-                // can ghost/overlap the old and new titles.
-                .animation(nil, value: heroChannel?.id)
+            heroBlock
             chipRow
             if let message = store.statusMessage {
                 Text(message)
                     .font(.system(size: 25))
                     .foregroundStyle(.orange)
             }
-            gridSection
+            contentSection
             footer
         }
         // No outer padding here: the shell (JoeRootView) owns the
@@ -83,6 +94,12 @@ struct JoeTVSection: View {
         .fullScreenCover(item: $playRequest) { request in
             TVPlayerView(sources: request.sources)
         }
+        .fullScreenCover(item: $sportsHolder) { holder in
+            JoePlayerView(director: holder.director,
+                          filmTitle: holder.title,
+                          filmEpisode: holder.episode,
+                          sourceLine: holder.sourceLine)
+        }
         .onChange(of: store.channels) { _, _ in
             if selectedGroup == nil { selectedGroup = store.groups.first }
             store.noteSelectedGroup(effectiveGroup)
@@ -94,6 +111,20 @@ struct JoeTVSection: View {
         // launch path. DOWN from the pills lands on the chip row
         // geometrically (the chips sit directly below the hero),
         // and DOWN from a chip enters the grid the same way.
+    }
+
+    @ViewBuilder
+    private var heroBlock: some View {
+        if sportsOn {
+            sportsHero
+                .animation(nil, value: focusedEvent)
+        } else {
+            hero
+                // Hero stabilisation (v1.5): focus changes swap the
+                // hero channel instantly — no implicit animation
+                // can ghost/overlap the old and new titles.
+                .animation(nil, value: heroChannel?.id)
+        }
     }
 
     // MARK: - Hero
@@ -172,6 +203,76 @@ struct JoeTVSection: View {
             .padding(22)
     }
 
+    private func fallbackText(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 28, weight: .bold))
+            .foregroundStyle(theme.text.opacity(0.85))
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .padding(22)
+    }
+
+    // MARK: - Thể Thao Torrent hero
+
+    private var sportsHeroEvent: TorMeta? {
+        if let id = focusedEvent,
+           let ev = mfEvents.first(where: { $0.id == id }) {
+            return ev
+        }
+        return mfEvents.first
+    }
+
+    @ViewBuilder
+    private var sportsHero: some View {
+        if let ev = sportsHeroEvent {
+            HStack(alignment: .center, spacing: 40) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: theme.rCard)
+                        .fill(Color.black.opacity(0.42))
+                    if let url = ev.posterURL {
+                        JoeRemoteImage(url: url, targetPixels: 720, fit: true) {
+                            fallbackText(ev.name)
+                        }
+                        .padding(28)
+                    } else {
+                        fallbackText(ev.name)
+                    }
+                }
+                .frame(width: 340, height: 204)
+                .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("THỂ THAO TORRENT · MEDIAFUSION")
+                        .font(.system(size: 25, weight: .semibold))
+                        .tracking(4)
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                    Text(ev.name)
+                        .font(.system(size: 56, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: 220)
+        } else {
+            HStack {
+                if mfLoading {
+                    ProgressView("Đang tải sự kiện…")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.text)
+                        .tint(.white)
+                } else {
+                    Text("Chưa có sự kiện nào.")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.meta)
+                }
+                Spacer()
+            }
+            .frame(height: 220)
+        }
+    }
+
     private func fallbackCount(for channel: Channel) -> Int {
         let name = channel.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let total = store.channels.filter {
@@ -187,9 +288,30 @@ struct JoeTVSection: View {
             HStack(spacing: 16) {
                 ForEach(store.visibleGroups, id: \.self) { group in
                     chip(group)
+                    // v2.0.16: the Thể Thao Torrent chip sits
+                    // immediately beside Live Events (owner:
+                    // "Để kế bên live event luôn"). It exists
+                    // only while MediaFusion is in play — the
+                    // Android kill-switch rule: off or
+                    // unconfigured ⇒ fully absent.
+                    if group == sportsChipAnchor,
+                       TorrentSettings.mfBase != nil {
+                        sportsChip
+                    }
+                }
+                if store.visibleGroups.isEmpty,
+                   TorrentSettings.mfBase != nil {
+                    sportsChip
                 }
                 actionChip(id: "refresh", title: "↻ Làm mới") {
-                    Task { await store.refresh() }
+                    Task {
+                        if sportsOn {
+                            mfEventsLoaded = false
+                            await loadSportsEvents()
+                        } else {
+                            await store.refresh()
+                        }
+                    }
                 }
                 actionChip(id: "validate",
                            title: store.isValidating ? "Đang kiểm tra…" : "✓ Kiểm tra link") {
@@ -210,10 +332,36 @@ struct JoeTVSection: View {
         .focusSection()
     }
 
+    /// The group the Thể Thao Torrent chip sits beside —
+    /// the LIVE EVENTS group when the playlist has one,
+    /// else the first visible group.
+    private var sportsChipAnchor: String? {
+        if let live = store.visibleGroups.first(where: {
+            $0.uppercased().contains("LIVE EVENTS") }) {
+            return live
+        }
+        return store.visibleGroups.first
+    }
+
+    private var sportsChip: some View {
+        Button {
+            sportsOn = true
+            store.noteSelectedGroup(nil)
+            Task { await loadSportsEvents() }
+        } label: {
+            // The owner's exact label (2026-11-17): "Thể
+            // Thao Torrent" — so he recognises it at a glance.
+            JoeChipLabel(title: "Thể Thao Torrent", selected: sportsOn)
+        }
+        .joeCardButton()
+        .focused($focusedChip, equals: Self.sportsChipID)
+    }
+
     private func chip(_ group: String) -> some View {
-        let selected = group == effectiveGroup
+        let selected = !sportsOn && group == effectiveGroup
         return Button {
             selectedGroup = group
+            sportsOn = false
             store.noteSelectedGroup(group)
         } label: {
             // v2.0.0 (UI-5): the shared chip leaf — selection
@@ -294,9 +442,19 @@ struct JoeTVSection: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
                 }
-                // v2.0.8 (Phase 4): a focused tile's ring is
-                // never clipped by the scroll container.
-                .scrollClipDisabled()
+                // v2.0.16 (owner's 2026-11-17 videos, TV +
+                // Live Events): this grid CLIPS at its frame
+                // — no .scrollClipDisabled(). The v2.0.8
+                // Phase 4 unclip existed for a focused tile's
+                // ring, but the tile's outset band was retired
+                // since (its ring is an inside strokeBorder —
+                // see tile()), so the escape bought nothing
+                // and cost the defect he filmed: rows
+                // scrolling past the frame's top edge kept
+                // painting over the group title above, then
+                // the chips and hero, and over the footer at
+                // the bottom edge. The v2.0.12 search rule
+                // applies here unchanged.
                 // v2.0.5 (N1, pair f): the grid's focus region
                 // (see chipRow) — entering it from the chips is
                 // section-to-section navigation; within it the
@@ -307,6 +465,108 @@ struct JoeTVSection: View {
         } else {
             Spacer()
         }
+    }
+
+    @ViewBuilder
+    private var contentSection: some View {
+        if sportsOn {
+            sportsSection
+        } else {
+            gridSection
+        }
+    }
+
+    // MARK: - Thể Thao Torrent grid (v2.0.16)
+
+    @ViewBuilder
+    private var sportsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text("Thể Thao Torrent")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                Text("\(mfEvents.count) sự kiện")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+            }
+            if mfLoading && mfEvents.isEmpty {
+                ProgressView("Đang lấy sự kiện trực tiếp…")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.text)
+                    .tint(.white)
+                Spacer()
+            } else if mfEvents.isEmpty {
+                Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống.")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                    .frame(maxWidth: 1200, alignment: .leading)
+                Spacer()
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
+                        ForEach(mfEvents) { event in
+                            eventTile(event)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
+                }
+                // v2.0.16: this grid CLIPS at its frame, like
+                // the channel grid beside it (the section
+                // rule — see gridSection).
+                .focusSection()
+            }
+        }
+    }
+
+    /// One event cell: the channel tile's anatomy (273×150,
+    /// inside focus ring, LIVE badge) carrying the event's
+    /// poster art and name.
+    private func eventTile(_ event: TorMeta) -> some View {
+        let focused = focusedEvent == event.id
+        return Button {
+            playEvent(event)
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: theme.rCard)
+                    .fill(theme.surface2)
+                VStack(spacing: 6) {
+                    ZStack {
+                        if let url = event.posterURL {
+                            JoeRemoteImage(url: url, targetPixels: 480, fit: true) {
+                                fallbackText(event.name)
+                            }
+                        } else {
+                            fallbackText(event.name)
+                        }
+                    }
+                    .frame(maxWidth: 240, maxHeight: 90)
+                    Text(event.name)
+                        .font(.system(size: 25, weight: focused ? .semibold : .medium))
+                        .foregroundStyle(focused ? theme.focusTitle : theme.text)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                HStack(spacing: 6) {
+                    Circle().fill(JoeTheme.accentRed).frame(width: 12, height: 12)
+                    Text("LIVE")
+                        .font(.system(size: 23, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.black.opacity(0.65)))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(8)
+            }
+            .frame(width: 273, height: 150)
+            .overlay(RoundedRectangle(cornerRadius: theme.rCard)
+                .strokeBorder(focused ? theme.focus : theme.stroke,
+                              lineWidth: focused ? theme.ringWidth : 2))
+        }
+        .joeCardButton()
+        .focused($focusedEvent, equals: event.id)
     }
 
     /// One grid cell (DESIGN-SPEC §7.5): a single focusable
@@ -383,13 +643,19 @@ struct JoeTVSection: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            if store.isValidating {
+            if store.isValidating && !sportsOn {
                 Text("Đang kiểm tra link…")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
             }
             Spacer()
-            if !store.channels.isEmpty {
+            if sportsOn {
+                if !mfEvents.isEmpty {
+                    Text("\(mfEvents.count) sự kiện")
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.meta)
+                }
+            } else if !store.channels.isEmpty {
                 Text("\(store.channels.count) kênh")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
@@ -401,6 +667,56 @@ struct JoeTVSection: View {
 
     private func play(_ channel: Channel) {
         playRequest = PlayRequest(sources: sources(for: channel))
+    }
+
+    // MARK: - Thể Thao Torrent (v2.0.16)
+
+    private func loadSportsEvents() async {
+        guard !mfLoading, !mfEventsLoaded,
+              let mf = TorrentSettings.mfBase else { return }
+        mfLoading = true
+        defer { mfLoading = false }
+        mfEvents = Array(await TorrentClient.fetchMfSportEvents(base: mf).prefix(60))
+        mfEventsLoaded = true
+    }
+
+    /// Tap an event → play it through the torrent player:
+    /// the ladder is the event's own MediaFusion streams,
+    /// pooled + ranked like a film's, and the director
+    /// fails over inside it — the TV section's
+    /// click-and-play rule, no intermediate list.
+    private func playEvent(_ event: TorMeta) {
+        var entry = WatchStore.Entry()
+        entry.kind = WatchStore.kindTor
+        entry.key = "mf-event|" + event.id
+        entry.title = event.name
+        entry.poster = event.poster
+        entry.metaId = event.id
+        entry.metaType = "events"
+        entry.streamId = event.id
+        entry.metaBase = TorrentSettings.mfBase ?? ""
+        entry.background = event.background
+        entry.desc = event.desc
+        let mf = TorrentSettings.mfBase
+        let eventId = event.id
+        let director = PlayDirector(
+            store: watch,
+            identity: PlayIdentity(entry: entry),
+            resumeMs: 0,
+            resolveLadder: { _ in
+                guard let mf else { return [] }
+                let pooled = await TorrentClient.fetchPooledStreams(
+                    torrentioBase: nil, mfBase: mf,
+                    type: "events", id: eventId)
+                return await TorrentClient.playCandidates(
+                    streams: pooled.streams, preferred: nil)
+            },
+            hopIdentity: nil)
+        sportsHolder = JoeMovieDetail.DirectorHolder(
+            director: director,
+            title: event.name,
+            episode: "",
+            sourceLine: "Nguồn: Thể Thao Torrent (MediaFusion)")
     }
 
     /// Same-name entries are the player's fallback ladder; proven

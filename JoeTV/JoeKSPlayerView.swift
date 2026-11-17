@@ -96,6 +96,11 @@ struct JoeKSPlayerController: UIViewControllerRepresentable {
 final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate {
     private var layer: KSPlayerLayer?
     private var director: PlayDirector?
+    /// v2.0.16: the session's side-loaded subtitle URL (the
+    /// candidate's subtitleURL — the subtitle addon's best
+    /// Vietnamese), fed into the subtitle model beside the
+    /// embedded tracks by prepareSubtitleModel.
+    private var externalSubtitleURL: URL?
     /// The candidate start() was handed. Layer creation is
     /// DEFERRED until the first layout pass with real bounds
     /// (v2.0.5, error 3b — see beginPlaybackIfPossible), so the
@@ -254,6 +259,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 
     func start(candidate: PlayCandidate, director: PlayDirector) {
         self.director = director
+        externalSubtitleURL = candidate.subtitleURL
         pendingCandidate = candidate
         view.backgroundColor = .black
         // makeUIViewController calls this BEFORE the view has
@@ -673,21 +679,47 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// the options ask for it (KSOptions' default is yes).
     /// A player with no source (the AVPlayer engine returns
     /// nil) simply never feeds, and the button stays hidden.
+    ///
+    /// v2.0.16: the session's side-loaded subtitle (the
+    /// candidate's subtitleURL) is fed in the same pass and
+    /// SELECTED — the Android player's auto-attach mirrored.
+    /// Pre-fix the model only ever saw embedded tracks, so a
+    /// file whose only subtitle was "default eng" offered no
+    /// Vietnamese choice even though the app had already
+    /// fetched one (the owner's Dune: Part Two clip). The
+    /// feed no longer requires an embedded source at all: a
+    /// file with no embedded subtitles still receives the
+    /// side-loaded one. The picker lists it beside the
+    /// embeds, and the owner can still switch or turn
+    /// subtitles off.
     private func prepareSubtitleModel(layer: KSPlayerLayer) {
         let playerID = ObjectIdentifier(layer.player as AnyObject)
-        guard subtitleFedPlayerID != playerID,
-              let dataSouce = layer.player.subtitleDataSouce
-        else { return }
+        guard subtitleFedPlayerID != playerID else { return }
+        let dataSouce = layer.player.subtitleDataSouce
+        let externalURL = externalSubtitleURL
+        guard dataSouce != nil || externalURL != nil else { return }
         subtitleFedPlayerID = playerID
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, let layer = self.layer,
                   ObjectIdentifier(layer.player as AnyObject) == playerID
             else { return }
-            self.subtitleModel.addSubtitle(dataSouce: dataSouce)
-            if self.subtitleModel.selectedSubtitleInfo == nil,
-               layer.options.autoSelectEmbedSubtitle {
-                self.subtitleModel.selectedSubtitleInfo =
-                    self.subtitleModel.subtitleInfos.first { $0.isEnabled }
+            if let dataSouce {
+                self.subtitleModel.addSubtitle(dataSouce: dataSouce)
+                if self.subtitleModel.selectedSubtitleInfo == nil,
+                   layer.options.autoSelectEmbedSubtitle {
+                    self.subtitleModel.selectedSubtitleInfo =
+                        self.subtitleModel.subtitleInfos.first { $0.isEnabled }
+                }
+            }
+            if let externalURL {
+                let info = URLSubtitleInfo(
+                    subtitleID: "joetv-external-vi",
+                    name: "Tiếng Việt",
+                    url: externalURL,
+                    userAgent: JoeHTTP.userAgent)
+                self.subtitleModel.addSubtitle(
+                    dataSouce: JoeExternalSubtitleDataSouce(info: info))
+                self.subtitleModel.selectedSubtitleInfo = info
             }
             self.buildSubtitleViewsIfNeeded()
             self.startSubtitleTimerIfNeeded()
@@ -1040,6 +1072,15 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 /// remote presses bubble up the responder chain to the host
 /// controller's `pressesEnded`, which is where Select and
 /// Left/Right are handled; Menu is never swallowed there.
+/// v2.0.16: a one-info SubtitleDataSouce carrying the
+/// session's side-loaded subtitle. KSPlayer's
+/// URLSubtitleInfo downloads and parses the file lazily
+/// when it becomes the selected info.
+private final class JoeExternalSubtitleDataSouce: SubtitleDataSouce {
+    var infos: [any SubtitleInfo]
+    init(info: URLSubtitleInfo) { infos = [info] }
+}
+
 private final class KSPlayerHostRootView: UIView {
     override var canBecomeFocused: Bool { true }
 }

@@ -80,6 +80,57 @@ enum TorrentSettings {
         set { UserDefaults.standard.set(newValue, forKey: keySubAddonURL) }
     }
 
+    /// v2.0.16: MediaFusion, the second torrent gateway (the
+    /// Android 2.3.14 port). The owner pastes ONE manifest URL
+    /// minted on the MediaFusion configure page; the secret in
+    /// it is a bearer credential — it lives only in these
+    /// prefs, is never logged and never sent anywhere but the
+    /// MediaFusion host itself.
+    static let keyMfURL = "mf_url"
+    static let keyMfEnabled = "mf_enabled"
+
+    static var mfURL: String {
+        get { UserDefaults.standard.string(forKey: keyMfURL) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: keyMfURL) }
+    }
+
+    /// The kill-switch (Android parity, default ON): off ⇒
+    /// MediaFusion is fully absent and the torrent surfaces
+    /// behave exactly as before it existed.
+    static var mfEnabled: Bool {
+        get {
+            let d = UserDefaults.standard
+            return d.object(forKey: keyMfEnabled) == nil
+                ? true : d.bool(forKey: keyMfEnabled)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: keyMfEnabled) }
+    }
+
+    /// The MediaFusion base to talk to, or nil when it is not
+    /// in play: kill-switch off, nothing pasted, or the pasted
+    /// value does not validate as an http/https URL (the
+    /// effectiveBase rule — a stray word in the field must
+    /// never become a base). Accepts the configure page's
+    /// manifest URL, the bare base, or a stremio:// link
+    /// (stripSlash removes the /manifest.json tail).
+    static var mfBase: String? {
+        guard mfEnabled else { return nil }
+        let raw = mfURL.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty else { return nil }
+        var s = raw
+        if s.hasPrefix("stremio://") {
+            s = "https://" + String(s.dropFirst("stremio://".count))
+        }
+        let base = stripSlash(s)
+        return isValidAddonBase(base) ? base : nil
+    }
+
+    /// True when a MediaFusion URL is saved (regardless of the
+    /// toggle) — the Settings presence tick.
+    static var mfConfigured: Bool {
+        !mfURL.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     static let torrentio = "https://torrentio.strem.fun"
     static let cinemeta = "https://v3-cinemeta.strem.io"
 
@@ -187,6 +238,27 @@ struct TorStream: Identifiable {
     var infoHash = ""
     var fileIdx = -1
     var proxyHeaders: [String: String] = [:]
+
+    /// v2.0.16: which gateway served this row — "TOR"
+    /// (Torrentio, the default) or "MF" (MediaFusion).
+    var gateway: String = "TOR"
+
+    /// Debrid cache state, read from the serving gateway's
+    /// own name grammar (Android 2.3.4 / 2.3.14): a Torrentio
+    /// row whose name carries " download]" is a release the
+    /// debrid is still fetching; a MediaFusion row WITHOUT
+    /// ⚡️ in its name is the same state in MF's grammar.
+    var awaitingDisplay: Bool {
+        if gateway == "MF" { return !name.contains("⚡️") }
+        return name.lowercased().contains(" download]")
+    }
+
+    /// Ranking class (Android rankPool): 0 = plays now,
+    /// 1 = playable but awaiting the debrid, 2 = hash-only.
+    var playClass: Int {
+        if !playable { return 2 }
+        return awaitingDisplay ? 1 : 0
+    }
 
     /// "Plays at once": the stream carries a direct URL. Since
     /// v2.0.3 the torrent candidates play in the FFmpeg engine
@@ -411,7 +483,8 @@ enum TorrentClient {
     /// path and the Phim substitution rung.
     private static let streamsCap: TimeInterval = 15
 
-    static func fetchStreams(addonBase: String, type: String, id: String) async throws -> [TorStream] {
+    static func fetchStreams(addonBase: String, type: String, id: String,
+                             gateway: String = "TOR") async throws -> [TorStream] {
         let url = addonBase + "/stream/\(type)/\(id).json"
         let root = try await SourceHealth.run(
             provider: SourceHealth.torrentProvider, stage: .resolve,
@@ -423,6 +496,12 @@ enum TorrentClient {
             var s = TorStream()
             s.name = JSON.str(o, "name")
             s.title = JSON.str(o, "title")
+            // v2.0.16: MediaFusion puts the release detail in
+            // "description", not "title" — the shared parse
+            // falls back so an MF row is never title-less
+            // (a no-op for Torrentio, which fills "title").
+            if s.title.isEmpty { s.title = JSON.str(o, "description") }
+            s.gateway = gateway
             s.url = JSON.str(o, "url")
             s.infoHash = JSON.str(o, "infoHash")
             s.fileIdx = JSON.int(o, "fileIdx", -1)
@@ -435,6 +514,207 @@ enum TorrentClient {
             }
             return s
         }
+    }
+
+    // MARK: - Pooled fetch + ranking (v2.0.16, Android 2.3.14/2.3.16 port)
+
+    /// The two gateways are asked in parallel, each fail-soft;
+    /// the pool is deduped to one row per release and ranked
+    /// best-first, cut to 30 rows — the Sony form the owner
+    /// approved ("chỉ cần nguồn chất lượng cao nhất và nhanh
+    /// nhất"). `primaryFailed` reports the Torrentio leg's
+    /// failure so the detail can keep its error surface
+    /// honest when the pool comes back empty; a gateway that
+    /// is not configured at all is absence, not failure.
+    static func fetchPooledStreams(torrentioBase: String?, mfBase: String?,
+                                   type: String, id: String)
+        async -> (streams: [TorStream], primaryFailed: Bool) {
+        func leg(_ base: String?, _ gateway: String) async -> [TorStream]? {
+            guard let base else { return nil }
+            return try? await fetchStreams(addonBase: base, type: type,
+                                           id: id, gateway: gateway)
+        }
+        async let tor = leg(torrentioBase, "TOR")
+        async let mfRows = leg(mfBase, "MF")
+        let torResult = await tor
+        let mfResult = await mfRows
+        var pool: [TorStream] = []
+        if let torResult { pool += torResult }
+        if let mfResult { pool += mfResult }
+        return (Array(rankPool(pool).prefix(30)),
+                torrentioBase != nil && torResult == nil)
+    }
+
+    /// Ranking features parsed from an entry's own text — the
+    /// gateways publish no structured fields; name + title
+    /// carry resolution, source class, size and seeders in
+    /// both gateways' grammars.
+    private struct RankFeat {
+        var playClass: Int
+        var res: Int      // 2160 / 1080 / 720 / 480 / 0
+        var cls: Int      // REMUX 50, BluRay 40, BDRip 35, WEB 30, HDTV 20, other 10
+        var cam: Bool
+        var dv: Bool
+        var hdr: Bool
+        var tor: Bool     // served by Torrentio (not MediaFusion)
+        var seeders: Int
+        var sizeGb: Double
+        var provider: Int // TorBox 3, Real-Debrid 2, Premiumize 1, unknown 0
+
+        static func of(_ s: TorStream) -> RankFeat {
+            var f = RankFeat(playClass: s.playClass, res: 0, cls: 10,
+                             cam: false, dv: false, hdr: false,
+                             tor: s.gateway != "MF", seeders: 0,
+                             sizeGb: 0, provider: 0)
+            let all = s.name + "\n" + s.title
+            let low = all.lowercased()
+            if low.contains("2160p") || low.contains("4k") { f.res = 2160 }
+            else if low.contains("1080p") { f.res = 1080 }
+            else if low.contains("720p") { f.res = 720 }
+            else if low.contains("480p") { f.res = 480 }
+            if low.contains("remux") { f.cls = 50 }
+            else if low.contains("bluray") || low.contains("blu-ray") { f.cls = 40 }
+            else if low.contains("bdrip") { f.cls = 35 }
+            else if low.contains("web-dl") || low.contains("webdl")
+                        || low.contains("webrip") || low.contains("web ") { f.cls = 30 }
+            else if low.contains("hdtv") { f.cls = 20 }
+            f.cam = low.contains("hdcam") || low.contains("camrip")
+                || low.contains("hdts") || low.contains("telesync")
+                || low.contains("screener") || low.contains(" cam ")
+            let tokens = " " + low.components(
+                separatedBy: CharacterSet.alphanumerics.inverted)
+                .joined(separator: " ") + " "
+            f.dv = low.contains("dolby vision") || tokens.contains(" dv ")
+            f.hdr = low.contains("hdr")
+            f.seeders = parseSeeders(all)
+            f.sizeGb = parseSizeGb(all)
+            f.provider = providerOf(s.name)
+            return f
+        }
+
+        private static func parseSeeders(_ text: String) -> Int {
+            guard let r = text.range(of: "👤") else { return 0 }
+            var v = 0
+            var started = false
+            for ch in text[r.upperBound...] {
+                if ch.isNumber {
+                    started = true
+                    v = v * 10 + (ch.wholeNumberValue ?? 0)
+                } else if started { break }
+            }
+            return started ? v : 0
+        }
+
+        private static let sizeRegex = try? NSRegularExpression(
+            pattern: "([0-9]+(?:\\.[0-9]+)?)\\s*(GB|MB)")
+
+        private static func parseSizeGb(_ text: String) -> Double {
+            guard let re = sizeRegex else { return 0 }
+            let ns = text as NSString
+            guard let m = re.firstMatch(in: text, range: NSRange(
+                      location: 0, length: ns.length)),
+                  let v = Double(ns.substring(with: m.range(at: 1)))
+            else { return 0 }
+            return ns.substring(with: m.range(at: 2)) == "MB" ? v / 1024.0 : v
+        }
+
+        private static func providerOf(_ name: String) -> Int {
+            // Torrentio grammar: the name opens with the
+            // provider badge — "[TB+]", "[RD+]", "[PM+]".
+            // MediaFusion grammar: "… 🧲 TRB ⚡️ 2160p" / PM / RD.
+            if name.hasPrefix("[TB") || name.contains(" TRB ") { return 3 }
+            if name.hasPrefix("[RD") || name.contains(" RD ") { return 2 }
+            if name.hasPrefix("[PM") || name.contains(" PM ") { return 1 }
+            return 0
+        }
+    }
+
+    /// Release identity: the parsed fingerprint first
+    /// (resolution + source class + size — the same file
+    /// prints the same size through every gateway and
+    /// provider, so Torrentio's and MediaFusion's rows for
+    /// one release collide here even though MF rows carry
+    /// no infoHash); the infoHash is the fallback, and a row
+    /// with neither keys unique and is never deduped away.
+    private static func releaseKey(_ s: TorStream, _ f: RankFeat) -> String {
+        if f.sizeGb > 0 && f.res > 0 {
+            return "f:\(f.res)|\(f.cls)|\(Int((f.sizeGb * 100).rounded()))"
+        }
+        if !s.infoHash.isEmpty { return "h:" + s.infoHash.lowercased() }
+        return "u:" + s.id.uuidString
+    }
+
+    /// Within one release, the route that stays: playable
+    /// beats hash-only, cached beats awaiting, then the
+    /// owner's measured provider speed (TorBox >
+    /// Real-Debrid > Premiumize), then Torrentio's proven
+    /// resolve path over MediaFusion's, then seeders.
+    private static func routeBefore(_ a: RankFeat, _ b: RankFeat) -> Bool {
+        if a.playClass != b.playClass { return a.playClass < b.playClass }
+        if a.provider != b.provider { return a.provider > b.provider }
+        if a.tor != b.tor { return a.tor }
+        return a.seeders > b.seeders
+    }
+
+    /// The owner's ranking: fastest first — a link that plays
+    /// now beats one the debrid still has to fetch; CAM
+    /// vetoed to the bottom of its playability class; then
+    /// highest quality (resolution, source class, DV/HDR
+    /// bonus); then seeders; then provider speed.
+    private static func rankBefore(_ a: RankFeat, _ b: RankFeat) -> Bool {
+        if a.playClass != b.playClass { return a.playClass < b.playClass }
+        if a.cam != b.cam { return !a.cam }
+        let qa = a.res * 100 + a.cls + (a.dv ? 6 : 0) + (a.hdr ? 3 : 0)
+        let qb = b.res * 100 + b.cls + (b.dv ? 6 : 0) + (b.hdr ? 3 : 0)
+        if qa != qb { return qa > qb }
+        if a.seeders != b.seeders { return a.seeders > b.seeders }
+        return a.provider > b.provider
+    }
+
+    /// Dedupe a pooled list to one row per release, then
+    /// sort best-first.
+    static func rankPool(_ pool: [TorStream]) -> [TorStream] {
+        var feats: [UUID: RankFeat] = [:]
+        var best: [String: TorStream] = [:]
+        var keys: [String] = []
+        for s in pool {
+            let f = RankFeat.of(s)
+            feats[s.id] = f
+            let k = releaseKey(s, f)
+            if let cur = best[k], let cf = feats[cur.id] {
+                if routeBefore(f, cf) { best[k] = s }
+            } else {
+                best[k] = s
+                keys.append(k)
+            }
+        }
+        return keys.compactMap { best[$0] }.sorted { a, b in
+            guard let fa = feats[a.id], let fb = feats[b.id] else { return false }
+            return rankBefore(fa, fb)
+        }
+    }
+
+    // MARK: - MediaFusion live sport events (Thể Thao Torrent tab)
+
+    /// The live sport events from the owner's MediaFusion
+    /// manifest-template catalog `live_sport_events` (type
+    /// "events", verified against the MediaFusion source
+    /// 2026-11-17). Football first via the catalog's genre
+    /// extra; the full catalog is the fallback. Fail-soft:
+    /// any error returns an empty list. If the owner's
+    /// configure-page selection does not include the sports
+    /// catalog, the endpoint answers empty and the tab says
+    /// so honestly.
+    static func fetchMfSportEvents(base: String) async -> [TorMeta] {
+        let genreURL = base + "/catalog/events/live_sport_events/genre=Football.json"
+        if let root = try? await JoeHTTP.getJSON(genreURL, timeout: 12) {
+            let metas = parseMetas(JSON.arr(root, "metas"))
+            if !metas.isEmpty { return metas }
+        }
+        let plainURL = base + "/catalog/events/live_sport_events.json"
+        guard let root = try? await JoeHTTP.getJSON(plainURL, timeout: 12)
+        else { return [] }
+        return parseMetas(JSON.arr(root, "metas"))
     }
 
     // MARK: - Play candidates (shared conversion)

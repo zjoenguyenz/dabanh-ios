@@ -352,9 +352,17 @@ struct JoeTVBView: View {
                 }
             }
         }
-        // Focus rings are never clipped by the scroll
-        // container (the v2.0.8 Phase 4 construction).
-        .scrollClipDisabled()
+        // v2.0.16 (owner's 2026-11-17 TVB clip): this
+        // container deliberately CLIPS at its frame — no
+        // .scrollClipDisabled(). The v2.0.8 Phase 4 unclip
+        // let poster rows scrolling past the frame's top
+        // edge keep painting over the shell's top pill bar
+        // (the v2.0.12 search rule, second conviction). The
+        // rails inside keep their own bounded horizontal
+        // escape (JoeTheme.Rail); nothing in this stack
+        // needs to cross the frame vertically — the first
+        // rail's cards sit below the in-flow header, and a
+        // focused card's ring lives inside its rail.
     }
 
     /// The header mirrors JoePhimHome's slim header: section
@@ -643,7 +651,15 @@ struct JoeTVBSearchView: View {
             .padding(.vertical, 8)
             .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
         }
-        .scrollClipDisabled()
+        // v2.0.16: CLIPS at its frame, like the JoeSearch
+        // grid it was templated from — this copy kept the
+        // .scrollClipDisabled() the search fix removed, so
+        // results scrolling up painted over the query row
+        // pinned above (the owner's 2026-11-17 sweep found
+        // it). The grid's own clearances (vertical 8,
+        // horizontal 8 under D — past the 6 pt outset ring)
+        // are unchanged, so a focused card's ring keeps its
+        // room inside the frame.
     }
 
     private func runSearch() {

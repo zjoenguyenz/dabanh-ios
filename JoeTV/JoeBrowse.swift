@@ -569,10 +569,18 @@ struct JoeBrowseView: View {
                     }
                 }
             }
-            // v2.0.8 (Phase 4): focus rings are never clipped
-            // by the scroll container (design D's wall-art
-            // ring is an outset band around the art).
-            .scrollClipDisabled()
+            // v2.0.16 (owner's 2026-11-17 sweep): this
+            // container CLIPS at its frame — the
+            // .scrollClipDisabled() here was the same
+            // construction the v2.0.12 search fix convicted:
+            // the "Tất cả phim" header + Đóng button are
+            // pinned siblings directly above this ScrollView,
+            // and unclipped grid content scrolling past the
+            // frame's top edge painted over them. The grid's
+            // own clearances (vertical 8, horizontal 8 under
+            // D — past the 6 pt outset ring) are unchanged,
+            // so a focused card's ring keeps its room inside
+            // the frame.
         }
         // v2.0.5 (N1): the layer's DECLARED top element — the
         // filter bar's first chip. The browse layer swaps in
@@ -810,11 +818,19 @@ struct JoeWallHomeView: View {
                 }
             }
         }
-        // v2.0.8 (Phase 4): this one scroll container holds
-        // the wall grid AND its shelves; design D's wall-art
-        // focus ring is an OUTSET band (6 pt outside the
-        // art), so the container never clips it.
-        .scrollClipDisabled()
+        // v2.0.16 (owner's 2026-11-17 sweep): this container
+        // CLIPS at its frame — no .scrollClipDisabled(). In
+        // panel mode (browseOpen) the "Tất cả phim" header is
+        // a pinned sibling directly above this ScrollView,
+        // and the unclip let the panel grid paint over it
+        // while scrolling — the v2.0.12 search construction,
+        // third conviction. Design D's outset wall ring keeps
+        // its room at rest: the wall grid carries the wider
+        // horizontal clearance (8 pt, past the 6 pt ring),
+        // and vertically the stack's 36 pt spacing holds the
+        // grid's first row a ring's width and more inside
+        // the frame; the shelves' rails keep their own
+        // bounded horizontal escape (JoeTheme.Rail).
         // v2.0.11: the scroll surface is re-ided on the panel
         // state, so opening or folding the "Tất cả phim" panel
         // rebuilds it at the top — the same fresh landing the

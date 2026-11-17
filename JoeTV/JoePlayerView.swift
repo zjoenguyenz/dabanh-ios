@@ -37,6 +37,15 @@ struct PlayCandidate {
     var headers: [String: String] = [:]
     var label: String = ""
     var engine: Engine = .avPlayer
+
+    /// v2.0.16: the side-loaded subtitle the session resolved
+    /// for this title — the subtitle addon's best Vietnamese
+    /// (JoeTorrentDetail attaches it to every ladder
+    /// candidate). The KSPlayer host adds it to its subtitle
+    /// model beside the file's embedded tracks and selects
+    /// it, the Android player's auto-attach mirrored. Nil
+    /// for provider candidates and titles without one.
+    var subtitleURL: URL? = nil
 }
 
 /// Everything the player needs to keep WatchStore honest: the
