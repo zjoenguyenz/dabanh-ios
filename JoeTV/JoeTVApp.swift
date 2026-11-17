@@ -530,6 +530,36 @@ struct JoeRootView: View {
         let q = Dictionary(uniqueKeysWithValues:
             (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         switch c.host {
+        case "tmdb":
+            // v2.0.11: Top Shelf FALLBACK links. When the App
+            // Group hand-off is unavailable under the owner's
+            // signing, the extension builds hero/hot itself
+            // from TMDB trending and can only name titles by
+            // TMDB id (it has no catalogue access) — resolve
+            // the id against the app's own catalogue here, the
+            // same match the writer performs. The link can
+            // cold-launch the app before the catalogue has
+            // loaded, so the lookup waits (bounded) instead of
+            // failing soft on an empty store.
+            guard let tmdbId = q["id"], !tmdbId.isEmpty else { return }
+            let type = q["type"] ?? ""
+            nav.section = .phim
+            Task { @MainActor in
+                for _ in 0..<40 {
+                    if let m = phim.merged.first(where: {
+                        $0.tmdbId == tmdbId &&
+                        (type.isEmpty || $0.tmdbType.isEmpty
+                         || $0.tmdbType == type)
+                    }) {
+                        nav.movie = MovieRoute(
+                            provider: m.provider, slug: m.slug,
+                            name: m.name, poster: m.poster,
+                            year: m.year, preselectEp: "")
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
         case "movie":
             guard let provider = q["provider"], let slug = q["slug"],
                   !provider.isEmpty, !slug.isEmpty else { return }
@@ -697,7 +727,10 @@ private struct PillLabel: View {
         .padding(.vertical, 15)
         .background(Capsule().fill(selected ? theme.accent : theme.surface2))
         .overlay(Capsule().strokeBorder(
-            isFocused ? theme.focus : (selected ? .clear : theme.stroke),
+            isFocused
+                ? (theme.id == .posterWall && selected
+                   ? Color.white : theme.focus)
+                : (selected ? .clear : theme.stroke),
             lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }

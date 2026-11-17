@@ -625,6 +625,10 @@ struct JoeWallHomeView: View {
     /// v2.0.9: the header close control's focus identity
     /// (see the header note in `body`).
     @FocusState private var closeFocused: Bool
+    /// v2.0.11: the home mode's "Tất cả phim" entry — the
+    /// landing Đóng writes when the panel folds (see the
+    /// header note in `body`).
+    @FocusState private var openerFocused: Bool
 
     private var wallMovies: [Movie] { filter.apply(phim: phim) }
 
@@ -671,78 +675,128 @@ struct JoeWallHomeView: View {
         // plus the shared JoeSecondaryLabel close button in
         // its own focus section, fixed above the scroll — with
         // the title at design D's own sheet value (.wall-title:
-        // 40 pt, weight 800). Pressing Đóng folds the surface
-        // back to its initial state: the filter returns to its
-        // defaults and focus returns to the surface's declared
-        // top element (the filter bar's first chip — the same
-        // landing .defaultFocus declares for this view).
+        // 40 pt, weight 800).
+        //
+        // v2.0.11 (owner, verbatim: "Không tắt được bảng tất
+        // cả các phim" — his clip: Đóng takes focus, the wall
+        // does not close): the v2.0.9 header wired Đóng to a
+        // FILTER RESET only — it never touched the state that
+        // presents/dismisses an all-movies surface, because in
+        // theme D no such state existed: this view was the
+        // section's face unconditionally and every browseOpen
+        // entry lived in the A/F rail home, so the real panel
+        // (JoeBrowseView, dismissed by nav.browseOpen) was
+        // unreachable in D and this home wore the panel's
+        // header instead. The wall now carries the same
+        // two-state anatomy as every other theme, keyed on
+        // the SAME state: nav.browseOpen == false is the D
+        // home (design-D/home.html: the entry box + shelves);
+        // == true is the "Tất cả phim" panel (design-D/
+        // grid.html: header + filter + merged grid), and
+        // Đóng clears nav.browseOpen — the exact dismissal
+        // JoeBrowseView's Đóng performs (JoeBrowse.swift's
+        // browse header) and the Menu handlers clear first
+        // (JoePhimHome / JoeRootView). JoePhimHome's Group
+        // presents this view ahead of the browse branch so
+        // the wall stays mounted and switches modes itself;
+        // the scroll surface is re-ided on the state so each
+        // mode starts at the top, like the A/F layer swap.
+        // The filter reset the old action performed now lives
+        // in the browseOpen observer below, so EVERY close
+        // path (Đóng, Menu, section change) resets it — the
+        // per-open semantics the browse layer gets from being
+        // recreated (REWORK-LOOP state note).
         VStack(alignment: .leading, spacing: 26) {
-            HStack(alignment: .center, spacing: 28) {
-                Text("Tất cả phim")
-                    .font(.system(size: 40, weight: .heavy))
-                    .foregroundStyle(theme.text)
-                Spacer()
-                Button {
-                    filter = JoeBrowseFilter()
-                    chipFocus = "genre:all"
-                } label: {
-                    JoeSecondaryLabel(title: "Đóng", systemImage: "xmark")
+            if nav.browseOpen {
+                HStack(alignment: .center, spacing: 28) {
+                    Text("Tất cả phim")
+                        .font(.system(size: 40, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                    Spacer()
+                    Button {
+                        nav.browseOpen = false
+                        chipFocus = nil
+                        openerFocused = true
+                    } label: {
+                        JoeSecondaryLabel(title: "Đóng", systemImage: "xmark")
+                    }
+                    .joeCardButton()
+                    .focused($closeFocused)
                 }
-                .joeCardButton()
-                .focused($closeFocused)
+                .focusSection()
             }
-            .focusSection()
             ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 36) {
-                JoeFilterBar(filter: $filter,
-                             years: JoeBrowseFilter.yearBuckets(for: phim.merged),
-                             hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
-                             showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
-                             showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
-                             showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
-                             showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
-                             chipFocus: $chipFocus)
-                    // v2.0.5 (N1, pair d): the wall's facet
-                    // chain is a declared focus region; the
-                    // owner rails and the wall grid below are
-                    // regions of their own (rails via the
-                    // shared Rail, the grid below). v2.0.8
-                    // (Phase 1): movement between the regions
-                    // is the engine's geometric search — the
-                    // bar's declared DOWN landing below it is
-                    // deleted with the bar's handlers.
-                    .focusSection()
-                if !filter.filtersActive {
+                if nav.browseOpen {
+                    JoeFilterBar(filter: $filter,
+                                 years: JoeBrowseFilter.yearBuckets(for: phim.merged),
+                                 hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
+                                 showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
+                                 showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
+                                 showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
+                                 showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
+                                 chipFocus: $chipFocus)
+                        // v2.0.5 (N1, pair d): the wall's facet
+                        // chain is a declared focus region; the
+                        // owner rails and the wall grid below are
+                        // regions of their own (rails via the
+                        // shared Rail, the grid below). v2.0.8
+                        // (Phase 1): movement between the regions
+                        // is the engine's geometric search — the
+                        // bar's declared DOWN landing below it is
+                        // deleted with the bar's handlers.
+                        .focusSection()
+                    if !filter.filtersActive {
+                        cwWallRail
+                        favWallRail
+                    }
+                    if wallMovies.isEmpty {
+                        wallStateSurface
+                    } else {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 40) {
+                            ForEach(wallMovies) { movie in
+                                Button { nav.movie = MovieRoute(
+                                    provider: movie.provider, slug: movie.slug,
+                                    name: movie.name, poster: movie.poster,
+                                    year: movie.year) } label: {
+                                    PosterCard(
+                                        title: movie.name,
+                                        posterURL: movie.posterURL,
+                                        tmdbId: movie.tmdbId,
+                                        tmdbType: movie.tmdbType,
+                                        meta: movie.cardMeta,
+                                        badge: Providers.badge(movie.provider),
+                                        quality: movie.quality)
+                                }
+                                .joeCardButton()
+                                .focused($wallFocus, equals: "wall|" + movie.id)
+                            }
+                        }
+                        // The wall grid is a D-only surface: its
+                        // outset art rings (6 pt) need the wider
+                        // edge clearance (see JoeBrowseView).
+                        .padding(.horizontal, 8)
+                        .focusSection()
+                    }
+                } else {
+                    // v2.0.11: the D home mode — the single
+                    // "Tất cả phim" entry box (the F slim-header
+                    // entry's shared label) over the shelves.
+                    // Opening it raises the panel above; Đóng
+                    // (or Menu) folds back to exactly this.
+                    Button {
+                        nav.browseOpen = true
+                    } label: {
+                        JoeSecondaryLabel(title: "Tất cả phim",
+                                          systemImage: "square.grid.2x2")
+                    }
+                    .joeCardButton()
+                    .focused($openerFocused)
+                    if wallMovies.isEmpty {
+                        wallStateSurface
+                    }
                     cwWallRail
                     favWallRail
-                }
-                if wallMovies.isEmpty {
-                    wallStateSurface
-                } else {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 40) {
-                        ForEach(wallMovies) { movie in
-                            Button { nav.movie = MovieRoute(
-                                provider: movie.provider, slug: movie.slug,
-                                name: movie.name, poster: movie.poster,
-                                year: movie.year) } label: {
-                                PosterCard(
-                                    title: movie.name,
-                                    posterURL: movie.posterURL,
-                                    tmdbId: movie.tmdbId,
-                                    tmdbType: movie.tmdbType,
-                                    meta: movie.cardMeta,
-                                    badge: Providers.badge(movie.provider),
-                                    quality: movie.quality)
-                            }
-                            .joeCardButton()
-                            .focused($wallFocus, equals: "wall|" + movie.id)
-                        }
-                    }
-                    // The wall grid is a D-only surface: its
-                    // outset art rings (6 pt) need the wider
-                    // edge clearance (see JoeBrowseView).
-                    .padding(.horizontal, 8)
-                    .focusSection()
                 }
                 if !filter.filtersActive {
                     wallCategorySections
@@ -761,12 +815,30 @@ struct JoeWallHomeView: View {
         // focus ring is an OUTSET band (6 pt outside the
         // art), so the container never clips it.
         .scrollClipDisabled()
+        // v2.0.11: the scroll surface is re-ided on the panel
+        // state, so opening or folding the "Tất cả phim" panel
+        // rebuilds it at the top — the same fresh landing the
+        // A/F browse layer gets from being swapped in and out.
+        .id(nav.browseOpen)
         } // v2.0.9: closes the header VStack opened in `body`.
         // v2.0.5 (N1/N2): the wall home's DECLARED top element
         // — the filter bar's first chip, the landing the pill
         // row's DOWN resigns focus to while the Poster Wall
-        // home is the Phim section's face.
+        // home is the Phim section's face. (v2.0.11: the chip
+        // exists only in the panel mode; in the home mode the
+        // declaration matches nothing and focus falls back to
+        // the first focusable element — the "Tất cả phim"
+        // entry, which is also where Đóng's explicit write
+        // lands on a fold.)
         .defaultFocus($chipFocus, "genre:all")
+        // v2.0.11: every panel close (Đóng, Menu, section
+        // change) resets the filter — the per-open semantics
+        // the A/F browse layer gets from being recreated per
+        // open (REWORK-LOOP state note). This observer owns
+        // the reset so no close path can skip it.
+        .onChange(of: nav.browseOpen) { _, isOpen in
+            if !isOpen { filter = JoeBrowseFilter() }
+        }
         .task {
             attempted = true
             JoeImagePipeline.shared.prefetch(

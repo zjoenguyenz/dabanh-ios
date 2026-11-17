@@ -102,10 +102,20 @@ struct JoePhimHome: View {
         Group {
             if nav.searchOpen {
                 JoeSearchView()
+            } else if theme.id == .posterWall {
+                // v2.0.11: theme D's wall stays mounted and
+                // switches between its home shelves and the
+                // "Tất cả phim" panel on nav.browseOpen
+                // internally (see JoeWallHomeView in
+                // JoeBrowse.swift), so the posterWall branch
+                // must win over the browse branch — with the
+                // old order, opening the panel in D would swap
+                // in the A/F browse surface instead. For A/F
+                // nothing changes: their posterWall check is
+                // false and the browse branch follows as before.
+                JoeWallHomeView()
             } else if nav.browseOpen {
                 JoeBrowseView()
-            } else if theme.id == .posterWall {
-                JoeWallHomeView()
             } else {
                 railHome
             }

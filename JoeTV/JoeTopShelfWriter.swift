@@ -9,9 +9,14 @@ import UIKit
 // not compile-verified until the first CI build.
 //
 // The Top Shelf extension (JoeTVTopShelf/TopShelfProvider.swift)
-// is a pure reader. THIS writer is the only producer: it writes
+// reads what this writer produces. THIS writer is the only
+// producer of the hand-off: it writes
 // topshelf.json + JPEG image files into the App Group container
-// (group.com.luun.nguyen.joetv). Posters/backdrops are fetched
+// (group.com.luun.nguyen.joetv). (v2.0.11: on the owner's
+// device the group is unavailable under his re-signing — the
+// delivered IPA is unsigned — so the provider additionally
+// carries a TMDB fallback of its own for hero + hot; this
+// hand-off remains the only source of Continue Watching.) Posters/backdrops are fetched
 // through JoeImagePipeline (which decodes WebP via libwebp) and
 // RE-ENCODED to JPEG — provider art can be WebP, and the shelf
 // must never depend on the system's WebP support.
