@@ -182,6 +182,59 @@ func tvCardBackground(focused: Bool) -> some View {
                               lineWidth: focused ? 4 : 1.5))
 }
 
+// MARK: - Card button (the .card cure, 2026-11-17)
+//
+// Every button in this app used to wear .buttonStyle(.card).
+// That style paints the SYSTEM's own platter under the label
+// — a pale plate at the system's size and offset — so every
+// pill and card showed a ghost copy of itself peeking out
+// from underneath (the owner's close-ups of 2026-11-17; the
+// same disease JoeTV cured in its v2.0.8). The labels here
+// already own their focus rendering (tvCardBackground's cyan
+// ring, TVPillFace below), so the style layer must add
+// NOTHING: this style returns the label untouched, and
+// .focusEffectDisabled() kills the separate focus-effect
+// layer with it. The app's drawn faces are the only layer.
+struct TVCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+    }
+}
+
+struct TVCardButton: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(TVCardButtonStyle())
+            .focusEffectDisabled()
+    }
+}
+
+extension View {
+    /// The app's only button construction — see TVCardButton.
+    func tvCardButton() -> some View {
+        modifier(TVCardButton())
+    }
+}
+
+/// The pill face the league pills and the header buttons
+/// share: capsule fill (selected teal / idle white 10%) plus
+/// the app's own focus ring — an outset cyan stroke in the
+/// same weight as the cards' ring — replacing the platter
+/// the .card style used to lend them.
+struct TVPillFace: View {
+    let focused: Bool
+    let selected: Bool
+
+    var body: some View {
+        Capsule()
+            .fill(selected ? TVPalette.tealFill : Color.white.opacity(0.10))
+            .overlay(
+                Capsule()
+                    .stroke(TVPalette.cyan, lineWidth: focused ? 4 : 0)
+                    .padding(focused ? -4 : 0))
+    }
+}
+
 // MARK: - Crest / logo pieces
 
 struct TVCrestImage: View {

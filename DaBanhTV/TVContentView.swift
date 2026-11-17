@@ -225,8 +225,11 @@ struct TVContentView: View {
                     .font(.system(size: 24, weight: .medium))
                     .padding(.horizontal, 26)
                     .padding(.vertical, 12)
+                    .background(TVPillFace(focused: focusedKey == "hdr:refresh",
+                                           selected: false))
                 }
-                .buttonStyle(.card)
+                .tvCardButton()
+                .focused($focusedKey, equals: "hdr:refresh")
                 .disabled(store.isLoading)
                 // Manual link check (owner's request, 2026-11-13): fetch
                 // the newest list, re-probe every link from this TV, and
@@ -243,8 +246,11 @@ struct TVContentView: View {
                     .font(.system(size: 24, weight: .medium))
                     .padding(.horizontal, 26)
                     .padding(.vertical, 12)
+                    .background(TVPillFace(focused: focusedKey == "hdr:check",
+                                           selected: false))
                 }
-                .buttonStyle(.card)
+                .tvCardButton()
+                .focused($focusedKey, equals: "hdr:check")
                 .disabled(store.isLoading || store.isValidating)
                 if !enChannels.isEmpty {
                     tabPill(title: "🌍 EN · BLV Anh", value: Self.enTabValue)
@@ -264,10 +270,12 @@ struct TVContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 30)
                 .padding(.vertical, 14)
-                .background(Capsule().fill(selected ? TVPalette.tealFill : Color.white.opacity(0.10)))
+                .background(TVPillFace(focused: focusedKey == "pill:\(value)",
+                                       selected: selected))
                 .foregroundStyle(.white)
         }
-        .buttonStyle(.card)
+        .tvCardButton()
+        .focused($focusedKey, equals: "pill:\(value)")
     }
 
     private var emptyText: String {
@@ -383,7 +391,7 @@ struct TVContentView: View {
                                                 channel: ch,
                                                 focused: focusedKey == "en:" + ch.url)
                                         }
-                                        .buttonStyle(.card)
+                                        .tvCardButton()
                                         .focused($focusedKey, equals: "en:" + ch.url)
                                     }
                                 }
@@ -415,7 +423,8 @@ struct TVContentView: View {
     }
 
     private func fixtureHero(_ entry: TVFixtureEntry) -> some View {
-        Button {
+        let heroFocused = focusedKey == "hero:" + entry.id
+        return Button {
             play(entry)
         } label: {
             HStack(alignment: .center, spacing: 36) {
@@ -459,13 +468,16 @@ struct TVContentView: View {
                         startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay(
                         RoundedRectangle(cornerRadius: 26)
-                            .strokeBorder(Color.white.opacity(0.20), lineWidth: 1.5)))
+                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
+                                          lineWidth: heroFocused ? 4 : 1.5)))
         }
-        .buttonStyle(.card)
+        .tvCardButton()
+        .focused($focusedKey, equals: "hero:" + entry.id)
     }
 
     private func englishHero(_ ch: Channel) -> some View {
-        Button {
+        let heroFocused = focusedKey == "heroEN:" + ch.url
+        return Button {
             playRequest = PlayRequest(sources: [ch])
         } label: {
             HStack(alignment: .center, spacing: 36) {
@@ -519,9 +531,11 @@ struct TVContentView: View {
                         startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay(
                         RoundedRectangle(cornerRadius: 26)
-                            .strokeBorder(Color.white.opacity(0.20), lineWidth: 1.5)))
+                            .strokeBorder(heroFocused ? TVPalette.cyan : Color.white.opacity(0.20),
+                                          lineWidth: heroFocused ? 4 : 1.5)))
         }
-        .buttonStyle(.card)
+        .tvCardButton()
+        .focused($focusedKey, equals: "heroEN:" + ch.url)
     }
 
     private func heroBadge(_ ch: Channel) -> some View {
@@ -592,7 +606,7 @@ struct TVContentView: View {
                         } label: {
                             TVFeaturedCard(entry: entry, focused: focusedKey == "feat:" + entry.id)
                         }
-                        .buttonStyle(.card)
+                        .tvCardButton()
                         .focused($focusedKey, equals: "feat:" + entry.id)
                     }
                 }
@@ -615,7 +629,7 @@ struct TVContentView: View {
                         } label: {
                             TVMatchCard(entry: entry, focused: focusedKey == "rail:" + entry.id)
                         }
-                        .buttonStyle(.card)
+                        .tvCardButton()
                         .focused($focusedKey, equals: "rail:" + entry.id)
                     }
                 }
