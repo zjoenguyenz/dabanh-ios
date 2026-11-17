@@ -31,17 +31,19 @@ struct JoeSearchView: View {
     @State private var branchesFailed = 0
     @State private var firstPaintLogged = false
     @State private var pressStart = Date()
-    // v2.0.8 (Phase 6): the SAME facet model the browse
-    // layer uses — JoeBrowseFilter + JoeFilterBar, defined
-    // in JoeBrowse.swift (one filter model, two hosts; both
-    // types were already internal, not private, so no
-    // visibility change was needed). Facets combine with
-    // the name query by AND (see displayedResults); a
-    // facet-only query runs the model's apply() over
-    // PhimStore exactly as browse does. No new network:
-    // every input list is already loaded in the store.
-    @State private var filter = JoeBrowseFilter()
-    @FocusState private var chipFocus: String?
+    // v2.0.13 (Netflix-style search — owner order
+    // 2026-11-16, "Bỏ luôn cái lọc phim ra tùm lum thể
+    // loại đi"): the facet bar is GONE from this screen —
+    // no JoeFilterBar, no JoeBrowseFilter state here any
+    // more (both types stay in JoeBrowse.swift for the
+    // browse layer, untouched). The field drives the
+    // search directly: every edit re-arms a ~300 ms
+    // debounce (scheduleTypeAhead below); when it fires,
+    // the round for the current text runs — local hits
+    // paint first, provider branches merge behind them,
+    // never wiping the screen. The Tìm press / onSubmit
+    // are now just the immediate form of the same round.
+    @State private var typeAheadTask: Task<Void, Never>?
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
 
@@ -65,26 +67,14 @@ struct JoeSearchView: View {
                     Spacer()
                 }
             }
-            // v2.0.8 (Phase 6): the facet rows live INSIDE
-            // this screen, directly under the unchanged top
-            // row, as their own focus section — the shared
-            // JoeFilterBar over the shared JoeBrowseFilter,
-            // its visibility derived from the store's merged
-            // list exactly as browse derives it. The top row
-            // above and the results below keep their frame
-            // (owner ruling: "Khung search vẫn giữ y chang.
-            // Ko thay bố cục"). Focus travel field ↔ facets ↔
-            // results is section-to-section geometry (F1–F4);
-            // no handlers anywhere (Phase 1).
-            JoeFilterBar(filter: $filter,
-                         years: JoeBrowseFilter.yearBuckets(for: phim.merged),
-                         hasBefore2020: JoeBrowseFilter.hasBefore2020(phim.merged),
-                         showYear: JoeBrowseFilter.facetVisibility(for: phim.merged).year,
-                         showCountry: JoeBrowseFilter.facetVisibility(for: phim.merged).country,
-                         showType: JoeBrowseFilter.facetVisibility(for: phim.merged).type,
-                         showLang: JoeBrowseFilter.facetVisibility(for: phim.merged).lang,
-                         chipFocus: $chipFocus)
-                .focusSection()
+            // v2.0.13: NO filter bar on this screen — the
+            // Phase 6 facet rows that sat here are removed
+            // whole (owner order above). The field row above
+            // and the results below keep their frame, order
+            // and look; the bar's slot is simply empty, so
+            // focus travel is field row ↔ results, section
+            // to section geometrically, as it was around the
+            // bar. No handlers anywhere (Phase 1 stands).
             // CONVERGENCE (Team 7 D4, 2026-11-15): the
             // JoeSearchMoveTrap that wrapped this row (enabled:
             // topFocus != nil) is REMOVED — its flips rebuilt
@@ -133,13 +123,6 @@ struct JoeSearchView: View {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
                     .foregroundStyle(theme.meta)
-            } else if searched && !results.isEmpty && displayedResults.isEmpty {
-                // Phase 6: the name matched, but the facets
-                // filtered every hit away — a different state
-                // from "no such film" above (browse's wording).
-                Text("Không có phim nào khớp bộ lọc.")
-                    .font(.system(size: 29))
-                    .foregroundStyle(theme.meta)
             } else if searching {
                 // Results are already on screen; branches are
                 // still merging (the visible settle — soft
@@ -148,12 +131,6 @@ struct JoeSearchView: View {
                     .font(.system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
-            } else if !searched && filter.filtersActive && displayedResults.isEmpty {
-                // Phase 6, facet-only with no match in the
-                // loaded store lists.
-                Text("Không có phim nào khớp bộ lọc.")
-                    .font(.system(size: 29))
-                    .foregroundStyle(theme.meta)
             }
             // UI-6 defect D-19: the results carry the render's
             // heading naming the searched term — design D's
@@ -212,6 +189,12 @@ struct JoeSearchView: View {
                 .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
                 .focused($topFocus, equals: .field)
                 .onSubmit { runSearch() }
+                // v2.0.13: typing IS the search — every
+                // edit re-arms the debounced type-ahead
+                // round (scheduleTypeAhead). onSubmit and
+                // the Tìm button remain as the immediate,
+                // un-debounced form of the same round.
+                .onChange(of: query) { _, _ in scheduleTypeAhead() }
             Button {
                 runSearch()
             } label: {
@@ -229,8 +212,9 @@ struct JoeSearchView: View {
             .focused($topFocus, equals: .back)
         }
         // v2.0.5 (N1, pair k): the query row is a declared
-        // focus region; the facet rows (Phase 6) and the
-        // results area are regions of their own. v2.0.8
+        // focus region; the results area is a region of its
+        // own (the facet rows that sat between them until
+        // v2.0.13 were a third). v2.0.8
         // (Phase 1): movement between the regions is the
         // engine's geometric search — resultMove's declared
         // UP landing on this row's field is deleted.
@@ -243,12 +227,12 @@ struct JoeSearchView: View {
     /// in wall anatomy via the shared PosterCard).
     @ViewBuilder
     private var resultsArea: some View {
-        if theme.id == .sourceBoard && !displayedResults.isEmpty {
+        if theme.id == .sourceBoard && !results.isEmpty {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     ForEach([Providers.KK, Providers.F4K, Providers.VS, Providers.TP],
                             id: \.self) { code in
-                        let list = displayedResults.filter { $0.provider == code }
+                        let list = results.filter { $0.provider == code }
                         if !list.isEmpty {
                             Rail(title: "\(Providers.displayName(code)) — \(list.count) kết quả") {
                                 ForEach(list) { movie in
@@ -262,13 +246,16 @@ struct JoeSearchView: View {
             }
             // v2.0.12 (search overlap fix): this container
             // deliberately CLIPS at its frame — no
-            // .scrollClipDisabled() here. The facet bar is a
-            // PINNED sibling directly above this ScrollView
-            // in the body's VStack; with clipping disabled,
+            // .scrollClipDisabled() here. The status line
+            // and the results heading are PINNED siblings
+            // directly above this ScrollView in the body's
+            // VStack (the facet bar that sat there until
+            // v2.0.13 was one too); with clipping disabled,
             // results scrolling past the frame's top edge
-            // kept rendering into the bar's space, painting
-            // posters and provider headers over the chips
-            // (owner's 2.0.11 clip). The home's outer scroll
+            // kept rendering into their space, painting
+            // posters and provider headers over them
+            // (owner's 2.0.11 clip, shot when the bar was
+            // the victim). The home's outer scroll
             // (JoePhimHome.railHome) ships clipped with the
             // same cards; the rails' own inner horizontal
             // scrolls keep their clip-disabled construction
@@ -286,7 +273,7 @@ struct JoeSearchView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
                                          count: 6),
                           alignment: .leading, spacing: 40) {
-                    ForEach(displayedResults) { movie in
+                    ForEach(results) { movie in
                         resultCard(movie)
                     }
                 }
@@ -300,9 +287,10 @@ struct JoeSearchView: View {
             // v2.0.12 (search overlap fix): CLIPS at its
             // frame, same as the source-board branch above —
             // no .scrollClipDisabled() on this container.
-            // The pinned facet bar sits directly above it in
-            // the stack; unclipped grid content scrolling
-            // past the top edge rendered over the chips.
+            // The pinned status/heading lines sit directly
+            // above it in the stack; unclipped grid content
+            // scrolling past the top edge rendered over
+            // them.
             // The grid's own edge clearances (vertical 8,
             // horizontal 8 under D — past the 6 pt outset
             // ring) are unchanged, so a focused card's ring
@@ -310,55 +298,13 @@ struct JoeSearchView: View {
         }
     }
 
-    /// What the results area renders (Phase 6): the name
-    /// query AND the facets, combined.
-    ///  - After (or during) a name round: the round's pool
-    ///    run through the facet predicates (facetFiltered).
-    ///  - With no name round yet and facets active: the
-    ///    facet model's own apply() over PhimStore — the
-    ///    browse list, facet-only. (A typed-but-unsearched
-    ///    name does not suppress this; the name joins when
-    ///    Tìm runs the round.)
-    ///  - Otherwise: the raw pool (empty before any search).
-    private var displayedResults: [Movie] {
-        if searched || roundActive || !results.isEmpty {
-            return facetFiltered(results)
-        }
-        if filter.filtersActive {
-            return filter.apply(phim: phim)
-        }
-        return results
-    }
-
-    /// The facet predicates over an arbitrary pool (the name
-    /// round's results), mirroring JoeBrowseFilter.apply's
-    /// base-set logic: the genre facet and "Chiếu rạp"
-    /// intersect by movie id with the store lists apply()
-    /// would have used as its base; every other facet is the
-    /// model's own static predicate; the model's sort runs
-    /// last. Same missing-field rule as browse (an item
-    /// missing the faceted field never matches a
-    /// non-"Tất cả" selection).
-    private func facetFiltered(_ input: [Movie]) -> [Movie] {
-        var base = input
-        if filter.type == .chieuRap, let slug = filter.genre {
-            let ids = Set((phim.genreLists[slug] ?? []).map { $0.id })
-            base = base.filter { ids.contains($0.id) }
-        } else if filter.type == .chieuRap {
-            let ids = Set(phim.chieuRap.map { $0.id })
-            base = base.filter { ids.contains($0.id) }
-        } else if let slug = filter.genre {
-            let ids = Set((phim.genreLists[slug] ?? []).map { $0.id })
-            base = base.filter { ids.contains($0.id) }
-        }
-        let filtered = base.filter { m in
-            JoeBrowseFilter.matchesYear(m, filter.year)
-                && JoeBrowseFilter.matchesCountry(m, filter.country)
-                && JoeBrowseFilter.matchesType(m, filter.type)
-                && JoeBrowseFilter.matchesLang(m, filter.lang)
-        }
-        return JoeBrowseFilter.sorted(filtered, by: filter.sort)
-    }
+    // v2.0.13: the results area renders `results` — the
+    // round's render pool — directly. The Phase 6 facet
+    // layer that used to sit between the pool and the grid
+    // (displayedResults + facetFiltered over the shared
+    // JoeBrowseFilter) is DELETED with the bar it served;
+    // nothing filters or re-sorts a round's results on
+    // this screen any more.
 
     private func resultCard(_ movie: Movie) -> some View {
         Button { nav.movie = MovieRoute(
@@ -381,9 +327,9 @@ struct JoeSearchView: View {
     // v2.0.8 (Phase 1): resultMove is DELETED — result
     // cards are plain buttons in the results focus section;
     // the engine moves within the grid geometrically and UP
-    // out of it (to the facet rows / query row, from any
-    // column) the same way. No coded no-op directions remain
-    // in this view.
+    // out of it (to the query row, from any column) the
+    // same way. No coded no-op directions remain in this
+    // view.
 
     // MARK: - Search round (v2.0.1 — Android FIX2 + FIX3 parity)
     //
@@ -411,18 +357,71 @@ struct JoeSearchView: View {
     //     never the no-match line.
     // JOESEARCH lines ride the house signpost log (LoadSignpost)
     // with per-branch timings and the round's first paint.
+    //
+    // v2.0.13: rounds now fire from the keyboard as well —
+    // scheduleTypeAhead() below debounces field edits by
+    // ~300 ms and runs the round for the settled text, so
+    // the grid follows the typing (local paint per round,
+    // branches merging behind). runSearch itself is
+    // unchanged: same local-first step, same fan-out, same
+    // settles, same snapshot rule. A new round supersedes
+    // the in-flight one by roundID, so a stale term's
+    // branches can never land over a newer term's grid.
+
+    /// The debounced type-ahead driver (v2.0.13). Every
+    /// field edit cancels the pending firing and re-arms
+    /// it; when the ~300 ms elapse with the text unchanged,
+    /// the round for that text runs. An emptied field does
+    /// NOT run a round — it resets the screen to its
+    /// un-searched state (resetSearch), superseding any
+    /// in-flight round so a late branch cannot repaint a
+    /// screen the owner has already cleared.
+    private func scheduleTypeAhead() {
+        typeAheadTask?.cancel()
+        let text = query
+        typeAheadTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            // Belt and braces beside the cancellation: a
+            // firing whose text is no longer the field's
+            // stands down (a newer edit re-armed its own).
+            guard query == text else { return }
+            if text.trimmingCharacters(in: .whitespaces).isEmpty {
+                resetSearch()
+            } else {
+                runSearch()
+            }
+        }
+    }
+
+    /// The field was cleared: back to the pre-search state.
+    /// The roundID bump stands down the old round's branch
+    /// tasks and both settle tasks (all guard on it).
+    private func resetSearch() {
+        roundID += 1
+        roundActive = false
+        searching = false
+        searched = false
+        searchFailed = false
+        searchedQuery = ""
+        localPool = []
+        serverPool = []
+        results = []
+    }
 
     private func runSearch() {
+        // An immediate round (Tìm / onSubmit, or the
+        // type-ahead firing itself) supersedes any pending
+        // debounce — its firing must not re-run this round
+        // a second time for the same text.
+        typeAheadTask?.cancel()
         let kw = query.trimmingCharacters(in: .whitespaces)
         guard !kw.isEmpty else { return }
         searchedQuery = kw
         searchFailed = false
 
         // Snapshot restore: a clean earlier round for this
-        // name replays instantly with zero network. (Facet
-        // state is not part of the key — the facets re-apply
-        // at render over the restored pool via
-        // displayedResults, so there is nothing to key.)
+        // name replays instantly with zero network.
         if let snap = JoeSearchSession.shared.snapshot(for: kw) {
             roundID += 1
             roundActive = false
@@ -550,7 +549,7 @@ struct JoeSearchView: View {
 
     /// Append `extra` to `base`, dropping later duplicates of
     /// an already-kept film (provider|slug, first copy wins —
-    /// store copies carry the richer facet fields).
+    /// store copies carry the richer metadata).
     private static func mergePool(_ base: [Movie], _ extra: [Movie]) -> [Movie] {
         var seen = Set(base.map { $0.id })
         var out = base

@@ -49,8 +49,10 @@ import UIKit
 /// The bar below is therefore built against KSPlayerLayer
 /// directly, in this file, mirroring the AVPlayer transport:
 /// play/pause, a focusable seek bar with current/total time,
-/// subtitle selection (the layer's own SubtitleModel, Off
-/// included) and audio-track selection (the documented
+/// subtitle selection (a host-owned SubtitleModel fed from
+/// the player's subtitle data source — the pattern of the
+/// library's own player views — Off included) and
+/// audio-track selection (the documented
 /// tracks(mediaType:) / select(track:) API). It auto-hides
 /// while playing, exactly like the system bar, and any remote
 /// press brings it back; Down moves focus into it, Up leaves
@@ -155,9 +157,44 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private var pickerKind: PickerKind = .subtitles
     /// The subtitle rows' infos, cached at picker opening so
     /// a button's tag indexes the same array the selection
-    /// writes back into the layer's subtitle model.
+    /// writes back into the host's subtitle model.
     private var pickerSubtitleInfos: [any SubtitleInfo] = []
-    private var pickerAudioTracks: [MediaTrack] = []
+    private var pickerAudioTracks: [MediaPlayerTrack] = []
+    /// The subtitle selection model, owned by this host.
+    /// KSPlayerLayer has NO subtitle model of its own (the
+    /// first 2.0.12 draft wrote against `layer.subtitleModel`
+    /// and CI run #38 rejected it): in KSPlayer 2.3.4 the
+    /// model belongs to the player VIEWS — VideoPlayerView's
+    /// srtControl, KSVideoPlayer.Coordinator's subtitleModel —
+    /// and the host here mirrors them: the model is fed from
+    /// the player's own subtitle data source (KSMEPlayer is
+    /// its own source; its infos are the file's embedded
+    /// subtitle tracks) and its parts are painted by the
+    /// render pair below.
+    private let subtitleModel = SubtitleModel()
+    /// The player instance the model was fed for. The layer
+    /// can swap its player in place (an error finish rebuilds
+    /// it from the second player type), and addSubtitle
+    /// APPENDS — feeding one source twice would duplicate
+    /// every picker row, so the feed is once per instance.
+    private var subtitleFedPlayerID: ObjectIdentifier?
+    /// 0.25 s subtitle paint timer: the model's parts are
+    /// pulled against the live playhead — VideoPlayerView
+    /// does the same pull inside the layer's currentTime
+    /// delegate, but that delegate here is the director's
+    /// 5 s tick and stays untouched, so the pull rides its
+    /// own timer, born with the model feed.
+    private var subtitleTimer: Timer?
+    /// Subtitle render pair, mirroring the library's
+    /// subtitleBackView + subtitleLabel: an image view for
+    /// image-based parts (PGS / DVB) carrying a centred
+    /// label for text parts. Built lazily at the model feed
+    /// and inserted BELOW the controls view, so the bar
+    /// never fights it for the screen — the strip simply
+    /// lifts while the bar is up.
+    private let subtitleImageView = UIImageView()
+    private let subtitleLabel = UILabel()
+    private var subtitleViewsBuilt = false
 
     override func loadView() {
         view = KSPlayerHostRootView()
@@ -581,8 +618,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// lists. Called at readyToPlay and after every selection:
     /// the audio button exists only when the file carries a
     /// choice (≥2 tracks, the system player's rule), the
-    /// subtitle button only when the layer's subtitle model
-    /// holds at least one embedded/external info.
+    /// subtitle button only when the host's subtitle model
+    /// holds at least one embedded info.
     private func refreshTrackButtons() {
         guard controlsBuilt, let layer else { return }
         let audioTracks = layer.player.tracks(mediaType: .audio)
@@ -592,9 +629,9 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         } else {
             audioButton.setTitle("Âm thanh", for: .normal)
         }
-        let model = layer.subtitleModel
-        subtitleButton.isHidden = model.subtitleInfos.isEmpty
-        if let selected = model.selectedSubtitleInfo {
+        prepareSubtitleModel(layer: layer)
+        subtitleButton.isHidden = subtitleModel.subtitleInfos.isEmpty
+        if let selected = subtitleModel.selectedSubtitleInfo {
             subtitleButton.setTitle("Phụ đề: \(selected.name)", for: .normal)
         } else {
             subtitleButton.setTitle("Phụ đề: Tắt", for: .normal)
@@ -602,7 +639,105 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         layoutControls()
     }
 
-    private static func trackLabel(_ track: MediaTrack) -> String {
+    /// Feeds the host's SubtitleModel from the player's own
+    /// subtitle data source — the library's readyToPlay
+    /// pattern, verbatim in shape (VideoPlayerView and
+    /// KSVideoPlayer.Coordinator both do exactly this): the
+    /// feed is delayed 1 s because embedded subtitles carried
+    /// inside the video stream can land after readyToPlay,
+    /// and the default-enabled embed is auto-selected when
+    /// the options ask for it (KSOptions' default is yes).
+    /// A player with no source (the AVPlayer engine returns
+    /// nil) simply never feeds, and the button stays hidden.
+    private func prepareSubtitleModel(layer: KSPlayerLayer) {
+        let playerID = ObjectIdentifier(layer.player as AnyObject)
+        guard subtitleFedPlayerID != playerID,
+              let dataSouce = layer.player.subtitleDataSouce
+        else { return }
+        subtitleFedPlayerID = playerID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, let layer = self.layer,
+                  ObjectIdentifier(layer.player as AnyObject) == playerID
+            else { return }
+            self.subtitleModel.addSubtitle(dataSouce: dataSouce)
+            if self.subtitleModel.selectedSubtitleInfo == nil,
+               layer.options.autoSelectEmbedSubtitle {
+                self.subtitleModel.selectedSubtitleInfo =
+                    self.subtitleModel.subtitleInfos.first { $0.isEnabled }
+            }
+            self.buildSubtitleViewsIfNeeded()
+            self.startSubtitleTimerIfNeeded()
+            self.refreshTrackButtons()
+        }
+    }
+
+    private func buildSubtitleViewsIfNeeded() {
+        guard !subtitleViewsBuilt else { return }
+        subtitleViewsBuilt = true
+        subtitleImageView.contentMode = .scaleAspectFit
+        subtitleImageView.isHidden = true
+        subtitleLabel.numberOfLines = 0
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.font = SubtitleModel.textFont
+        subtitleLabel.textColor = UIColor(SubtitleModel.textColor)
+        subtitleLabel.layer.shadowColor = UIColor.black.cgColor
+        subtitleLabel.layer.shadowOffset = CGSize(width: 1, height: 1)
+        subtitleLabel.layer.shadowOpacity = 0.9
+        subtitleLabel.layer.shadowRadius = 1
+        subtitleImageView.addSubview(subtitleLabel)
+        // Above the picture, below the transport controls.
+        view.insertSubview(subtitleImageView, belowSubview: controlsView)
+        layoutSubtitleViews()
+    }
+
+    private func layoutSubtitleViews() {
+        guard subtitleViewsBuilt else { return }
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        // The strip lifts clear of the bar while the bar is
+        // up (the system player's courtesy); otherwise it
+        // rests near the bottom edge, the library's anchor
+        // scaled to this host's 36 pt bottom margin.
+        let lift: CGFloat = controlsVisible ? 168 + 36 + 16 : 44
+        let height: CGFloat = 150
+        subtitleImageView.frame = CGRect(x: 120,
+                                         y: bounds.height - lift - height,
+                                         width: bounds.width - 240,
+                                         height: height)
+        subtitleLabel.frame = subtitleImageView.bounds
+    }
+
+    private func startSubtitleTimerIfNeeded() {
+        guard subtitleTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.updateSubtitles()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        subtitleTimer = timer
+    }
+
+    /// Paints the model's current parts — text into the
+    /// label, an image part (PGS / DVB) into the image view —
+    /// VideoPlayerView's update, shape for shape: it
+    /// repaints only when the model reports the parts
+    /// changed, and clears both halves when no part is due.
+    private func updateSubtitles() {
+        guard subtitleViewsBuilt, let layer else { return }
+        if subtitleModel.subtitle(currentTime: layer.player.currentPlaybackTime) {
+            if let part = subtitleModel.parts.first {
+                subtitleImageView.image = part.image
+                subtitleLabel.attributedText = part.text
+                subtitleImageView.isHidden = false
+            } else {
+                subtitleImageView.image = nil
+                subtitleLabel.attributedText = nil
+                subtitleImageView.isHidden = true
+            }
+        }
+        layoutSubtitleViews()
+    }
+
+    private static func trackLabel(_ track: MediaPlayerTrack) -> String {
         var parts: [String] = []
         if let language = track.language, !language.isEmpty {
             parts.append(language)
@@ -636,15 +771,11 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         switch kind {
         case .subtitles:
             pickerTitleLabel.text = "Phụ đề"
-            let model = layer.subtitleModel
-            pickerSubtitleInfos = model.subtitleInfos
+            pickerSubtitleInfos = subtitleModel.subtitleInfos
             pickerAudioTracks = []
-            addPickerButton(title: "Tắt", checked: model.selectedSubtitleInfo == nil, tag: -1)
+            addPickerButton(title: "Tắt", checked: subtitleModel.selectedSubtitleInfo == nil, tag: -1)
             for (index, info) in pickerSubtitleInfos.enumerated() {
-                var checked = false
-                if let selected = model.selectedSubtitleInfo {
-                    checked = selected.name == info.name
-                }
+                let checked = subtitleModel.selectedSubtitleInfo?.subtitleID == info.subtitleID
                 addPickerButton(title: info.name.isEmpty ? "Phụ đề \(index + 1)" : info.name,
                                 checked: checked, tag: index)
             }
@@ -693,9 +824,9 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         switch pickerKind {
         case .subtitles:
             if sender.tag < 0 {
-                layer.subtitleModel.selectedSubtitleInfo = nil
+                subtitleModel.selectedSubtitleInfo = nil
             } else if pickerSubtitleInfos.indices.contains(sender.tag) {
-                layer.subtitleModel.selectedSubtitleInfo = pickerSubtitleInfos[sender.tag]
+                subtitleModel.selectedSubtitleInfo = pickerSubtitleInfos[sender.tag]
             }
         case .audio:
             if pickerAudioTracks.indices.contains(sender.tag) {
@@ -717,6 +848,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         pickerAudioTracks = []
         setNeedsFocusUpdate()
         showControls()
+    }
+
+    deinit {
+        // The subtitle paint timer is the one timer teardown
+        // does not own — it is born with the subtitle model
+        // feed, not with the view — so it dies here, with
+        // the host itself.
+        subtitleTimer?.invalidate()
     }
 
     // MARK: - KSPlayerLayerDelegate
