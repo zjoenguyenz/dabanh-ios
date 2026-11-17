@@ -45,6 +45,7 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           printf 'enum TMDBBundledKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTV/TMDBKey.swift
+          printf 'enum TMDBShelfKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTVTopShelf/TMDBShelfKey.swift
       - name: Inject bundled tokens
         env:
           RD_TOKEN: ${{ secrets.RD_TOKEN }}
