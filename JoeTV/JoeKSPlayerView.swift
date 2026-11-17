@@ -389,10 +389,17 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                 handled = true
             case .leftArrow:
                 showControls()
+                // v2.0.18: with focus inside the bar (or the
+                // picker open), arrows belong to focus
+                // movement; a press that still bubbles up to
+                // the host is an edge-of-row press and must
+                // never become a seek under the user's fingers.
+                if pickerIsOpen || focusInControls { break }
                 seekBy(-30)
                 handled = true
             case .rightArrow:
                 showControls()
+                if pickerIsOpen || focusInControls { break }
                 seekBy(30)
                 handled = true
             case .menu:
@@ -583,8 +590,23 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 
     // MARK: - Transport bar: show / hide
 
+    /// v2.0.18: flip the root view's focus eligibility and
+    /// ask for the update that relocates focus accordingly —
+    /// into the bar when it wakes (the host's preferred
+    /// environment is the play button), back to the root when
+    /// the bar hides (the preferred environment is the root).
+    private func setRootAcceptsFocus(_ on: Bool) {
+        guard let root = view as? KSPlayerHostRootView,
+              root.acceptsFocus != on else { return }
+        root.acceptsFocus = on
+        setNeedsFocusUpdate()
+    }
+
     private func showControls() {
         guard controlsBuilt else { return }
+        // v2.0.18: the bar being up means the root must not
+        // hold focus (see KSPlayerHostRootView.acceptsFocus).
+        setRootAcceptsFocus(false)
         if !controlsVisible {
             controlsVisible = true
             controlsView.isHidden = false
@@ -618,6 +640,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
               let layer, layer.player.isPlaying else { return }
         controlsVisible = false
         controlsView.isHidden = true
+        // v2.0.18: the bar is gone — the root takes focus back.
+        setRootAcceptsFocus(true)
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
@@ -1182,7 +1206,21 @@ private final class JoeExternalSubtitleDataSouce: SubtitleDataSouce {
 }
 
 private final class KSPlayerHostRootView: UIView {
-    override var canBecomeFocused: Bool { true }
+    /// v2.0.18: DYNAMIC, not a constant. While the transport
+    /// bar (or the picker) is up, the root REFUSES focus: a
+    /// focus update then has no eligible incumbent and MUST
+    /// relocate, and only relocation consults the host's
+    /// preferredFocusEnvironments. That was the 2.0.17 fix's
+    /// missing half — preferred environments guide focus
+    /// ENTERING an environment (or being evicted from an
+    /// ineligible view); they cannot pull focus off an
+    /// eligible full-screen view that already holds it, so
+    /// focus stayed glued to this root, its full-screen frame
+    /// offered the focus engine no directional exit, and
+    /// every arrow fell through to the host's seek handler —
+    /// the owner's "không cho mình bấm qua để chỉnh".
+    var acceptsFocus = true
+    override var canBecomeFocused: Bool { acceptsFocus }
 }
 
 /// The transport bar's seek bar (v2.0.12). UISlider cannot
