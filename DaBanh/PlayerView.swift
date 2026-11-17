@@ -1,40 +1,44 @@
 import AVFoundation
 import AVKit
+import MediaPlayer
 import SwiftUI
 import UIKit
 
-/// Player page: the system player is EMBEDDED full-bleed — edge-to-edge
-/// under a small floating overlay (close button + title capsule),
-/// reserving no layout space, so the picture is as full-screen as the
-/// modal design was.
+/// Player page (v1.16): a CUSTOM player surface — an AVPlayerLayer
+/// with the app's own control layer — embedded full-bleed, exactly
+/// like the JTV app's player. One chrome only: close, title,
+/// play/pause, AirPlay, PiP and the fit/fill toggle all live in one
+/// control layer that fades together after 3.5 s.
 ///
-/// Why not modal (the v1.2 design): when PiP starts, iOS dismisses a
-/// modally presented AVPlayerViewController; the host's viewDidAppear
-/// then looks exactly like "user closed the player", the whole page was
-/// torn down and the PiP stream died with it (owner's clip, 2026-11-12:
-/// PiP tap -> ejected to the portrait channel list). Embedded, PiP opens
-/// in place and nothing else moves.
+/// Why not the system player (the design up to v1.15): the embedded
+/// AVPlayerViewController draws its OWN top bar (close + title)
+/// next to the app's floating chrome, so every tap showed two
+/// close buttons side by side — the owner called it an eyesore and
+/// ordered the surface unified with JTV's. AVKit also could not be
+/// told to hide just its top bar.
 ///
-/// Pinch-to-fill: a two-finger pinch toggles the controller's
-/// videoGravity between resizeAspect (fit) and resizeAspectFill (fill /
-/// "tràn viền"), which the owner asked for explicitly.
+/// Why embedded, not modal (the v1.2 lesson, still in force): when
+/// PiP starts, iOS dismisses a modally presented player; the host's
+/// viewDidAppear then looks exactly like "user closed the player"
+/// and the whole page was torn down, killing the PiP stream
+/// (owner's clip, 2026-11-12). Embedded, PiP opens in place.
 ///
-/// Sources + fallback (2026-11-13, synced with the tvOS player): the
-/// page receives every source carrying the same match; when a stream
-/// fails it advances to the next source automatically, and only when
-/// all of them fail does it settle on a "no signal" slate.
+/// Pinch-to-fill: a two-finger pinch toggles the layer's
+/// videoGravity between resizeAspect (fit) and resizeAspectFill
+/// (fill / "tràn viền"), as the owner asked for explicitly.
+///
+/// Sources + fallback (2026-11-13, synced with the tvOS player):
+/// the page receives every source carrying the same match; when a
+/// stream fails it advances to the next source automatically, and
+/// only when all of them fail does it settle on a "no signal"
+/// slate (which keeps its own always-visible close button — there
+/// is no video to keep clean there).
 struct PlayerView: View {
     let sources: [Channel]
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     @State private var exhausted = false
     @State private var switching = true
-    /// The floating chrome (close + title) fades on the same
-    /// rhythm as the system player's controls (v1.15): before,
-    /// it floated permanently, so whenever AVKit's own top bar
-    /// appeared the two close buttons sat side by side.
-    @State private var chromeVisible = true
-    @State private var hideWork: DispatchWorkItem?
 
     private var current: Channel? {
         sources.indices.contains(index) ? sources[index] : nil
@@ -46,8 +50,9 @@ struct PlayerView: View {
 
             if exhausted {
                 noSignal
+                closeButton
             } else if let channel = current, channel.streamURL != nil {
-                PlayerControllerView(channel: channel, onFail: advance, onReady: { switching = false })
+                LivePlayerSurface(channel: channel, onFail: advance, onReady: { switching = false }, onClose: { dismiss() })
                     .id(index)
                     .ignoresSafeArea()
                 if switching {
@@ -71,40 +76,8 @@ struct PlayerView: View {
                 // An unparseable URL counts as a failed source.
                 Color.clear.onAppear { advance() }
             }
-
-            // Floating chrome: floats OVER the video, reserves nothing.
-            HStack(spacing: 10) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.black.opacity(0.45), in: Circle())
-                }
-                .accessibilityLabel("Đóng")
-
-                // Display title only: the cleaned form (no kickoff
-                // stamp / markers), same as the match screens.
-                Text(MatchTitle.clean(current?.title ?? ""))
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.45), in: Capsule())
-            }
-            .padding(.leading, 14)
-            .padding(.top, 10)
-            .opacity(exhausted || chromeVisible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.25), value: chromeVisible)
-            .allowsHitTesting(exhausted || chromeVisible)
         }
-        .simultaneousGesture(TapGesture().onEnded { showChrome() })
-        .onChange(of: index) { _ in showChrome() }
         .onAppear {
-            showChrome()
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
         }
         .onDisappear {
@@ -112,15 +85,20 @@ struct PlayerView: View {
         }
     }
 
-    /// Show the floating chrome and restart its 3.5 s fade —
-    /// the same auto-hide constant as the JTV player's surfaces,
-    /// so both apps feel identical.
-    private func showChrome() {
-        chromeVisible = true
-        hideWork?.cancel()
-        let work = DispatchWorkItem { chromeVisible = false }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: work)
+    /// The slate's own exit (no player surface exists there).
+    private var closeButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(Color.black.opacity(0.45), in: Circle())
+        }
+        .accessibilityLabel("Đóng")
+        .padding(.leading, 14)
+        .padding(.top, 10)
     }
 
     private func advance() {
@@ -148,58 +126,29 @@ struct PlayerView: View {
     }
 }
 
-/// SwiftUI wrapper around an embedded AVPlayerViewController with PiP
-/// enabled and a pinch recognizer for fit/fill switching. Plays
-/// immediately on appear; pauses and releases on dismantle. The asset
-/// carries exactly the headers the entry itself declared (#EXTVLCOPT).
-struct PlayerControllerView: UIViewControllerRepresentable {
+/// SwiftUI wrapper around the custom live-player surface. Plays
+/// immediately on appear; pauses and releases on dismantle. The
+/// asset carries exactly the headers the entry itself declared
+/// (#EXTVLCOPT).
+struct LivePlayerSurface: UIViewControllerRepresentable {
     let channel: Channel
     let onFail: () -> Void
     let onReady: () -> Void
+    let onClose: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onFail: onFail, onReady: onReady) }
-
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        // Audio session for background / PiP playback.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-        try? AVAudioSession.sharedInstance().setActive(true)
-
-        let item = AVPlayerItem(asset: Self.asset(for: channel))
-        let titleItem = AVMutableMetadataItem()
-        titleItem.identifier = AVMetadataIdentifier.commonIdentifierTitle
-        titleItem.value = channel.title as NSString
-        titleItem.extendedLanguageTag = "und"
-        item.externalMetadata = [titleItem]
-
-        let player = AVPlayer(playerItem: item)
-        player.allowsExternalPlayback = true
-
-        let controller = AVPlayerViewController()
-        controller.player = player
-        controller.allowsPictureInPicturePlayback = true
-        controller.canStartPictureInPictureAutomaticallyFromInline = true
-        controller.videoGravity = .resizeAspect
-
-        let pinch = UIPinchGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handlePinch(_:))
-        )
-        pinch.delegate = context.coordinator
-        controller.view.addGestureRecognizer(pinch)
-
-        context.coordinator.controller = controller
-        context.coordinator.observe(item)
-        player.play()
+    func makeUIViewController(context: Context) -> LivePlayerViewController {
+        let controller = LivePlayerViewController()
+        controller.channel = channel
+        controller.onFail = onFail
+        controller.onReady = onReady
+        controller.onClose = onClose
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: LivePlayerViewController, context: Context) {}
 
-    static func dismantleUIViewController(_ uiViewController: AVPlayerViewController, coordinator: Coordinator) {
-        coordinator.invalidate()
-        uiViewController.player?.pause()
-        uiViewController.player = nil
-        coordinator.controller = nil
+    static func dismantleUIViewController(_ uiViewController: LivePlayerViewController, coordinator: ()) {
+        uiViewController.teardown()
     }
 
     static func asset(for channel: Channel) -> AVURLAsset {
@@ -210,73 +159,333 @@ struct PlayerControllerView: UIViewControllerRepresentable {
         if headers.isEmpty { return AVURLAsset(url: url) }
         return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
+}
 
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        weak var controller: AVPlayerViewController?
-        private let onFail: () -> Void
-        private let onReady: () -> Void
-        private var statusToken: NSKeyValueObservation?
-        private var failToken: NSObjectProtocol?
-        private var fired = false
+/// The custom live surface: AVPlayerLayer + one fading control
+/// layer (close + title on top; play/pause centred; LIVE badge,
+/// AirPlay, PiP and fit/fill along the bottom). Mirrors the JTV
+/// player's surface so both of the owner's apps feel identical.
+final class LivePlayerViewController: UIViewController {
+    var channel: Channel?
+    var onFail: (() -> Void)?
+    var onReady: (() -> Void)?
+    var onClose: (() -> Void)?
 
-        init(onFail: @escaping () -> Void, onReady: @escaping () -> Void) {
-            self.onFail = onFail
-            self.onReady = onReady
+    private let videoView = PlayerLayerView()
+    private let controlsView = UIView()
+    private let closeButton = UIButton(type: .system)
+    private let titleLabel = UILabel()
+    private let playPauseButton = UIButton(type: .system)
+    private let spinner = UIActivityIndicatorView(style: .large)
+    private var pipButton = UIButton(type: .system)
+    private let fillButton = UIButton(type: .system)
+    private let liveBadge = UILabel()
+
+    private var player: AVPlayer?
+    private var pipController: AVPictureInPictureController?
+    private var statusToken: NSKeyValueObservation?
+    private var timeControlToken: NSKeyValueObservation?
+    private var failToken: NSObjectProtocol?
+    private var firedFail = false
+    private var firedReady = false
+    private var hideTimer: Timer?
+    private var controlsVisible = true
+    private var torn = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        guard let channel else { return }
+
+        // Audio session for background / PiP playback.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        let item = AVPlayerItem(asset: LivePlayerSurface.asset(for: channel))
+        let titleItem = AVMutableMetadataItem()
+        titleItem.identifier = AVMetadataIdentifier.commonIdentifierTitle
+        titleItem.value = channel.title as NSString
+        titleItem.extendedLanguageTag = "und"
+        item.externalMetadata = [titleItem]
+
+        let player = AVPlayer(playerItem: item)
+        player.allowsExternalPlayback = true
+        self.player = player
+        videoView.playerLayer.player = player
+        videoView.playerLayer.videoGravity = .resizeAspect
+        videoView.frame = view.bounds
+        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(videoView)
+
+        buildControls(channel: channel)
+        observe(item: item, player: player)
+        setupRemoteCommands(channel: channel)
+        player.play()
+        scheduleControlsHide()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        videoView.frame = view.bounds
+        controlsView.frame = view.bounds
+    }
+
+    // MARK: - Controls
+
+    private func buildControls(channel: Channel) {
+        controlsView.frame = view.bounds
+        controlsView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(controlsView)
+
+        func roundButton(_ button: UIButton, _ systemName: String, _ action: Selector) {
+            button.setImage(UIImage(systemName: systemName), for: .normal)
+            button.tintColor = .white
+            button.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+            button.layer.cornerRadius = 20
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 40).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
+            button.addTarget(self, action: action, for: .touchUpInside)
         }
 
-        func observe(_ item: AVPlayerItem) {
-            statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-                guard let self else { return }
-                switch item.status {
-                case .readyToPlay:
-                    DispatchQueue.main.async { self.onReady() }
-                case .failed:
-                    fireOnce()
-                default:
-                    break
-                }
-            }
-            failToken = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-            ) { [weak self] _ in
-                self?.fireOnce()
-            }
-        }
+        roundButton(closeButton, "xmark", #selector(closeTapped))
+        controlsView.addSubview(closeButton)
 
-        private func fireOnce() {
-            guard !fired else { return }
-            fired = true
-            DispatchQueue.main.async { self.onFail() }
-        }
+        titleLabel.text = MatchTitle.clean(channel.title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.textColor = .white
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        controlsView.addSubview(titleLabel)
 
-        func invalidate() {
-            statusToken?.invalidate()
-            statusToken = nil
-            if let failToken {
-                NotificationCenter.default.removeObserver(failToken)
-                self.failToken = nil
-            }
-        }
+        playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+        playPauseButton.tintColor = .white
+        playPauseButton.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        playPauseButton.layer.cornerRadius = 36
+        playPauseButton.translatesAutoresizingMaskIntoConstraints = false
+        playPauseButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        playPauseButton.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        playPauseButton.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
+        controlsView.addSubview(playPauseButton)
 
-        /// Spread (scale > 1) fills the screen, pinch (scale < 1) returns
-        /// to fit. Thresholded so small movements don't flap the mode,
-        /// and latched per gesture via the recognizer's state.
-        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-            guard let controller, gesture.state == .changed || gesture.state == .ended else { return }
-            if gesture.scale > 1.12, controller.videoGravity != .resizeAspectFill {
-                controller.videoGravity = .resizeAspectFill
-            } else if gesture.scale < 0.88, controller.videoGravity != .resizeAspect {
-                controller.videoGravity = .resizeAspect
-            }
-        }
+        liveBadge.text = "● TRỰC TIẾP"
+        liveBadge.font = .systemFont(ofSize: 11, weight: .bold)
+        liveBadge.textColor = .systemRed
+        liveBadge.translatesAutoresizingMaskIntoConstraints = false
 
-        /// Let the pinch coexist with the player's own gestures
-        /// (scrubbing, double-tap, its fullscreen pinch handling).
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
+        let routePicker = AVRoutePickerView()
+        routePicker.prioritizesVideoDevices = true
+        routePicker.tintColor = .white
+        routePicker.activeTintColor = .systemOrange
+        routePicker.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        routePicker.layer.cornerRadius = 20
+        routePicker.translatesAutoresizingMaskIntoConstraints = false
+        routePicker.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        routePicker.heightAnchor.constraint(equalToConstant: 40).isActive = true
+
+        roundButton(pipButton, "pip.enter", #selector(togglePiP))
+        pipButton.isHidden = !AVPictureInPictureController.isPictureInPictureSupported()
+
+        roundButton(fillButton, "arrow.up.left.and.arrow.down.right", #selector(toggleFill))
+
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let bottomRow = UIStackView(arrangedSubviews: [liveBadge, spacer, routePicker, pipButton, fillButton])
+        bottomRow.axis = .horizontal
+        bottomRow.spacing = 10
+        bottomRow.alignment = .center
+        bottomRow.translatesAutoresizingMaskIntoConstraints = false
+        controlsView.addSubview(bottomRow)
+
+        NSLayoutConstraint.activate([
+            closeButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            titleLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 12),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            titleLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            playPauseButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            playPauseButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            bottomRow.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            bottomRow.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            bottomRow.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
+        ])
+
+        spinner.color = .white
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(spinner)
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        spinner.startAnimating()
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(toggleControls))
+        view.addGestureRecognizer(tap)
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        view.addGestureRecognizer(pinch)
+
+        if AVPictureInPictureController.isPictureInPictureSupported() {
+            pipController = AVPictureInPictureController(playerLayer: videoView.playerLayer)
+            pipController?.delegate = self
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = true
         }
     }
+
+    // MARK: - Observation (the old Coordinator's semantics, in place)
+
+    private func observe(item: AVPlayerItem, player: AVPlayer) {
+        statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard let self else { return }
+            switch item.status {
+            case .readyToPlay:
+                if !firedReady {
+                    firedReady = true
+                    DispatchQueue.main.async { self.onReady?() }
+                }
+            case .failed:
+                fireFailOnce()
+            default:
+                break
+            }
+        }
+        failToken = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            self?.fireFailOnce()
+        }
+        timeControlToken = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            DispatchQueue.main.async { self?.refreshPlaybackUI(player) }
+        }
+    }
+
+    private func fireFailOnce() {
+        guard !firedFail else { return }
+        firedFail = true
+        DispatchQueue.main.async { self.onFail?() }
+    }
+
+    private func refreshPlaybackUI(_ player: AVPlayer) {
+        switch player.timeControlStatus {
+        case .playing:
+            spinner.stopAnimating()
+            playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+        case .waitingToPlayAtSpecifiedRate:
+            spinner.startAnimating()
+        case .paused:
+            spinner.stopAnimating()
+            playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+        @unknown default:
+            break
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func closeTapped() { onClose?() }
+
+    @objc private func togglePlayPause() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+        refreshPlaybackUI(player)
+        showControls()
+    }
+
+    @objc private func togglePiP() {
+        guard let pipController else { return }
+        if pipController.isPictureInPictureActive {
+            pipController.stopPictureInPicture()
+        } else {
+            pipController.startPictureInPicture()
+        }
+        showControls()
+    }
+
+    @objc private func toggleFill() {
+        let layer = videoView.playerLayer
+        layer.videoGravity = layer.videoGravity == .resizeAspect ? .resizeAspectFill : .resizeAspect
+        showControls()
+    }
+
+    /// Spread (scale > 1) fills the screen, pinch (scale < 1)
+    /// returns to fit — the owner's thresholds from the AVKit era.
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        guard gesture.state == .changed || gesture.state == .ended else { return }
+        let layer = videoView.playerLayer
+        if gesture.scale > 1.12, layer.videoGravity != .resizeAspectFill {
+            layer.videoGravity = .resizeAspectFill
+        } else if gesture.scale < 0.88, layer.videoGravity != .resizeAspect {
+            layer.videoGravity = .resizeAspect
+        }
+    }
+
+    @objc private func toggleControls() {
+        controlsVisible.toggle()
+        UIView.animate(withDuration: 0.25) { self.controlsView.alpha = self.controlsVisible ? 1 : 0 }
+        if controlsVisible { scheduleControlsHide() } else { hideTimer?.invalidate() }
+    }
+
+    private func showControls() {
+        controlsVisible = true
+        UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 1 }
+        scheduleControlsHide()
+    }
+
+    private func scheduleControlsHide() {
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.controlsVisible = false
+            UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 0 }
+        }
+    }
+
+    // MARK: - Now Playing / remote commands (AVKit provided these)
+
+    private func setupRemoteCommands(channel: Channel) {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: MatchTitle.clean(channel.title),
+            MPNowPlayingInfoPropertyIsLiveStream: true,
+        ]
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { [weak self] _ in
+            self?.player?.play()
+            return .success
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            self?.player?.pause()
+            return .success
+        }
+    }
+
+    func teardown() {
+        guard !torn else { return }
+        torn = true
+        hideTimer?.invalidate()
+        if pipController?.isPictureInPictureActive == true {
+            pipController?.stopPictureInPicture()
+        }
+        pipController = nil
+        player?.pause()
+        statusToken?.invalidate()
+        statusToken = nil
+        timeControlToken?.invalidate()
+        timeControlToken = nil
+        if let failToken {
+            NotificationCenter.default.removeObserver(failToken)
+            self.failToken = nil
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        videoView.playerLayer.player = nil
+        player = nil
+    }
+}
+
+extension LivePlayerViewController: AVPictureInPictureControllerDelegate {}
+
+/// A plain view whose layer is the player layer.
+final class PlayerLayerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
 /// SwiftUI wrapper around AVRoutePickerView, preferring video routes so

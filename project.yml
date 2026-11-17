@@ -55,8 +55,8 @@ targets:
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.15"
-        CFBundleVersion: "16"
+        CFBundleShortVersionString: "1.16"
+        CFBundleVersion: "17"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
