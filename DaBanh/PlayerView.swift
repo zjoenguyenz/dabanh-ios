@@ -29,6 +29,12 @@ struct PlayerView: View {
     @State private var index = 0
     @State private var exhausted = false
     @State private var switching = true
+    /// The floating chrome (close + title) fades on the same
+    /// rhythm as the system player's controls (v1.15): before,
+    /// it floated permanently, so whenever AVKit's own top bar
+    /// appeared the two close buttons sat side by side.
+    @State private var chromeVisible = true
+    @State private var hideWork: DispatchWorkItem?
 
     private var current: Channel? {
         sources.indices.contains(index) ? sources[index] : nil
@@ -91,13 +97,30 @@ struct PlayerView: View {
             }
             .padding(.leading, 14)
             .padding(.top, 10)
+            .opacity(exhausted || chromeVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.25), value: chromeVisible)
+            .allowsHitTesting(exhausted || chromeVisible)
         }
+        .simultaneousGesture(TapGesture().onEnded { showChrome() })
+        .onChange(of: index) { _ in showChrome() }
         .onAppear {
+            showChrome()
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
         }
         .onDisappear {
             OrientationHelper.lock(.all, rotateTo: .portrait)
         }
+    }
+
+    /// Show the floating chrome and restart its 3.5 s fade —
+    /// the same auto-hide constant as the JTV player's surfaces,
+    /// so both apps feel identical.
+    private func showChrome() {
+        chromeVisible = true
+        hideWork?.cancel()
+        let work = DispatchWorkItem { chromeVisible = false }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: work)
     }
 
     private func advance() {
