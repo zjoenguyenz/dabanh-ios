@@ -225,6 +225,10 @@ final class PlayDirector: ObservableObject {
         candidate = c
         currentLabel = c.label
         attemptID += 1
+        // v2.0.15: every NEW candidate re-arms the resume seek
+        // — itemReady applies it once per candidate, against
+        // the session's furthest position (see itemReady).
+        seekApplied = false
         phase = .playing
     }
 
@@ -421,7 +425,8 @@ final class PlayDirector: ObservableObject {
         resolutionTask = Task { await loadLadder() }
     }
 
-    /// Item is ready: apply the resume seek once (the view's
+    /// Item is ready: apply the resume seek once per candidate
+    /// (the view's
     /// coordinator performs it and reports back the position it
     /// landed on — here we just record that it happened and show
     /// the Android toast text).
@@ -451,9 +456,20 @@ final class PlayDirector: ObservableObject {
         // The Android rule, checked with the real duration in
         // hand: seek only when the stored position is past 20 s
         // AND outside the last 30 s (a finished title restarts).
-        if resumeMs > 20_000 && (durationMs <= 0 || resumeMs < durationMs - 30_000) {
-            seek(resumeMs)
-            notice = "Tiếp tục từ \(WatchStore.fmtClock(resumeMs))"
+        // v2.0.15 (Sony 2.3.17 port): the target is the
+        // FURTHEST position this session has reached — the
+        // stored resume point for the first candidate, the
+        // live playhead (lastPosMs, kept current by tick())
+        // once playback has moved past it. Pre-fix the target
+        // was the fixed session-start resumeMs and the seek
+        // was never re-armed for a new candidate, so a mid-play
+        // failure advanced the ladder into a restart at 0:00 —
+        // the exact fault behind the owner's Sony verdict
+        // ("kéo luôn 1 phát đứt luôn", the film restarts).
+        let targetMs = max(resumeMs, lastPosMs)
+        if targetMs > 20_000 && (durationMs <= 0 || targetMs < durationMs - 30_000) {
+            seek(targetMs)
+            notice = "Tiếp tục từ \(WatchStore.fmtClock(targetMs))"
         }
     }
 

@@ -21,13 +21,22 @@ import UIKit
 /// coordinator honours: ready → resume rule, ticks → progress
 /// saves, end → finished rule, failure → the ladder advances.
 /// Two budgets mirror the Android player's torrent behaviour
-/// (PlayerActivity STALL / POSITION_STALL, both 12 s):
+/// (PlayerActivity STALL / POSITION_STALL):
 ///   • first frame: if the engine has not reached its playing
-///     state 12 s after the attempt starts, the attempt fails
+///     state 30 s after the attempt starts, the attempt fails
 ///     with a visible notice and the ladder moves on;
 ///   • mid-play freeze: once playing, a playhead that does not
-///     advance for 12 s (and is not user-paused) fails the same
+///     advance for 30 s (and is not user-paused) fails the same
 ///     way. No torrent attempt can spin forever any more.
+/// Both budgets were 12 s until v2.0.15, when they were raised
+/// to the Android direct route's 30 s as part of the Sony
+/// 2.3.17 player-fix port: on the owner's TV a 12 s budget
+/// killed healthy REMUX sources whose post-seek refill simply
+/// takes longer than that, and the failure then restarted the
+/// film — his "kéo luôn 1 phát đứt luôn" verdict. The Sony
+/// device trials (16 sources, 5 films) showed 30 s separates
+/// a slow refill from a dead link; the streaming (AVPlayer)
+/// path keeps its own budgets untouched.
 /// Transport: KSPlayerLayer registers the remote's media
 /// commands itself (play/pause, ±15 s skip, position change);
 /// the host controller adds click handling — Select toggles
@@ -45,7 +54,7 @@ import UIKit
 /// here: it builds and owns its own KSPlayerLayer from a URL,
 /// so the director contract this host exists for — deferred
 /// layer creation, the failover ladder behind attemptID, the
-/// resume rule, both 12 s watchdogs — would all be bypassed.
+/// resume rule, both watchdogs — would all be bypassed.
 /// The bar below is therefore built against KSPlayerLayer
 /// directly, in this file, mirroring the AVPlayer transport:
 /// play/pause, a focusable seek bar with current/total time,
@@ -96,7 +105,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private var ready = false
     private var playing = false
     private var ended = false
-    /// First-frame budget (12 s, Android STALL parity): armed
+    /// First-frame budget (30 s, Android STALL parity): armed
     /// when the layer is created, cancelled the moment the
     /// engine reports readyToPlay or its playing state
     /// (v2.0.5: readyToPlay added — a slow-but-viable start
@@ -104,7 +113,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// killed at 12 s because only bufferFinished disarmed
     /// the budget).
     private var firstFrameWatchdog: DispatchWorkItem?
-    /// Mid-play freeze watchdog (12 s without playhead advance,
+    /// Mid-play freeze watchdog (30 s without playhead advance,
     /// Android POSITION_STALL parity): a 1 s ticker, judging
     /// only after the first frame — the same shape as the
     /// AVPlayer coordinator's freeze watch.
@@ -278,6 +287,21 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         if !candidate.headers.isEmpty {
             options.appendHeader(candidate.headers)
         }
+        // v2.0.15 (Sony 2.3.17 port): hand FFmpeg's HTTP layer
+        // the patience the Android direct route got — a 20 s
+        // read/write timeout plus automatic reconnect (plain,
+        // streamed and at-EOF, up to 5 s backoff) — so a
+        // dropped debrid connection is resumed by the engine
+        // itself before any watchdog has to judge. The keys
+        // ride formatContextOptions, the dictionary MEPlayerItem
+        // passes to avformat_open_input (verified in the
+        // KSPlayer 2.3.4 sources; the library's own userAgent
+        // and referer setters write into the same dictionary).
+        options.formatContextOptions["rw_timeout"] = "20000000"
+        options.formatContextOptions["reconnect"] = "1"
+        options.formatContextOptions["reconnect_streamed"] = "1"
+        options.formatContextOptions["reconnect_at_eof"] = "1"
+        options.formatContextOptions["reconnect_delay_max"] = "5"
         // The FFmpeg engine, deterministically: KSPlayerLayer
         // reads this type-level default at creation, and torrent
         // candidates are the only KSPlayerLayers this app ever
@@ -302,10 +326,10 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         layer.play()
         let wd = DispatchWorkItem { [weak self] in
             guard let self, !self.playing else { return }
-            self.stallFail(reason: "Chưa có hình sau 12 giây")
+            self.stallFail(reason: "Chưa có hình sau 30 giây")
         }
         firstFrameWatchdog = wd
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: wd)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: wd)
         lastAdvanceAt = Date()
         let ticker = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkFreeze()
@@ -883,7 +907,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             // v2.0.5 (P3): readyToPlay disarms the first-frame
             // budget too — the engine has announced itself; a
             // start that is merely slow to fill its buffer is
-            // viable and must not be killed at 12 s. (The
+            // viable and must not be killed at the budget. (The
             // mid-play freeze watchdog still guards a playhead
             // that never advances after this point.)
             firstFrameWatchdog?.cancel()
@@ -979,8 +1003,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             lastAdvanceAt = Date()
         }
         lastPositionSec = pos
-        if Date().timeIntervalSince(lastAdvanceAt) >= 12 {
-            stallFail(reason: "Hình đứng yên 12 giây (đóng băng)")
+        if Date().timeIntervalSince(lastAdvanceAt) >= 30 {
+            stallFail(reason: "Hình đứng yên 30 giây (đóng băng)")
         }
     }
 
