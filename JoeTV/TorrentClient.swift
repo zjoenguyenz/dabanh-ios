@@ -699,22 +699,31 @@ enum TorrentClient {
     /// The live sport events from the owner's MediaFusion
     /// manifest-template catalog `live_sport_events` (type
     /// "events", verified against the MediaFusion source
-    /// 2026-11-17). Football first via the catalog's genre
-    /// extra; the full catalog is the fallback. Fail-soft:
-    /// any error returns an empty list. If the owner's
-    /// configure-page selection does not include the sports
-    /// catalog, the endpoint answers empty and the tab says
-    /// so honestly.
+    /// 2026-11-17). Fail-soft: any error returns an empty
+    /// list. If the owner's configure-page selection does
+    /// not include the sports catalog, the endpoint answers
+    /// empty and the tab says so honestly.
+    /// v2.0.16 (post-test fix, mirroring Android 2.3.19/
+    /// 2.3.20): PLAIN catalog only — the genre=Football
+    /// first hop is dropped (on Android it could stall the
+    /// whole fetch; the plain catalog returns the full
+    /// list, football included) — and TWO attempts, because
+    /// the endpoint answers in waves: measured on the Sony
+    /// the same evening, the full list in under 10 s on one
+    /// fetch and an empty answer on the next. Each attempt
+    /// is hard-bounded by JoeHTTP's resource timeout.
     static func fetchMfSportEvents(base: String) async -> [TorMeta] {
-        let genreURL = base + "/catalog/events/live_sport_events/genre=Football.json"
-        if let root = try? await JoeHTTP.getJSON(genreURL, timeout: 12) {
-            let metas = parseMetas(JSON.arr(root, "metas"))
-            if !metas.isEmpty { return metas }
-        }
         let plainURL = base + "/catalog/events/live_sport_events.json"
-        guard let root = try? await JoeHTTP.getJSON(plainURL, timeout: 12)
-        else { return [] }
-        return parseMetas(JSON.arr(root, "metas"))
+        for attempt in 0..<2 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            if let root = try? await JoeHTTP.getJSON(plainURL, timeout: 12) {
+                let metas = parseMetas(JSON.arr(root, "metas"))
+                if !metas.isEmpty { return metas }
+            }
+        }
+        return []
     }
 
     // MARK: - Play candidates (shared conversion)

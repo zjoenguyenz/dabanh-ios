@@ -347,6 +347,15 @@ struct JoeTVSection: View {
         Button {
             sportsOn = true
             store.noteSelectedGroup(nil)
+            // v2.0.16 (post-test fix, mirroring Android
+            // 2.3.20): a settled-but-EMPTY result is not
+            // latched for the whole session — the endpoint
+            // answers empty in waves, so re-selecting the
+            // chip while the grid sits empty fetches again.
+            // (The Làm mới chip forces a refetch either way.)
+            if mfEventsLoaded && mfEvents.isEmpty && !mfLoading {
+                mfEventsLoaded = false
+            }
             Task { await loadSportsEvents() }
         } label: {
             // The owner's exact label (2026-11-17): "Thể
@@ -497,7 +506,7 @@ struct JoeTVSection: View {
                     .tint(.white)
                 Spacer()
             } else if mfEvents.isEmpty {
-                Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống.")
+                Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
                     .font(.system(size: 25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
