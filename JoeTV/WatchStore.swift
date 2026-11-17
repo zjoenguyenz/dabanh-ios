@@ -197,7 +197,15 @@ final class WatchStore: ObservableObject {
     }
 
     private var fileURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // v2.0.17: Caches, NOT Application Support. On the
+        // owner's Apple TV every write to Application Support
+        // failed with "The folder … doesn't exist" (his
+        // 2026-11-17 diagnostics photo: a screen of watchstore
+        // write failures, so Continue Watching never reached
+        // the disk), while every other store in this app —
+        // JoeDetailCache, PhimRailCache — writes to Caches and
+        // works. Same house pattern, same proven directory.
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent(Self.fileName)
     }

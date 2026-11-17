@@ -732,10 +732,25 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             else { return }
             if let dataSouce {
                 self.subtitleModel.addSubtitle(dataSouce: dataSouce)
+                // The owner's standing defaults (2026-11-17):
+                // subtitle starts Vietnamese when the file
+                // carries one, else English, else the file's
+                // own default-flagged track; the side-loaded
+                // Vietnamese below still outranks every embed,
+                // and the picker stays free for any manual
+                // choice. Skipped while the picker is open, so
+                // a late feed can never override a choice the
+                // owner is making.
                 if self.subtitleModel.selectedSubtitleInfo == nil,
-                   layer.options.autoSelectEmbedSubtitle {
-                    self.subtitleModel.selectedSubtitleInfo =
-                        self.subtitleModel.subtitleInfos.first { $0.isEnabled }
+                   !self.pickerIsOpen {
+                    let infos = self.subtitleModel.subtitleInfos
+                    let pick = infos.first { Self.isVietnameseSubtitle($0) }
+                        ?? infos.first { Self.isEnglishSubtitle($0) }
+                        ?? (layer.options.autoSelectEmbedSubtitle
+                            ? infos.first { $0.isEnabled } : nil)
+                    if let pick {
+                        self.subtitleModel.selectedSubtitleInfo = pick
+                    }
                 }
             }
             if let externalURL {
@@ -751,6 +766,63 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             self.buildSubtitleViewsIfNeeded()
             self.startSubtitleTimerIfNeeded()
             self.refreshTrackButtons()
+        }
+    }
+
+    /// Language sniffing for the default-track rules: the
+    /// engine's names are inconsistent across sources (ISO
+    /// codes like "vie"/"eng", full words, the side-load's
+    /// "Tiếng Việt"), so matching is by word token over the
+    /// name + id, never by substring.
+    private static func subtitleTokens(_ info: any SubtitleInfo) -> Set<String> {
+        let raw = (info.name + " " + info.subtitleID).lowercased()
+        return Set(raw.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+    }
+
+    private static func isVietnameseSubtitle(_ info: any SubtitleInfo) -> Bool {
+        let t = subtitleTokens(info)
+        return t.contains("vie") || t.contains("vi") || t.contains("viet")
+            || t.contains("việt") || t.contains("vietnamese")
+    }
+
+    private static func isEnglishSubtitle(_ info: any SubtitleInfo) -> Bool {
+        let t = subtitleTokens(info)
+        return t.contains("eng") || t.contains("en") || t.contains("english")
+    }
+
+    private static func isEnglishAudio(_ track: MediaPlayerTrack) -> Bool {
+        let raw = ((track.language ?? "") + " " + track.name).lowercased()
+        let tokens = Set(raw.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        return tokens.contains("eng") || tokens.contains("en")
+            || tokens.contains("english")
+    }
+
+    /// The audio half of the owner's defaults (2026-11-17):
+    /// when a file offers a choice and its default track is
+    /// not English while an English track exists, start in
+    /// English (his Dune stream opened on the file's Spanish
+    /// default). Once per player instance, at readyToPlay —
+    /// a manual pick in the picker is never overridden,
+    /// because this runs before any pick can exist and never
+    /// again for the same player.
+    private var audioDefaultPlayerID: ObjectIdentifier?
+    private func applyDefaultAudio(layer: KSPlayerLayer) {
+        let playerID = ObjectIdentifier(layer.player as AnyObject)
+        guard audioDefaultPlayerID != playerID else { return }
+        audioDefaultPlayerID = playerID
+        let tracks = layer.player.tracks(mediaType: .audio)
+        guard tracks.count >= 2,
+              let current = tracks.first(where: { $0.isEnabled }),
+              !Self.isEnglishAudio(current),
+              let english = tracks.first(where: { Self.isEnglishAudio($0) })
+        else { return }
+        if let mePlayer = layer.player as? KSMEPlayer,
+           let concrete = english as? FFmpegAssetTrack {
+            mePlayer.select(track: concrete)
+        } else {
+            for track in tracks {
+                track.isEnabled = track === english
+            }
         }
     }
 
@@ -981,6 +1053,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                     // buttons from the live lists now (a file
                     // with no second audio track gets no audio
                     // button, like the system player).
+                    self.applyDefaultAudio(layer: layer)
                     self.refreshTrackButtons()
                     self.refreshTransport()
                     self.director?.itemReady(durationMs: durMs) { ms in
