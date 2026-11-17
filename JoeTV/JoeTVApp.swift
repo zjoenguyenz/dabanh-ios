@@ -69,18 +69,19 @@ struct JoeTVApp: App {
 /// full-screen layers of the root view instead, and the root's
 /// exit command closes exactly one layer per Menu press.
 final class JoeNavigator: ObservableObject {
-    /// The shell's four sections. Moved here from JoeRootView
+    /// The shell's five sections. Moved here from JoeRootView
     /// in 1.9.2 (Team 9 item 4): the section views themselves
     /// must be able to send the shell back to Phim (their Menu
     /// handlers set section = .phim), so the state lives on
     /// the navigator they all already observe.
     enum Section: String, CaseIterable {
-        case tv, phim, torrent, settings
+        case tv, phim, tvb, torrent, settings
 
         var title: String {
             switch self {
             case .tv: return "TV"
             case .phim: return "Phim"
+            case .tvb: return "TVB"
             case .torrent: return "Phim Torrent"
             case .settings: return "Cài đặt"
             }
@@ -89,6 +90,7 @@ final class JoeNavigator: ObservableObject {
             switch self {
             case .tv: return "tv"
             case .phim: return "film"
+            case .tvb: return "play.tv"
             case .torrent: return "magnet"
             case .settings: return "gearshape"
             }
@@ -158,7 +160,7 @@ final class JoeNavigator: ObservableObject {
 }
 
 /// The shell (v1.4 rework): a single VStack — topBar (wordmark +
-/// four section pills + version) on top, content filling the rest
+/// five section pills + version) on top, content filling the rest
 /// below. This mirrors the proven Đá Banh tvOS geometry (pills
 /// directly above content) so focus flows DOWN into the content
 /// and UP back to the pills by construction. v1.3's left rail is
@@ -221,7 +223,7 @@ struct JoeRootView: View {
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
     @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
-    /// The pill row's focus identity — the five pills (four
+    /// The pill row's focus identity — the six pills (five
     /// sections + Tìm phim) share this one @FocusState, written
     /// ONLY by the focus engine itself.
     ///
@@ -680,6 +682,8 @@ struct JoeRootView: View {
             JoeTVSection()
         case .phim:
             JoePhimHome()
+        case .tvb:
+            JoeTVBView()
         case .torrent:
             JoeTorrentHome()
         case .settings:

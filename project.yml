@@ -162,6 +162,8 @@ targets:
       - JoeTV/JoeMovieDetail.swift
       - JoeTV/JoeDetailCache.swift
       - JoeTV/JoeSearch.swift
+      - JoeTV/JoeTVB.swift
+      - JoeTV/tvb-catalog.json
       - JoeTV/JoeTorrent.swift
       - JoeTV/JoeSettings.swift
       - JoeTV/JoeStores.swift
@@ -179,15 +181,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "2.0.11"
-        CURRENT_PROJECT_VERSION: "24"
+        MARKETING_VERSION: "2.0.12"
+        CURRENT_PROJECT_VERSION: "25"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.11"
-        CFBundleVersion: "24"
+        CFBundleShortVersionString: "2.0.12"
+        CFBundleVersion: "25"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -210,6 +212,15 @@ targets:
     sources:
       - JoeTVTopShelf/TopShelfProvider.swift
       - JoeTVTopShelf/TMDBShelfKey.swift
+      - JoeTVTopShelf/bundled/shelf-manifest.json
+      - JoeTVTopShelf/bundled/shelf-1.jpg
+      - JoeTVTopShelf/bundled/shelf-2.jpg
+      - JoeTVTopShelf/bundled/shelf-3.jpg
+      - JoeTVTopShelf/bundled/shelf-4.jpg
+      - JoeTVTopShelf/bundled/shelf-5.jpg
+      - JoeTVTopShelf/bundled/shelf-6.jpg
+      - JoeTVTopShelf/bundled/shelf-7.jpg
+      - JoeTVTopShelf/bundled/shelf-8.jpg
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv.topshelf

@@ -1,3 +1,4 @@
+import AVFoundation
 import KSPlayer
 import SwiftUI
 import UIKit
@@ -33,6 +34,28 @@ import UIKit
 /// play/pause, Left/Right clicks seek ∓30 s. Menu is never
 /// swallowed: it propagates to the shell's exit command, like
 /// the AVPlayer path.
+///
+/// Transport bar (v2.0.12, owner defect on 2.0.10): the bare
+/// layer above had NO on-screen controls at all — the owner
+/// found torrent playback missing the whole bottom bar the
+/// streaming path gets free from AVPlayerViewController
+/// ("Riêng phần torrent thì không có thanh bar... Không
+/// chỉnh được sub... Mất toàn bộ thanh đó"). The library's
+/// own control view (KSVideoPlayerView) cannot be adopted
+/// here: it builds and owns its own KSPlayerLayer from a URL,
+/// so the director contract this host exists for — deferred
+/// layer creation, the failover ladder behind attemptID, the
+/// resume rule, both 12 s watchdogs — would all be bypassed.
+/// The bar below is therefore built against KSPlayerLayer
+/// directly, in this file, mirroring the AVPlayer transport:
+/// play/pause, a focusable seek bar with current/total time,
+/// subtitle selection (the layer's own SubtitleModel, Off
+/// included) and audio-track selection (the documented
+/// tracks(mediaType:) / select(track:) API). It auto-hides
+/// while playing, exactly like the system bar, and any remote
+/// press brings it back; Down moves focus into it, Up leaves
+/// it, and Menu still exits (it only backs out of an open
+/// track picker first, as the system menus do).
 struct JoeKSPlayerController: UIViewControllerRepresentable {
     let candidate: PlayCandidate
     let director: PlayDirector
@@ -90,20 +113,80 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// though the engine reports time every 0.1 s.
     private var lastTickAt = Date.distantPast
 
+    // MARK: - Transport bar (v2.0.12)
+
+    /// The bar's container, added in viewDidLoad — BEFORE the
+    /// player view exists, so beginPlayback inserts the player
+    /// view UNDER it (insertSubview at 0). Hidden with
+    /// isHidden (never just alpha) so the focus engine can
+    /// never land on invisible controls.
+    private let controlsView = UIView()
+    private let transportBar = UIView()
+    private let playPauseButton = UIButton(type: .system)
+    private let subtitleButton = UIButton(type: .system)
+    private let audioButton = UIButton(type: .system)
+    private let currentTimeLabel = UILabel()
+    private let durationLabel = UILabel()
+    private let seekBar = KSSeekBarView()
+    private let bufferingSpinner = UIActivityIndicatorView(style: .medium)
+    private var controlsBuilt = false
+    private var controlsVisible = false
+    /// True while focus sits inside the bar or the picker:
+    /// auto-hide stands down then (hiding a focused bar would
+    /// strand the remote, the same trap class as the v2.0.5
+    /// error-8b slate).
+    private var focusInControls = false
+    /// 0.5 s refresh for the bar (time labels, seek fill,
+    /// play/pause icon, buffering spinner) — the JTV surface's
+    /// proven cadence shape, half its rate.
+    private var uiTimer: Timer?
+    private var hideTimer: Timer?
+    /// Track picker state: the centred panel that replaces
+    /// the bar while a subtitle/audio choice is open. Its
+    /// buttons are rebuilt per opening from the LIVE track
+    /// lists, so a failover to a new candidate never shows a
+    /// stale slate (the host itself is recreated per attempt
+    /// via .id(attemptID) regardless).
+    private let pickerView = UIView()
+    private let pickerTitleLabel = UILabel()
+    private var pickerButtons: [UIButton] = []
+    private var pickerIsOpen = false
+    private enum PickerKind { case subtitles, audio }
+    private var pickerKind: PickerKind = .subtitles
+    /// The subtitle rows' infos, cached at picker opening so
+    /// a button's tag indexes the same array the selection
+    /// writes back into the layer's subtitle model.
+    private var pickerSubtitleInfos: [any SubtitleInfo] = []
+    private var pickerAudioTracks: [MediaTrack] = []
+
     override func loadView() {
         view = KSPlayerHostRootView()
     }
 
-    override var preferredFocusEnvironments: [UIFocusEnvironment] { [view] }
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        // While the track picker is open it owns the landing;
+        // otherwise the root view does, exactly as before the
+        // bar existed (Select/Left/Right keep their meaning
+        // until the user deliberately moves Down into the bar).
+        if pickerIsOpen, let first = pickerButtons.first {
+            return [first]
+        }
+        return [view]
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        buildControls()
+        uiTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshTransport()
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         setNeedsFocusUpdate()
+        showControls()
         beginPlaybackIfPossible()
     }
 
@@ -116,6 +199,9 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // strand it at a stale size again.
         if let playerView = layer?.player.view {
             playerView.frame = view.bounds
+        }
+        if controlsBuilt {
+            layoutControls()
         }
         beginPlaybackIfPossible()
     }
@@ -165,7 +251,11 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         if let playerView = layer.player.view {
             playerView.frame = view.bounds
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.addSubview(playerView)
+            // UNDER the transport bar: the controls were added
+            // in viewDidLoad, before this layer existed, so a
+            // plain addSubview here would bury them beneath
+            // the picture surface forever.
+            view.insertSubview(playerView, at: 0)
         }
         // v2.0.5 (P2): play EXPLICITLY. The pre-fix host never
         // called play() at start — playback depended on the
@@ -195,6 +285,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         firstFrameWatchdog = nil
         freezeTimer?.invalidate()
         freezeTimer = nil
+        // Close the picker BEFORE killing the timers:
+        // closePicker re-arms the hide timer via showControls,
+        // and teardown must be the last word on timers.
+        closePicker()
+        uiTimer?.invalidate()
+        uiTimer = nil
+        hideTimer?.invalidate()
+        hideTimer = nil
         layer?.delegate = nil
         layer?.stop()
         layer = nil
@@ -207,15 +305,37 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         for press in presses {
             switch press.type {
             case .select:
+                showControls()
+                togglePlayPause()
+                handled = true
+            case .playPause:
+                showControls()
                 togglePlayPause()
                 handled = true
             case .leftArrow:
+                showControls()
                 seekBy(-30)
                 handled = true
             case .rightArrow:
+                showControls()
                 seekBy(30)
                 handled = true
+            case .menu:
+                // Menu backs out of an open track picker
+                // first (the system menus' behaviour); with
+                // no picker open it is NOT handled here and
+                // propagates to the shell's exit command,
+                // exactly as before the bar existed.
+                if pickerIsOpen {
+                    closePicker()
+                    handled = true
+                }
             default:
+                // Up/Down (and anything else) only wake the
+                // bar; they are never swallowed, so the focus
+                // engine still receives them and can move
+                // focus into or out of the transport bar.
+                showControls()
                 break
             }
         }
@@ -231,12 +351,372 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         } else {
             layer.play()
         }
+        refreshTransport()
     }
 
     private func seekBy(_ delta: TimeInterval) {
         guard let layer else { return }
         let target = max(0, layer.player.currentPlaybackTime + delta)
         layer.seek(time: target, autoPlay: true) { _ in }
+        refreshTransport()
+    }
+
+    // MARK: - Transport bar: build & layout
+
+    private func buildControls() {
+        guard !controlsBuilt else { return }
+        controlsBuilt = true
+        controlsView.frame = view.bounds
+        controlsView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        controlsView.isHidden = true
+        view.addSubview(controlsView)
+
+        transportBar.backgroundColor = UIColor.black.withAlphaComponent(0.62)
+        transportBar.layer.cornerRadius = 24
+        controlsView.addSubview(transportBar)
+
+        playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+        playPauseButton.tintColor = .white
+        playPauseButton.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        playPauseButton.layer.cornerRadius = 14
+        playPauseButton.addTarget(self, action: #selector(playPauseButtonTapped),
+                                  for: .primaryActionTriggered)
+        transportBar.addSubview(playPauseButton)
+
+        bufferingSpinner.color = .white
+        bufferingSpinner.hidesWhenStopped = true
+        transportBar.addSubview(bufferingSpinner)
+
+        styleTransportButton(subtitleButton, title: "Phụ đề: Tắt")
+        subtitleButton.addTarget(self, action: #selector(subtitleButtonTapped),
+                                 for: .primaryActionTriggered)
+        transportBar.addSubview(subtitleButton)
+        styleTransportButton(audioButton, title: "Âm thanh")
+        audioButton.addTarget(self, action: #selector(audioButtonTapped),
+                              for: .primaryActionTriggered)
+        transportBar.addSubview(audioButton)
+
+        for label in [currentTimeLabel, durationLabel] {
+            label.font = .monospacedDigitSystemFont(ofSize: 25, weight: .medium)
+            label.textColor = .white
+            label.text = "0:00"
+            transportBar.addSubview(label)
+        }
+        durationLabel.textAlignment = .right
+
+        seekBar.backgroundColor = .clear
+        seekBar.onStep = { [weak self] delta in
+            self?.showControls()
+            self?.seekBy(delta)
+        }
+        seekBar.onTogglePlayPause = { [weak self] in
+            self?.showControls()
+            self?.togglePlayPause()
+        }
+        transportBar.addSubview(seekBar)
+
+        pickerView.backgroundColor = UIColor.black.withAlphaComponent(0.88)
+        pickerView.layer.cornerRadius = 20
+        pickerView.isHidden = true
+        controlsView.addSubview(pickerView)
+        pickerTitleLabel.font = .systemFont(ofSize: 29, weight: .bold)
+        pickerTitleLabel.textColor = .white
+        pickerView.addSubview(pickerTitleLabel)
+
+        layoutControls()
+    }
+
+    /// Standard tvOS button dress: white text on a quiet
+    /// plate; the OS renders the focus lift itself (the house
+    /// doctrine — never hand-draw focus geometry against the
+    /// kit). Focused title goes dark, for legibility on the
+    /// system's light focused face.
+    private func styleTransportButton(_ button: UIButton, title: String) {
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(.white, for: .normal)
+        button.setTitleColor(.black, for: .focused)
+        button.titleLabel?.font = .systemFont(ofSize: 25, weight: .semibold)
+        button.contentEdgeInsets = UIEdgeInsets(top: 10, left: 22, bottom: 10, right: 22)
+        button.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        button.layer.cornerRadius = 14
+    }
+
+    /// Frame layout, in the file's frame-based contract (the
+    /// player surface is frame-sized too; no Auto Layout
+    /// anywhere in this host). Recomputed on every layout
+    /// pass, so the bar tracks the real bounds like the
+    /// player view does.
+    private func layoutControls() {
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        controlsView.frame = bounds
+        let inset = max(view.safeAreaInsets.left, 48)
+        let barWidth = bounds.width - inset * 2
+        let barHeight: CGFloat = 168
+        let barY = bounds.height - max(view.safeAreaInsets.bottom, 36) - barHeight
+        transportBar.frame = CGRect(x: inset, y: barY, width: barWidth, height: barHeight)
+
+        playPauseButton.frame = CGRect(x: 24, y: 16, width: 84, height: 56)
+        bufferingSpinner.frame = CGRect(x: 128, y: 34, width: 20, height: 20)
+
+        // Track buttons hug the right edge, sized to their
+        // current titles (set by refreshTrackButtons).
+        subtitleButton.sizeToFit()
+        audioButton.sizeToFit()
+        let audioW = audioButton.isHidden ? 0 : max(audioButton.frame.width, 170)
+        let subW = subtitleButton.isHidden ? 0 : max(subtitleButton.frame.width, 190)
+        if !audioButton.isHidden {
+            audioButton.frame = CGRect(x: barWidth - 24 - audioW, y: 16,
+                                       width: audioW, height: 56)
+        }
+        if !subtitleButton.isHidden {
+            subtitleButton.frame = CGRect(x: barWidth - 24 - audioW - (audioW > 0 ? 16 : 0) - subW,
+                                          y: 16, width: subW, height: 56)
+        }
+
+        currentTimeLabel.frame = CGRect(x: 24, y: 94, width: 150, height: 48)
+        durationLabel.frame = CGRect(x: barWidth - 24 - 150, y: 94, width: 150, height: 48)
+        let seekX: CGFloat = 24 + 150 + 20
+        seekBar.frame = CGRect(x: seekX, y: 94,
+                               width: barWidth - seekX - 150 - 24 - 20, height: 48)
+        if pickerIsOpen {
+            layoutPicker()
+        }
+    }
+
+    private func layoutPicker() {
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let panelW = min(780, bounds.width - 120)
+        // Rows compress on tall slates (a REMUX can carry a
+        // dozen subtitle tracks): the panel must never grow
+        // past the screen, or its lower rows — and their
+        // focus — would live off-screen.
+        let count = max(pickerButtons.count, 1)
+        let maxPanelH = bounds.height - 80
+        let rowH = min(66, (maxPanelH - 108) / CGFloat(count))
+        let panelH = 108 + CGFloat(pickerButtons.count) * rowH
+        pickerView.frame = CGRect(x: (bounds.width - panelW) / 2,
+                                  y: (bounds.height - panelH) / 2,
+                                  width: panelW, height: panelH)
+        pickerTitleLabel.frame = CGRect(x: 32, y: 24, width: panelW - 64, height: 44)
+        for (index, button) in pickerButtons.enumerated() {
+            button.frame = CGRect(x: 32, y: 92 + CGFloat(index) * rowH,
+                                  width: panelW - 64, height: rowH - 8)
+        }
+    }
+
+    // MARK: - Transport bar: show / hide
+
+    private func showControls() {
+        guard controlsBuilt else { return }
+        if !controlsVisible {
+            controlsVisible = true
+            controlsView.isHidden = false
+            refreshTransport()
+        }
+        scheduleControlsHide()
+    }
+
+    private func scheduleControlsHide() {
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            self?.hideControlsIfIdle()
+        }
+    }
+
+    /// The system bar's contract: it fades only while the
+    /// picture is actually playing, never while paused, never
+    /// while the user is standing inside it, and never under
+    /// an open picker.
+    private func hideControlsIfIdle() {
+        guard controlsVisible, !pickerIsOpen, !focusInControls,
+              let layer, layer.player.isPlaying else { return }
+        controlsVisible = false
+        controlsView.isHidden = true
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                 with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        guard let next = context.nextFocusedView else { return }
+        focusInControls = next.isDescendant(of: controlsView)
+        if focusInControls {
+            controlsVisible = true
+            controlsView.isHidden = false
+            hideTimer?.invalidate()
+        }
+    }
+
+    // MARK: - Transport bar: state
+
+    private func refreshTransport() {
+        guard controlsBuilt, let layer else { return }
+        let cur = layer.player.currentPlaybackTime
+        let dur = layer.player.duration
+        currentTimeLabel.text = Self.clockText(cur)
+        durationLabel.text = (dur.isFinite && dur > 0) ? Self.clockText(dur) : "--:--"
+        if dur.isFinite, dur > 0, cur.isFinite {
+            seekBar.fraction = max(0, min(1, cur / dur))
+        } else {
+            seekBar.fraction = 0
+        }
+        seekBar.setNeedsDisplay()
+        playPauseButton.setImage(
+            UIImage(systemName: layer.state.isPlaying ? "pause.fill" : "play.fill"),
+            for: .normal)
+        if !ready || layer.state == .buffering {
+            bufferingSpinner.startAnimating()
+        } else {
+            bufferingSpinner.stopAnimating()
+        }
+    }
+
+    private static func clockText(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "0:00" }
+        return WatchStore.fmtClock(Int64(seconds * 1000))
+    }
+
+    /// Sizes and labels the two track buttons from the LIVE
+    /// lists. Called at readyToPlay and after every selection:
+    /// the audio button exists only when the file carries a
+    /// choice (≥2 tracks, the system player's rule), the
+    /// subtitle button only when the layer's subtitle model
+    /// holds at least one embedded/external info.
+    private func refreshTrackButtons() {
+        guard controlsBuilt, let layer else { return }
+        let audioTracks = layer.player.tracks(mediaType: .audio)
+        audioButton.isHidden = audioTracks.count < 2
+        if let current = audioTracks.first(where: { $0.isEnabled }) {
+            audioButton.setTitle("Âm thanh: \(Self.trackLabel(current))", for: .normal)
+        } else {
+            audioButton.setTitle("Âm thanh", for: .normal)
+        }
+        let model = layer.subtitleModel
+        subtitleButton.isHidden = model.subtitleInfos.isEmpty
+        if let selected = model.selectedSubtitleInfo {
+            subtitleButton.setTitle("Phụ đề: \(selected.name)", for: .normal)
+        } else {
+            subtitleButton.setTitle("Phụ đề: Tắt", for: .normal)
+        }
+        layoutControls()
+    }
+
+    private static func trackLabel(_ track: MediaTrack) -> String {
+        var parts: [String] = []
+        if let language = track.language, !language.isEmpty {
+            parts.append(language)
+        }
+        if !track.name.isEmpty {
+            parts.append(track.name)
+        }
+        return parts.isEmpty ? "Track \(track.trackID)" : parts.joined(separator: " - ")
+    }
+
+    // MARK: - Transport bar: actions & track picker
+
+    @objc private func playPauseButtonTapped() {
+        showControls()
+        togglePlayPause()
+    }
+
+    @objc private func subtitleButtonTapped() {
+        openPicker(kind: .subtitles)
+    }
+
+    @objc private func audioButtonTapped() {
+        openPicker(kind: .audio)
+    }
+
+    private func openPicker(kind: PickerKind) {
+        guard ready, let layer else { return }
+        pickerKind = kind
+        for button in pickerButtons { button.removeFromSuperview() }
+        pickerButtons.removeAll()
+        switch kind {
+        case .subtitles:
+            pickerTitleLabel.text = "Phụ đề"
+            let model = layer.subtitleModel
+            pickerSubtitleInfos = model.subtitleInfos
+            pickerAudioTracks = []
+            addPickerButton(title: "Tắt", checked: model.selectedSubtitleInfo == nil, tag: -1)
+            for (index, info) in pickerSubtitleInfos.enumerated() {
+                var checked = false
+                if let selected = model.selectedSubtitleInfo {
+                    checked = selected.name == info.name
+                }
+                addPickerButton(title: info.name.isEmpty ? "Phụ đề \(index + 1)" : info.name,
+                                checked: checked, tag: index)
+            }
+        case .audio:
+            pickerTitleLabel.text = "Âm thanh"
+            pickerAudioTracks = layer.player.tracks(mediaType: .audio)
+            pickerSubtitleInfos = []
+            for (index, track) in pickerAudioTracks.enumerated() {
+                addPickerButton(title: Self.trackLabel(track),
+                                checked: track.isEnabled, tag: index)
+            }
+        }
+        guard !pickerButtons.isEmpty else { return }
+        pickerIsOpen = true
+        pickerView.isHidden = false
+        transportBar.isHidden = true
+        controlsVisible = true
+        controlsView.isHidden = false
+        hideTimer?.invalidate()
+        layoutPicker()
+        setNeedsFocusUpdate()
+    }
+
+    private func addPickerButton(title: String, checked: Bool, tag: Int) {
+        let button = UIButton(type: .system)
+        button.tag = tag
+        button.setTitle((checked ? "✓   " : "      ") + title, for: .normal)
+        button.setTitleColor(.white, for: .normal)
+        button.setTitleColor(.black, for: .focused)
+        button.titleLabel?.font = .systemFont(ofSize: 27, weight: .medium)
+        button.contentHorizontalAlignment = .left
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
+        button.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+        button.layer.cornerRadius = 12
+        button.addTarget(self, action: #selector(pickerButtonTapped(_:)),
+                         for: .primaryActionTriggered)
+        pickerView.addSubview(button)
+        pickerButtons.append(button)
+    }
+
+    @objc private func pickerButtonTapped(_ sender: UIButton) {
+        guard let layer else {
+            closePicker()
+            return
+        }
+        switch pickerKind {
+        case .subtitles:
+            if sender.tag < 0 {
+                layer.subtitleModel.selectedSubtitleInfo = nil
+            } else if pickerSubtitleInfos.indices.contains(sender.tag) {
+                layer.subtitleModel.selectedSubtitleInfo = pickerSubtitleInfos[sender.tag]
+            }
+        case .audio:
+            if pickerAudioTracks.indices.contains(sender.tag) {
+                layer.player.select(track: pickerAudioTracks[sender.tag])
+            }
+        }
+        refreshTrackButtons()
+        closePicker()
+    }
+
+    private func closePicker() {
+        guard pickerIsOpen else { return }
+        pickerIsOpen = false
+        pickerView.isHidden = true
+        transportBar.isHidden = false
+        for button in pickerButtons { button.removeFromSuperview() }
+        pickerButtons.removeAll()
+        pickerSubtitleInfos = []
+        pickerAudioTracks = []
+        setNeedsFocusUpdate()
+        showControls()
     }
 
     // MARK: - KSPlayerLayerDelegate
@@ -257,6 +737,13 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                 let durMs = dur.isFinite ? Int64(dur * 1000) : 0
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    // The track lists exist only from this
+                    // point on: size the bar's subtitle/audio
+                    // buttons from the live lists now (a file
+                    // with no second audio track gets no audio
+                    // button, like the system player).
+                    self.refreshTrackButtons()
+                    self.refreshTransport()
                     self.director?.itemReady(durationMs: durMs) { ms in
                         layer.seek(time: TimeInterval(ms) / 1000,
                                    autoPlay: true) { _ in }
@@ -271,6 +758,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                 let now = layer.player.currentPlaybackTime
                 lastPositionSec = now.isFinite ? now : -1
             }
+            refreshTransport()
         case .error:
             fireFail(cause: "Engine báo lỗi (KSPlayer state .error)")
         default:
@@ -374,4 +862,74 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 /// Left/Right are handled; Menu is never swallowed there.
 private final class KSPlayerHostRootView: UIView {
     override var canBecomeFocused: Bool { true }
+}
+
+/// The transport bar's seek bar (v2.0.12). UISlider cannot
+/// take tvOS focus or answer the remote at all, so the bar is
+/// a plain focusable view that draws track / played fill /
+/// knob itself (growing the knob under focus, the system's
+/// own emphasis language) and answers the presses the system
+/// player answers on its timeline: Left/Right clicks step
+/// ∓30 s (the host's standing seek step), Select toggles
+/// play/pause. Presses it does not handle — Up back to the
+/// button row, Menu out of the player — are passed up the
+/// responder chain untouched. No buffered fill is drawn: the
+/// KS layer's verified delegate surface exposes no buffered
+/// time range (bufferedCount is an event count, not a time),
+/// and an invented fill would be a lie on screen.
+private final class KSSeekBarView: UIView {
+    /// Played fraction, 0...1.
+    var fraction: Double = 0
+    var onStep: ((TimeInterval) -> Void)?
+    var onTogglePlayPause: (() -> Void)?
+
+    override var canBecomeFocused: Bool { true }
+
+    override func draw(_ rect: CGRect) {
+        let barHeight: CGFloat = isFocused ? 10 : 6
+        let y = (rect.height - barHeight) / 2
+        let trackRect = CGRect(x: 0, y: y, width: rect.width, height: barHeight)
+        UIColor.white.withAlphaComponent(0.35).setFill()
+        UIBezierPath(roundedRect: trackRect, cornerRadius: barHeight / 2).fill()
+        let fillWidth = rect.width * CGFloat(max(0, min(1, fraction)))
+        if fillWidth > 0 {
+            let fillRect = CGRect(x: 0, y: y, width: fillWidth, height: barHeight)
+            UIColor.white.setFill()
+            UIBezierPath(roundedRect: fillRect, cornerRadius: barHeight / 2).fill()
+        }
+        let knob: CGFloat = isFocused ? 30 : 18
+        let knobX = max(0, min(rect.width - knob, fillWidth - knob / 2))
+        let knobRect = CGRect(x: knobX, y: (rect.height - knob) / 2,
+                              width: knob, height: knob)
+        UIColor.white.setFill()
+        UIBezierPath(ovalIn: knobRect).fill()
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                 with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        setNeedsDisplay()
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var handled = false
+        for press in presses {
+            switch press.type {
+            case .leftArrow:
+                onStep?(-30)
+                handled = true
+            case .rightArrow:
+                onStep?(30)
+                handled = true
+            case .select:
+                onTogglePlayPause?()
+                handled = true
+            default:
+                break
+            }
+        }
+        if !handled {
+            super.pressesEnded(presses, with: event)
+        }
+    }
 }

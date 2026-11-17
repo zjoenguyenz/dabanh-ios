@@ -2,48 +2,78 @@ import Foundation
 import TVServices
 
 // Joe TV Top Shelf extension (Package B — v2.0.10; fallback
-// added v2.0.11).
+// added v2.0.11; fallback REBUILT on bundled assets v2.0.12).
 //
 // JoeTVTopShelf/TopShelfProvider.swift (its own
 // app-extension target, bundle com.luun.nguyen.joetv.topshelf,
-// extension point com.apple.tv-top-shelf). Applied from
-// tvos-training/topshelf-staging for Package B (v2.0.10).
+// extension point com.apple.tv-top-shelf).
 //
 // CONTENT SOURCES, in order:
-// 1. The App Group hand-off (the full owner spec): the Joe TV
-//    app writes topshelf.json + JPEG image files into the App
-//    Group container (group.com.luun.nguyen.joetv) via
-//    JoeTopShelfWriter; this provider reads that container and
-//    builds hero + Continue Watching + hot. No network, no
-//    shared code with the app target — the JSON schema below
-//    IS the contract (versioned; keep the two copies in sync:
-//    this file and JoeTV/JoeTopShelfWriter.swift).
-// 2. The self-sufficient fallback (v2.0.11 — the fix for the
-//    owner's "Lỗi backdrop ko hiện cho JoeTV"): the delivered
-//    IPA is UNSIGNED (build-joetv.yml builds with
-//    CODE_SIGNING_ALLOWED=NO) and the owner re-signs it
-//    himself, so no App Group entitlement for
-//    group.com.luun.nguyen.joetv can be provisioned into the
-//    installed app — containerURL(...) returns nil in BOTH
-//    processes on his device and source 1 is dead there
-//    (device-proven: the shelf was completely empty while
-//    Đá Banh TV's group-free shelf worked). When no usable
-//    group doc exists, this provider therefore fetches TMDB
-//    trending itself, downloads the artwork into its OWN
-//    caches directory (no group needed) and builds hero +
-//    hot from that. Continue Watching lives only in the app's
-//    sandbox, so it can only ever arrive via source 1 — the
-//    fallback carries hero + hot, which is the part the owner
-//    reported missing. Fallback items deep-link as
-//    joetv://tmdb?id=… (the app resolves the id against its
-//    own catalogue on open; see JoeRootView.handleDeepLink).
+// 1. The App Group hand-off (the full owner spec, UNCHANGED):
+//    the Joe TV app writes topshelf.json + JPEG image files
+//    into the App Group container
+//    (group.com.luun.nguyen.joetv) via JoeTopShelfWriter; this
+//    provider reads that container and builds hero + Continue
+//    Watching + hot. No network, no shared code with the app
+//    target — the JSON schema below IS the contract
+//    (versioned; keep the two copies in sync: this file and
+//    JoeTV/JoeTopShelfWriter.swift). On the owner's device
+//    this source is dead — the delivered IPA is built
+//    UNSIGNED (CODE_SIGNING_ALLOWED=NO) and re-signed by him,
+//    so containerURL(...) returns nil in both processes —
+//    which is why source 2 exists.
+// 2. The BUNDLED fallback (v2.0.12): shelf-manifest.json +
+//    one backdrop JPEG per entry ship INSIDE this extension
+//    (JoeTVTopShelf/bundled/, listed in the target's sources
+//    in project.yml so XcodeGen bundles them as resources,
+//    exactly like Đá Banh TV's mu-shelf-*.jpg). Entry 1 of
+//    the manifest is the recommended hero (TMDB
+//    trending/all/week #1 at manifest generation time); the
+//    remaining entries are SHUFFLED on every
+//    loadTopShelfContent call, so the shelf shows the
+//    recommended title's backdrop first plus a few random
+//    titles after it (owner's redo spec, verbatim: "làm lại
+//    backdrop làm sao nó hiện lên phim đề cử và hiện lên vài
+//    phim random"). Every item deep-links joetv://tmdb?id=…
+//    to its own title. If the manifest is missing or empty
+//    the provider returns nil — never fabricate content.
+//
+// WHY BUNDLED (the v2.0.11 root cause, device-proven): the
+// v2.0.11 fallback fetched TMDB trending in the extension
+// and downloaded backdrop JPEGs into the extension's OWN
+// Caches directory, then handed the system file URLs inside
+// that private sandbox. On the owner's device the shelf
+// items DID appear (titles + deep links worked, the Apple
+// default shelf was gone) but the backdrop image NEVER
+// rendered. The control case on the same device — Đá Banh
+// TV's shelf, same .actions style, same both-scales
+// registration — renders fine, and its only differing
+// variable is that its JPEGs are BUNDLED inside the appex
+// (Bundle.main URLs). The shelf UI is rendered by a system
+// process outside the extension's sandbox; Apple's own Top
+// Shelf guidance puts shelf images in the shared container
+// for the same reason. With no App Group available under
+// the owner's signing, the bundle is the only proven-
+// readable image location. Full audit:
+// tvos-training/TOPSHELF-2012-AUDIT.md.
+//
+// DECISION — the runtime TMDB fetch is REMOVED, not kept:
+// its downloaded images are exactly what did not render, it
+// depended on the embedded key + network inside a
+// short-lived extension, and a bundled manifest cannot pair
+// a live-fetched title with a bundled image unless the title
+// was frozen into the manifest at generation time anyway.
+// Freshness is traded for the one image path proven to
+// render on the owner's device; the manifest is regenerated
+// when a new build is cut. (TMDBShelfKey.swift is therefore
+// no longer referenced by this provider.)
 //
 // CONTENT MODEL (owner's Prime-Video spec, verbatim intent):
 // the shelf background is the hottest movie's backdrop,
 // full-bleed, and the whole shelf is ONE carousel: hero
-// (hot #1) first, then Continue Watching, then more hot
-// titles. Every item deep-links (joetv://) to ITS OWN title
-// in the app — never a generic landing.
+// (recommended) first, then the rest. Every item
+// deep-links (joetv://) to ITS OWN title in the app — never
+// a generic landing.
 //
 // API SHAPE — pinned against Apple's TVServices documentation
 // after CI run 33 rejected the staged guesses (there is no
@@ -59,27 +89,21 @@ import TVServices
 //     setImageURL(_:for:). ImageTraits is an OptionSet whose
 //     only documented members are the screen scales
 //     .screenScale1x and .screenScale2x — the traits describe
-//     the image's scale, not its role. The writer produces a
-//     single-resolution file per item, so the same file is
-//     registered under BOTH scale traits: the system picks
-//     the image whose traits match the device, and this way
-//     every device matches. The item's backdrop (16:9) is the
-//     image; the poster is only the fallback when no backdrop
-//     file exists.
+//     the image's scale, not its role. A single-resolution
+//     file per item is registered under BOTH scale traits:
+//     the system picks the image whose traits match the
+//     device, and this way every device matches.
 //   - Both buttons carry the item's own deep link: playAction
 //     (the primary Play button) and displayAction (More Info /
 //     selecting the item) are the same TVTopShelfAction.
 //   - The CW progress fraction in the JSON has no carousel
-//     rendering in this API and stays unused here, exactly as
-//     in the staged version.
+//     rendering in this API and stays unused here.
 // (Doc basis: TVTopShelfCarouselContent, its Style enum page,
 // TVTopShelfItem + ImageTraits + setImageURL(_:for:), and
 // TVTopShelfAction in Apple's TVServices documentation.)
 
 /// The writer's JSON contract (mirror of ShelfDoc in
-/// JoeTopShelfWriter.swift — keep in sync). The fallback path
-/// writes the same shape into the extension's own caches, so
-/// one builder serves both sources.
+/// JoeTopShelfWriter.swift — keep in sync). Source 1 only.
 private struct ShelfDoc: Codable {
     struct Item: Codable {
         var id = ""
@@ -95,15 +119,19 @@ private struct ShelfDoc: Codable {
     var hot: [Item] = []
 }
 
+/// One entry of the bundled shelf-manifest.json (source 2).
+/// Entry order in the file is TMDB trending/all/week order
+/// at generation time; entry 1 is the recommended hero.
+private struct BundledEntry: Codable {
+    var tmdbId = ""
+    var type = ""       // "movie" | "tv"
+    var title = ""
+    var image = ""      // bundled JPEG file name, e.g. shelf-1.jpg
+}
+
 final class TopShelfProvider: TVTopShelfContentProvider {
 
     private static let groupID = "group.com.luun.nguyen.joetv"
-    private static let fallbackDocName = "topshelf-fallback.json"
-    /// A fetched fallback doc is reused for half an hour, so
-    /// repeated shelf loads are instant and TMDB is not
-    /// hammered every time the owner passes the icon.
-    private static let fallbackMaxAge: TimeInterval = 1800
-    private static let fetchTimeout: TimeInterval = 6
 
     override func loadTopShelfContent(completionHandler: @escaping (TVTopShelfContent?) -> Void) {
         // Source 1 — the App Group hand-off (hero + CW + hot).
@@ -116,14 +144,14 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             completionHandler(content)
             return
         }
-        // Source 2 — the self-sufficient fallback (hero + hot).
-        // Reached whenever the group is unavailable under the
-        // owner's signing, or the writer has not produced a
-        // usable doc yet.
-        loadFallback(completionHandler: completionHandler)
+        // Source 2 — the bundled manifest (recommended hero +
+        // shuffled random titles). Reached whenever the group
+        // is unavailable under the owner's signing, or the
+        // writer has not produced a usable doc yet.
+        completionHandler(Self.bundledContent())
     }
 
-    // MARK: - Doc reading + content building (both sources)
+    // MARK: - Source 1: doc reading + content building
 
     private static func readDoc(_ url: URL) -> ShelfDoc? {
         guard let data = try? Data(contentsOf: url),
@@ -135,8 +163,7 @@ final class TopShelfProvider: TVTopShelfContentProvider {
     }
 
     /// Build the carousel for a doc whose image files live in
-    /// `base` (the App Group container for source 1, the
-    /// extension's caches for source 2). Nil when the doc
+    /// `base` (the App Group container). Nil when the doc
     /// yields no item with a loadable image.
     private static func content(from doc: ShelfDoc,
                                 base: URL) -> TVTopShelfContent? {
@@ -190,184 +217,74 @@ final class TopShelfProvider: TVTopShelfContentProvider {
                                          items: items)
     }
 
-    // MARK: - Fallback: TMDB trending, fetched by the extension
+    // MARK: - Source 2: bundled manifest (v2.0.12)
 
-    private func loadFallback(completionHandler: @escaping (TVTopShelfContent?) -> Void) {
-        guard let cacheDir = FileManager.default
-                .urls(for: .cachesDirectory, in: .userDomainMask).first
-        else {
-            completionHandler(nil)
-            return
-        }
-        let docURL = cacheDir.appendingPathComponent(Self.fallbackDocName)
-        // Fresh cached fallback — no network at all.
-        if let attrs = try? FileManager.default
-                .attributesOfItem(atPath: docURL.path),
-           let mtime = attrs[.modificationDate] as? Date,
-           Date().timeIntervalSince(mtime) < Self.fallbackMaxAge,
-           let doc = Self.readDoc(docURL),
-           let content = Self.content(from: doc, base: cacheDir) {
-            completionHandler(content)
-            return
-        }
-        Self.fetchFallbackDoc(into: cacheDir) { doc in
-            guard let doc else {
-                // No key, no network, no trending — return nil
-                // and the system shows its default shelf. Never
-                // crash, never fabricate content.
-                completionHandler(nil)
-                return
+    /// Build the carousel from the bundled shelf-manifest.json
+    /// + bundled backdrop JPEGs (the proven-readable image
+    /// location — see the header note). Item 1 is the
+    /// manifest's first entry (the recommended hero); the
+    /// remaining entries are shuffled per call ("vài phim
+    /// random"). Nil when the manifest is missing/empty or no
+    /// entry has a loadable bundled image — never fabricate.
+    private static func bundledContent() -> TVTopShelfContent? {
+        guard let manifestURL = Bundle.main.url(
+                forResource: "shelf-manifest", withExtension: "json"),
+              let data = try? Data(contentsOf: manifestURL),
+              let entries = try? JSONDecoder().decode(
+                [BundledEntry].self, from: data),
+              !entries.isEmpty
+        else { return nil }
+
+        func carouselItem(_ entry: BundledEntry)
+            -> TVTopShelfCarouselItem? {
+            guard !entry.tmdbId.isEmpty else { return nil }
+            let name = (entry.image as NSString)
+                .deletingPathExtension
+            let ext = (entry.image as NSString).pathExtension
+            guard !name.isEmpty, !ext.isEmpty,
+                  let imageURL = Bundle.main.url(forResource: name,
+                                                 withExtension: ext)
+            else { return nil }
+            let ci = TVTopShelfCarouselItem(
+                identifier: "tmdb|" + entry.tmdbId)
+            ci.title = entry.title
+            // One bundled file, registered for both screen
+            // scales — the exact shape of the working Đá Banh
+            // provider.
+            ci.setImageURL(imageURL, for: .screenScale1x)
+            ci.setImageURL(imageURL, for: .screenScale2x)
+            if let url = URL(string: tmdbLink(id: entry.tmdbId,
+                                              type: entry.type,
+                                              name: entry.title)) {
+                let action = TVTopShelfAction(url: url)
+                ci.playAction = action
+                ci.displayAction = action
             }
-            completionHandler(Self.content(from: doc, base: cacheDir))
+            return ci
         }
+
+        var items: [TVTopShelfCarouselItem] = []
+        // Recommended hero first (manifest entry 1)…
+        if let hero = entries.first, let ci = carouselItem(hero) {
+            items.append(ci)
+        }
+        // …then the remaining titles in random order.
+        items += entries.dropFirst().shuffled()
+            .compactMap(carouselItem)
+        // De-duplicate by identifier, hero order preserved.
+        var seen = Set<String>()
+        items = items.filter { seen.insert($0.identifier).inserted }
+
+        guard !items.isEmpty else { return nil }
+        return TVTopShelfCarouselContent(style: .actions,
+                                         items: items)
     }
 
-    /// Fetch TMDB trending/week (the writer's hot source, same
-    /// endpoint and language), download the artwork as JPEG
-    /// files into `dir` (TMDB serves JPEG natively — no
-    /// re-encode, unlike provider art in the writer), persist
-    /// the doc next to the images, and hand it back. Nil on
-    /// any failure. Bounded: one list request + at most 12
-    /// image downloads, each on a short timeout.
-    private static func fetchFallbackDoc(
-        into dir: URL,
-        completion: @escaping (ShelfDoc?) -> Void
-    ) {
-        let key = TMDBShelfKey.value
-        guard !key.isEmpty,
-              let url = URL(string: "https://api.themoviedb.org/3/trending/all/week?api_key=\(key)&language=vi-VN")
-        else {
-            completion(nil)
-            return
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = fetchTimeout
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            guard let data,
-                  let root = try? JSONSerialization
-                    .jsonObject(with: data) as? [String: Any],
-                  let results = root["results"] as? [[String: Any]]
-            else {
-                completion(nil)
-                return
-            }
-            // Trending order kept; only titles with a backdrop
-            // can ever be a shelf image.
-            struct Candidate {
-                var tmdbId = ""
-                var type = ""
-                var title = ""
-                var backdropPath = ""
-                var posterPath = ""
-            }
-            var candidates: [Candidate] = []
-            for item in results {
-                let type = item["media_type"] as? String ?? ""
-                guard type == "movie" || type == "tv" else { continue }
-                let backdrop = item["backdrop_path"] as? String ?? ""
-                guard !backdrop.isEmpty else { continue }
-                var c = Candidate()
-                if let n = item["id"] as? NSNumber {
-                    c.tmdbId = n.stringValue
-                } else if let s = item["id"] as? String {
-                    c.tmdbId = s
-                }
-                guard !c.tmdbId.isEmpty else { continue }
-                c.type = type
-                c.title = (item[type == "tv" ? "name" : "title"]
-                           as? String) ?? ""
-                c.backdropPath = backdrop
-                c.posterPath = item["poster_path"] as? String ?? ""
-                candidates.append(c)
-                if candidates.count >= 6 { break }
-            }
-            guard let first = candidates.first else {
-                completion(nil)
-                return
-            }
-
-            // Download the artwork. Hero takes the backdrop +
-            // poster; each hot title takes its backdrop (its
-            // poster rides along as the builder's fallback).
-            let group = DispatchGroup()
-            let lock = NSLock()
-            var files: [String: String] = [:]   // name -> name, once written
-            func download(_ path: String, as name: String) {
-                guard !path.isEmpty,
-                      let u = URL(string: "https://image.tmdb.org/t/p/"
-                                    + (name.contains("poster")
-                                       ? "w500" : "w1280") + path)
-                else { return }
-                group.enter()
-                var req = URLRequest(url: u)
-                req.timeoutInterval = fetchTimeout
-                URLSession.shared.dataTask(with: req) { d, _, _ in
-                    defer { group.leave() }
-                    guard let d,
-                          (try? d.write(
-                            to: dir.appendingPathComponent(name),
-                            options: .atomic)) != nil
-                    else { return }
-                    lock.lock()
-                    files[name] = name
-                    lock.unlock()
-                }.resume()
-            }
-            func names(for c: Candidate, tag: String)
-                -> (backdrop: String, poster: String) {
-                let backdrop = "ts-fb-\(tag).jpg"
-                let poster = "ts-fb-\(tag)-poster.jpg"
-                download(c.backdropPath, as: backdrop)
-                download(c.posterPath, as: poster)
-                return (backdrop, poster)
-            }
-            var plan: [(Candidate, String, String)] = []
-            let heroNames = names(for: first, tag: "hero")
-            plan.append((first, heroNames.backdrop, heroNames.poster))
-            for (i, c) in candidates.dropFirst().enumerated() {
-                let n = names(for: c, tag: "hot-\(i)")
-                plan.append((c, n.backdrop, n.poster))
-            }
-
-            group.notify(queue: .global()) {
-                func item(_ c: Candidate, backdrop: String,
-                          poster: String) -> ShelfDoc.Item? {
-                    let b = files[backdrop] ?? ""
-                    let p = files[poster] ?? ""
-                    guard !b.isEmpty || !p.isEmpty else { return nil }
-                    return ShelfDoc.Item(
-                        id: "tmdb|" + c.tmdbId,
-                        title: c.title,
-                        backdrop: b, poster: p,
-                        action: tmdbLink(id: c.tmdbId, type: c.type,
-                                         name: c.title))
-                }
-                guard let hero = item(plan[0].0, backdrop: plan[0].1,
-                                      poster: plan[0].2)
-                else {
-                    completion(nil)
-                    return
-                }
-                let hot = plan.dropFirst().compactMap {
-                    item($0.0, backdrop: $0.1, poster: $0.2)
-                }
-                let doc = ShelfDoc(version: 1, hero: hero,
-                                   continueWatching: [], hot: hot)
-                if let data = try? JSONEncoder().encode(doc) {
-                    try? data.write(
-                        to: dir.appendingPathComponent(fallbackDocName),
-                        options: .atomic)
-                }
-                completion(doc)
-            }
-        }.resume()
-    }
-
-    /// Fallback deep link: the app resolves the TMDB id
-    /// against its own catalogue on open (the extension has
-    /// no catalogue access, so it cannot mint provider/slug
-    /// links the way the writer does). Parsed by the "tmdb"
-    /// host case in JoeRootView.handleDeepLink.
+    /// Deep link: the app resolves the TMDB id against its
+    /// own catalogue on open (the extension has no catalogue
+    /// access, so it cannot mint provider/slug links the way
+    /// the writer does). Parsed by the "tmdb" host case in
+    /// JoeRootView.handleDeepLink.
     private static func tmdbLink(id: String, type: String,
                                  name: String) -> String {
         var c = URLComponents()
