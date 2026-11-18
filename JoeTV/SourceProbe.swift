@@ -3,11 +3,17 @@ import Foundation
 /// Per-provider reachability probe for the Settings diagnostics
 /// surface (owner law: a failure must be visible and explained,
 /// never a silent spinner). Each provider is exercised through
-/// the SAME client call the Phim home makes at launch — its
-/// newest rail, racing and all — so a green probe means the
-/// home's first rail for that provider really can load from
-/// this device, on this network, right now: the probe matches
-/// the app's runtime path instead of testing a lookalike URL.
+/// literally the SAME call the Phim home makes at launch —
+/// Providers.newest for its newest rail, via the FRESH raw
+/// variant (Providers.newestFresh → fetchListRawFresh) — so a
+/// green probe means the home's first rail for that provider
+/// really can load from this device, on this network, right
+/// now: the probe matches the app's runtime path instead of
+/// testing a lookalike URL. The fresh variant is what keeps
+/// the probe an honest REAL network measurement (it bypasses
+/// the Providers raw memo's read); its result still lands in
+/// that memo, so the launch gate's phase 2 reuses it instead
+/// of fetching the same endpoints a second time (Idea 17).
 enum SourceProbe {
     struct Result {
         var name: String
@@ -29,22 +35,22 @@ enum SourceProbe {
         await withTaskGroup(of: (Int, Result).self) { group in
             group.addTask {
                 (0, await probe(name: "KKPhim") {
-                    try await KkClient.newest(page: 1).count
+                    try await Providers.newestFresh(Providers.KK, page: 1).count
                 })
             }
             group.addTask {
                 (1, await probe(name: "Film4K") {
-                    try await F4kClient.newest(page: 1).count
+                    try await Providers.newestFresh(Providers.F4K, page: 1).count
                 })
             }
             group.addTask {
                 (2, await probe(name: "VSMOV") {
-                    try await VsClient.newest(page: 1).count
+                    try await Providers.newestFresh(Providers.VS, page: 1).count
                 })
             }
             group.addTask {
                 (3, await probe(name: "Tủ Phim") {
-                    try await TpClient.newest(page: 1).count
+                    try await Providers.newestFresh(Providers.TP, page: 1).count
                 })
             }
             var landed: [(Int, Result)] = []
@@ -58,7 +64,7 @@ enum SourceProbe {
 
     /// 1.9.2 (Team 9 item 5): single-target KK reachability
     /// for the Settings tunnel-status row, with a SHORT ~6 s
-    /// fuse. KkClient.newest's own list budget is 12 s — far
+    /// fuse. The KK list call's own budget is 12 s — far
     /// too long to leave a status row spinning — so the call
     /// races a 6 s timer in the codebase's box pattern: the
     /// first outcome wins, the loser is cancelled and never
@@ -71,7 +77,7 @@ enum SourceProbe {
         let box = KKProbeBox()
         let fetch = Task {
             do {
-                let count = try await KkClient.newest(page: 1).count
+                let count = try await Providers.newestFresh(Providers.KK, page: 1).count
                 box.complete(count)
             } catch {
                 box.fail()

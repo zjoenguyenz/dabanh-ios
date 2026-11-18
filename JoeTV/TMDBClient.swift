@@ -8,6 +8,20 @@ struct TMDBCastMember: Identifiable {
     var photoURL: String
 }
 
+/// One playable title in a person's filmography (idea 20) or
+/// one part of a movie collection / franchise (idea 21). The
+/// identity is the (type, tmdbId) pair, matching the string-id
+/// conventions used across this client.
+struct TMDBCreditTitle: Identifiable {
+    var tmdbId: String      // string form, matching TMDBInfo-era conventions in this file
+    var type: String        // "movie" | "tv"
+    var title: String
+    var year: String
+    var posterURL: String   // w500 URL or ""
+    var character: String   // "" for collection parts
+    var id: String { type + "|" + tmdbId }
+}
+
 /// The TMDB enrichment for one title: a wide backdrop, a
 /// (Vietnamese) overview and the top-billed cast. Every field is
 /// optional in effect — an empty value simply means the detail
@@ -21,6 +35,12 @@ struct TMDBInfo {
     /// art URL (w500, transparent PNG) — both fail-soft.
     var voteAverage: Double = 0
     var logoURL: String = ""
+    /// Idea 21: the franchise this movie belongs to, from the
+    /// detail root's "belongs_to_collection" (movies only;
+    /// absent/null → 0 / ""). Drives the detail screen's
+    /// franchise strip via fetchCollection.
+    var collectionId: Int = 0
+    var collectionName: String = ""
 }
 
 /// Minimal TMDB client for the optional enrichment on the movie
@@ -81,6 +101,14 @@ enum TMDBClient {
         }
         info.overview = JSON.str(root, "overview")
         info.voteAverage = JSON.double(root, "vote_average")
+        // Idea 21: the franchise identity rides the SAME detail
+        // call (no extra round-trip) — "belongs_to_collection"
+        // is a nested object on movie records, absent/null on
+        // TV records and standalone films.
+        if let collection = JSON.obj(root, "belongs_to_collection") {
+            info.collectionId = JSON.int(collection, "id")
+            info.collectionName = JSON.str(collection, "name")
+        }
         // 2.0.25 (3c): the logo is SPLIT from this call —
         // fetchInfo returns without awaiting fetchLogo, so
         // the backdrop/overview/rating no longer wait a full
@@ -97,6 +125,8 @@ enum TMDBClient {
     private static var infoCache: [String: TMDBInfo] = [:]
     private static var logoCache: [String: String] = [:]
     private static var ratingCache: [String: Double] = [:]
+    private static var personCreditsCache: [Int: [TMDBCreditTitle]] = [:]
+    private static var collectionCache: [Int: [TMDBCreditTitle]] = [:]
     private static let cacheLock = NSLock()
 
     /// The title's logo art (TMDB /images): Vietnamese first,
@@ -347,5 +377,93 @@ enum TMDBClient {
         else { return nil }
         let path = JSON.str(root, "poster_path")
         return path.isEmpty ? nil : path
+    }
+
+    // MARK: - Filmography + franchise (ideas 20 + 21)
+
+    /// One TMDBCreditTitle from a raw credit/part record:
+    /// title/year/poster follow the same field rules as the
+    /// rest of this client (movie "title" vs TV "name", year =
+    /// first 4 chars of the release/air date, w500 poster).
+    private static func creditTitle(_ item: [String: Any], type: String,
+                                    character: String) -> TMDBCreditTitle {
+        let dateStr = JSON.str(item, "release_date").isEmpty
+            ? JSON.str(item, "first_air_date")
+            : JSON.str(item, "release_date")
+        let posterPath = JSON.str(item, "poster_path")
+        return TMDBCreditTitle(
+            tmdbId: String(JSON.int(item, "id")),
+            type: type,
+            title: JSON.str(item, type == "tv" ? "name" : "title"),
+            year: String(dateStr.prefix(4)),
+            posterURL: posterPath.isEmpty
+                ? "" : "https://image.tmdb.org/t/p/w500" + posterPath,
+            character: character)
+    }
+
+    /// Idea 20 (actor page): a person's combined filmography —
+    /// the "cast" side of /person/{id}/combined_credits,
+    /// movies and TV only, deduped by (type, tmdbId) keeping
+    /// the first occurrence, sorted by popularity descending.
+    /// Fail-soft: [] on no key, a bad id, or a failed call;
+    /// cached per personId.
+    static func fetchPersonCredits(personId: Int) async -> [TMDBCreditTitle] {
+        let key = apiKey
+        guard !key.isEmpty, personId > 0 else { return [] }
+        cacheLock.lock()
+        if let hit = personCreditsCache[personId] {
+            cacheLock.unlock(); return hit
+        }
+        cacheLock.unlock()
+
+        guard let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/person/\(personId)/combined_credits?api_key=\(key)&language=vi-VN",
+            timeout: callTimeout)
+        else { return [] }
+
+        var seen = Set<String>()
+        var scored: [(title: TMDBCreditTitle, popularity: Double)] = []
+        for item in JSON.arr(root, "cast") ?? [] {
+            let mediaType = JSON.str(item, "media_type")
+            guard mediaType == "movie" || mediaType == "tv" else { continue }
+            let credit = creditTitle(item, type: mediaType,
+                                     character: JSON.str(item, "character"))
+            guard seen.insert(credit.id).inserted else { continue }
+            scored.append((credit, JSON.double(item, "popularity")))
+        }
+        let result = scored
+            .sorted { $0.popularity > $1.popularity }
+            .map { $0.title }
+        cacheLock.lock(); personCreditsCache[personId] = result; cacheLock.unlock()
+        return result
+    }
+
+    /// Idea 21 (franchise strip): the parts of a movie
+    /// collection, oldest first (parts with no year last).
+    /// Fail-soft: [] on no key, a bad id, or a failed call;
+    /// cached per collection id.
+    static func fetchCollection(id: Int) async -> [TMDBCreditTitle] {
+        let key = apiKey
+        guard !key.isEmpty, id > 0 else { return [] }
+        cacheLock.lock()
+        if let hit = collectionCache[id] {
+            cacheLock.unlock(); return hit
+        }
+        cacheLock.unlock()
+
+        guard let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/collection/\(id)?api_key=\(key)&language=vi-VN",
+            timeout: callTimeout)
+        else { return [] }
+
+        let result = (JSON.arr(root, "parts") ?? [])
+            .map { creditTitle($0, type: "movie", character: "") }
+            .sorted { a, b in
+                if a.year.isEmpty { return false }
+                if b.year.isEmpty { return true }
+                return a.year < b.year
+            }
+        cacheLock.lock(); collectionCache[id] = result; cacheLock.unlock()
+        return result
     }
 }

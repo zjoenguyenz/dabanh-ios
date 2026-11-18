@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CryptoKit
 
 /// In-app loopback HLS proxy — the tvOS answer to the Android
 /// player's PngPrefixDataSource. AVPlayer has no custom
@@ -134,9 +135,21 @@ final class JoeProxy {
 
     private func register(_ upstream: String, headers: [String: String],
                           isPlaylist: Bool) -> String {
-        let token = UUID().uuidString
+        // v2.0.27 (idea 23): the token is a DETERMINISTIC hash of
+        // (upstream, headers, kind) instead of a fresh UUID, so
+        // the dwell-warmed proxy URL for a VS/TP title is the
+        // SAME string the play tap mints later — StreamWarmer's
+        // take(url:) compares absolute strings, and a random
+        // token made every dwell warm of a proxy entry a
+        // guaranteed miss. Re-registering the same upstream
+        // refreshes the identical Route and moves the token to
+        // the LRU tail instead of appending a duplicate.
+        let token = Self.stableToken(upstream: upstream,
+                                     headers: headers,
+                                     isPlaylist: isPlaylist)
         lock.lock()
         routes[token] = Route(url: upstream, headers: headers, isPlaylist: isPlaylist)
+        routeOrder.removeAll { $0 == token }
         routeOrder.append(token)
         while routeOrder.count > Self.maxRoutes {
             routes[routeOrder.removeFirst()] = nil
@@ -144,6 +157,17 @@ final class JoeProxy {
         let p = port
         lock.unlock()
         return "http://127.0.0.1:\(p)/\(isPlaylist ? "p" : "s")/\(token)"
+    }
+
+    private static func stableToken(upstream: String,
+                                    headers: [String: String],
+                                    isPlaylist: Bool) -> String {
+        var material = upstream + "\n" + (isPlaylist ? "p" : "s")
+        for key in headers.keys.sorted() {
+            material += "\n" + key + "=" + (headers[key] ?? "")
+        }
+        return SHA256.hash(data: Data(material.utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Connection handling

@@ -269,6 +269,10 @@ struct JoeTVBView: View {
     @State private var searchOpen = false
     /// The selected genre shelf's name; nil = the rails home.
     @State private var selectedGenre: String?
+    /// Idea 1 (actor rail): the actor page presented over
+    /// this tab when an actor card is tapped — see
+    /// JoeActorPage.swift (.tvb mode).
+    @State private var actorRoute: JoeActorRoute?
     @FocusState private var headerSearchFocused: Bool
     @FocusState private var chipFocus: String?
     @FocusState private var cardFocus: String?
@@ -309,6 +313,10 @@ struct JoeTVBView: View {
             } else {
                 nav.section = .phim
             }
+        }
+        // Idea 1: the actor page (.tvb mode) over this tab.
+        .fullScreenCover(item: $actorRoute) { route in
+            JoeActorPage(route: route)
         }
         .task { await loadCatalog() }
     }
@@ -443,10 +451,28 @@ struct JoeTVBView: View {
 
     // MARK: - Rails home (plan §3 + §3.3)
 
+    /// One entry of the actor rail (Idea 1): the actor's
+    /// name, how many displayed titles carry them, and the
+    /// poster of their most popular displayed title (the
+    /// card's art — the rail's cards are actors, not titles,
+    /// so they cannot ride the title-id machinery).
+    private struct ActorRailEntry: Identifiable {
+        let name: String
+        let count: Int
+        let posterURL: URL?
+        let tmdbId: Int
+        var id: String { name }
+    }
+
     private struct RailSpec: Identifiable {
         let scope: String
         let title: String
         let ids: [Int]
+        /// Non-empty ONLY on the actor rail: its entries are
+        /// ActorRailEntry values, rendered by actorCard —
+        /// every other rail leaves this empty and renders
+        /// titles(for: ids) exactly as before.
+        var actors: [ActorRailEntry] = []
         var id: String { scope }
     }
 
@@ -470,9 +496,7 @@ struct JoeTVBView: View {
                      ids: catalog.rails.kinhDien),
         ]
         // Idea 1 (2.0.25) rich shelves, computed from the
-        // displayed titles only. No actor/cast shelf here —
-        // that arrives with its own page in a later package;
-        // a dead tap is forbidden.
+        // displayed titles only.
         let displayedTitles = catalog.titles.filter { $0.isDisplayed }
 
         // 1. Decade shelves: one rail per decade holding at
@@ -543,6 +567,39 @@ struct JoeTVBView: View {
                                   ids: nhieuPhan.prefix(30).map(\.tmdbId)))
         }
 
+        // 5. Diễn viên (Idea 1, actor rail): aggregate the
+        // displayed titles by cast name; an actor earns a
+        // card at ≥ 6 displayed titles. Order: title count
+        // desc, then name; capped at 20. The card's art is
+        // the actor's most popular displayed title's poster
+        // and its tap presents JoeActorPage (.tvb mode) —
+        // the entries ride RailSpec.actors, never a faked
+        // title id.
+        var titlesByActor: [String: [TVBTitle]] = [:]
+        for title in displayedTitles {
+            for name in title.cast where !name.isEmpty {
+                titlesByActor[name, default: []].append(title)
+            }
+        }
+        let actorEntries = titlesByActor
+            .filter { $0.value.count >= 6 }
+            .map { name, titles -> ActorRailEntry in
+                let top = titles.max { $0.popularity < $1.popularity }
+                return ActorRailEntry(
+                    name: name, count: titles.count,
+                    posterURL: top?.posterURL,
+                    tmdbId: top?.tmdbId ?? 0)
+            }
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.name < $1.name
+            }
+        if !actorEntries.isEmpty {
+            specs.append(RailSpec(scope: "dienVien", title: "🎭 Diễn viên",
+                                  ids: [],
+                                  actors: Array(actorEntries.prefix(20))))
+        }
+
         for name in Self.genreOrder {
             if let ids = catalog.shelves[name] {
                 specs.append(RailSpec(scope: "shelf:" + name, title: name,
@@ -555,16 +612,45 @@ struct JoeTVBView: View {
     @ViewBuilder
     private func railSections(_ catalog: TVBCatalog) -> some View {
         ForEach(railSpecs(catalog)) { spec in
-            let movies = titles(for: spec.ids)
-            if !movies.isEmpty {
+            if !spec.actors.isEmpty {
                 Rail(title: spec.title) {
-                    ForEach(movies) { title in
-                        card(title, focusID: spec.scope + "|" + "\(title.tmdbId)",
-                             form: .rail)
+                    ForEach(spec.actors) { actor in
+                        actorCard(actor,
+                                  focusID: spec.scope + "|" + actor.name)
+                    }
+                }
+            } else {
+                let movies = titles(for: spec.ids)
+                if !movies.isEmpty {
+                    Rail(title: spec.title) {
+                        ForEach(movies) { title in
+                            card(title, focusID: spec.scope + "|" + "\(title.tmdbId)",
+                                 form: .rail)
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// One actor-rail card (Idea 1): the actor's most
+    /// popular title's poster carrying the actor's NAME as
+    /// its label (the PosterCard construction every other
+    /// rail uses), the title count as its meta line. The
+    /// tap presents the actor page in .tvb mode — the
+    /// filmography is resolved there from the snapshot.
+    private func actorCard(_ actor: ActorRailEntry, focusID: String) -> some View {
+        Button { actorRoute = .tvb(name: actor.name) } label: {
+            PosterCard(
+                title: actor.name,
+                posterURL: actor.posterURL,
+                tmdbId: actor.tmdbId > 0 ? "\(actor.tmdbId)" : "",
+                tmdbType: "tv",
+                meta: "\(actor.count) phim",
+                form: .rail)
+        }
+        .joeCardButton()
+        .focused($cardFocus, equals: focusID)
     }
 
     // MARK: - Genre shelf grid (chip selected)

@@ -920,8 +920,17 @@ private struct TopLinkLabel: View {
 /// had built into the Sony app the same evening): at app
 /// open the app FIRST establishes its connections, THEN
 /// loads the catalogue, THEN preloads the home's posters —
-/// all behind the loading screen — and the home is entered
-/// ready. It exists because of the 2.0.21 cold-start disease
+/// and the home is entered ready. Idea 17: the loading
+/// screen now covers only the first two phases — the gate
+/// completes at the end of the data phase and the shell
+/// goes interactive — while the poster preload continues
+/// as a detached background task behind it (same list, same
+/// 80 cap, same pipeline). Phase 1 and phase 2 also no
+/// longer fetch the same four "newest" endpoints twice:
+/// the probe's fresh Providers responses land in the
+/// Providers raw memo and phase 2's store jobs read them
+/// back (see Providers.fetchListRaw / fetchListRawFresh).
+/// It exists because of the 2.0.21 cold-start disease
 /// he reported verbatim: posters hung at first open until he
 /// went into Settings and pressed the connection check
 /// himself, after which they loaded. The check he pressed is
@@ -931,21 +940,27 @@ private struct TopLinkLabel: View {
 /// automatically as phase 1, so no manual step remains.
 ///
 /// Progress is REAL, by the phase model the owner approved
-/// on the Sony build: fixed phase weights (probe 0–10,
-/// data 10–30, posters 30–100) and, inside each phase, the
-/// bar is the measured fraction — probes answered of four,
-/// "newest" rails landed of four, posters completed of the
-/// preload total. No animation, no timer-driven creep: the
-/// loading view sets the fill width straight from
-/// `progress` with no .animation anywhere.
+/// on the Sony build: while the gate is visible the bar
+/// keeps its original scale — fixed phase weights (probe
+/// 0–10, data 10–30) and, inside each phase, the measured
+/// fraction (probes answered of four, "newest" rails landed
+/// of four). At gate completion finish() fills the bar to
+/// 1.0 exactly as it always has at handover, so the fill
+/// stays monotonic and never re-scales mid-gate. The poster
+/// preload that used to own 30–100 now runs detached in
+/// the background and publishes no progress. No animation,
+/// no timer-driven creep: the loading view sets the fill
+/// width straight from `progress` with no .animation
+/// anywhere.
 ///
 /// Bounds: a hard 50 s cap ends the gate whatever state the
 /// phases are in (the home's own error surfaces own a dead
 /// network from there — the bar can never spin forever);
 /// a Top Shelf deep link ends it at once (a link launch
-/// must land on its route, not on a loading screen); the
-/// screen dwells at least 0.7 s so a fully cached launch
-/// does not flash it for a single frame.
+/// must land on its route, not on a loading screen — and
+/// skips the background preload too); the screen dwells at
+/// least 0.7 s so a fully cached launch does not flash it
+/// for a single frame.
 @MainActor
 final class LaunchGate: ObservableObject {
     @Published private(set) var progress: Double = 0
@@ -998,13 +1013,34 @@ final class LaunchGate: ObservableObject {
         if deepLinked() { await finish(t0: t0); return }
         progress = max(progress, 0.30)
 
-        // Phase 3 — poster preload (0.30 → 1.0): every poster
-        // of the home as it will first render — the owner's
-        // rails, then the catalogue rails in home order, then
-        // the genre/country shelves — deduped, capped at 80,
-        // plus the featured film's hero thumb. Six workers
-        // pull from a shared claim counter; each awaited
-        // pipeline load (hit or miss) is one completion.
+        // Phase 3 — poster preload (Idea 17): NO LONGER PART
+        // OF THE VISIBLE GATE. The gate completes HERE, at
+        // the end of phase 2 — finish() below enforces the
+        // minimum dwell, fills the bar to 1.0 and lifts the
+        // screen, exactly the handover contract finish() has
+        // always had — and the preload continues as a
+        // DETACHED background task that runs to completion
+        // behind the interactive shell: the same deduped
+        // list (preloadTargets), the same 80 cap, the same
+        // six-worker pool feeding the same image pipeline
+        // (runPosterPreload). A deep link still skips the
+        // preload entirely, as it always has.
+        let targets = preloadTargets(phim: phim, watch: watch)
+        if !targets.isEmpty && !deepLinked() {
+            Task.detached {
+                await LaunchGate.runPosterPreload(targets: targets)
+            }
+        }
+        await finish(t0: t0)
+    }
+
+    /// The phase-3 preload list, built exactly as the gated
+    /// phase 3 built it: every poster of the home as it will
+    /// first render — the owner's rails, then the catalogue
+    /// rails in home order, then the genre/country shelves —
+    /// deduped, capped at 80, plus the featured film's hero
+    /// thumb.
+    private func preloadTargets(phim: PhimStore, watch: WatchStore) -> [URL] {
         var urls: [URL] = []
         var seen = Set<String>()
         func add(_ u: URL?) {
@@ -1031,32 +1067,31 @@ final class LaunchGate: ObservableObject {
             .first(where: { !$0.thumb.isEmpty }) {
             add(featured.thumbURL)
         }
-        let targets = Array(urls.prefix(80))
-        if targets.isEmpty || deepLinked() {
-            await finish(t0: t0)
-            return
-        }
+        return Array(urls.prefix(80))
+    }
+
+    /// The phase-3 worker pool, unchanged from the gated
+    /// phase 3: six workers pull from a shared claim counter;
+    /// each awaited pipeline load (hit or miss) is one
+    /// completion. It now runs detached behind the shell, so
+    /// its completions feed only the image pipeline's cache
+    /// — never the gate's progress — and nothing cancels it:
+    /// it runs to completion. nonisolated: it is called from
+    /// a detached task and must keep the old pool's off-actor
+    /// execution, not hop back onto the gate's main actor.
+    nonisolated private static func runPosterPreload(targets: [URL]) async {
         let posterBox = LaunchProgressBox()
-        let pool = Task.detached {
-            await withTaskGroup(of: Void.self) { group in
-                for _ in 0..<6 {
-                    group.addTask {
-                        while let i = posterBox.claim(total: targets.count) {
-                            _ = await JoeImagePipeline.shared.image(
-                                for: targets[i], targetPixels: 720)
-                            posterBox.increment()
-                        }
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    while let i = posterBox.claim(total: targets.count) {
+                        _ = await JoeImagePipeline.shared.image(
+                            for: targets[i], targetPixels: 720)
+                        posterBox.increment()
                     }
                 }
             }
         }
-        while posterBox.count < targets.count, !overCap(), !deepLinked() {
-            progress = 0.30 + 0.70 * Double(posterBox.count)
-                / Double(targets.count)
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        pool.cancel()
-        await finish(t0: t0)
     }
 
     /// Handover: enforce the minimum dwell, then the bar

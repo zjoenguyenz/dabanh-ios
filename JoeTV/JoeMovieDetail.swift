@@ -29,6 +29,17 @@ struct JoeMovieDetail: View {
     /// serialises behind the logo.
     @State private var tmdbLogoURL: String = ""
     @State private var alternatives: [(code: String, slug: String)] = []
+    /// Idea 20: the actor page presented over this detail
+    /// when a TMDB cast member is tapped — see
+    /// JoeActorPage.swift (.tmdb mode).
+    @State private var actorRoute: JoeActorRoute?
+    /// Idea 21: the franchise strip's resolved state — the
+    /// collection name and its PLAYABLE parts only (matched
+    /// via Providers.search on the part's TMDB id; unmatched
+    /// parts are dropped silently, and the current title's
+    /// own part is excluded). Empty = no strip.
+    @State private var franchiseName = ""
+    @State private var franchiseMovies: [Movie] = []
     /// The film's resolved cross-service identity (v2.0.5,
     /// D3): the detail-time ladder's result (Providers
     /// .resolveIdentity, run in load() alongside
@@ -64,6 +75,10 @@ struct JoeMovieDetail: View {
     @FocusState private var focusedFollow: Bool
     @FocusState private var focusedAlt: String?
     @FocusState private var focusedRetry: Bool
+    /// Idea 20: the cast row's focus binding (member ids).
+    @FocusState private var focusedCast: Int?
+    /// Idea 21: the franchise strip's focus binding.
+    @FocusState private var focusedFranchise: String?
 
     struct DirectorHolder: Identifiable {
         let id = UUID()
@@ -128,6 +143,13 @@ struct JoeMovieDetail: View {
                     case .ultra:
                         ultraDetail(detail)
                     }
+                    // Idea 21: the franchise strip sits at the
+                    // END of the detail, below every theme's
+                    // episode/server region — one shared slot,
+                    // so no theme composition moves. It renders
+                    // only when a collection part matched a
+                    // playable title (see loadFranchise).
+                    franchiseStrip
                 } else if loadFailed {
                     // §8: the G3 error shape + Retry.
                     VStack(alignment: .leading, spacing: 16) {
@@ -257,6 +279,18 @@ struct JoeMovieDetail: View {
             // slug, focused episode, detail arrival), so
             // speculative work dies on exit/switch by itself.
             await dwellPreResolve()
+        }
+        .task(id: tmdb?.collectionId ?? 0) {
+            // Idea 21: the franchise load — keyed on the
+            // loaded TMDBInfo's collection id, so it starts
+            // the moment fetchInfo lands a collection and
+            // re-runs only for a different one. Fail-soft:
+            // no collection / no matched part leaves the
+            // strip absent and the detail exactly as it was.
+            await loadFranchise()
+        }
+        .fullScreenCover(item: $actorRoute) { route in
+            JoeActorPage(route: route)
         }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
@@ -1443,9 +1477,13 @@ struct JoeMovieDetail: View {
 
     /// "Diễn viên" row (v1.6): placed right after the header's
     /// overview/meta block, before the alternative-source chips
-    /// and the episode servers. The cells are deliberately NOT
-    /// buttons and carry no focus handling, so the v1.5 focus
-    /// traversal (play → chips → episodes) is untouched.
+    /// and the episode servers. Idea 20 (owner-approved): the
+    /// cells are now focusable buttons presenting the actor
+    /// page — the house .joeCardButton() construction, with
+    /// the cell's visuals byte-identical to the non-button
+    /// form they replace. (Design A's actorsLine stays a
+    /// plain text line: it is the A render's own presentation,
+    /// names only, with no per-member cell to press.)
     private func castRow(_ cast: [TMDBCastMember]) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Diễn viên")
@@ -1462,41 +1500,127 @@ struct JoeMovieDetail: View {
     }
 
     private func castCell(_ member: TMDBCastMember) -> some View {
-        VStack(spacing: 8) {
-            ZStack {
-                Circle().fill(Color.white.opacity(0.10))
-                if !member.photoURL.isEmpty, let url = URL(string: member.photoURL) {
-                    JoeRemoteImage(url: url, targetPixels: 240) {
+        Button {
+            actorRoute = .tmdb(personId: member.id, name: member.name,
+                                photoURL: member.photoURL)
+        } label: {
+            VStack(spacing: 8) {
+                ZStack {
+                    Circle().fill(Color.white.opacity(0.10))
+                    if !member.photoURL.isEmpty, let url = URL(string: member.photoURL) {
+                        JoeRemoteImage(url: url, targetPixels: 240) {
+                            castInitial(member)
+                        }
+                    } else {
                         castInitial(member)
                     }
-                } else {
-                    castInitial(member)
                 }
-            }
-            .frame(width: 110, height: 110)
-            .clipShape(Circle())
-            .overlay(Circle()
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
-            Text(member.name)
-                .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(theme.text)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-            if !member.character.isEmpty {
-                Text(member.character)
-                    .font(.system(size: 23))
-                    .foregroundStyle(theme.meta)
+                .frame(width: 110, height: 110)
+                .clipShape(Circle())
+                .overlay(Circle()
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
+                Text(member.name)
+                    .font(.system(size: 23, weight: .semibold))
+                    .foregroundStyle(theme.text)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
+                if !member.character.isEmpty {
+                    Text(member.character)
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
             }
+            .frame(width: 120)
         }
-        .frame(width: 120)
+        .joeCardButton()
+        .focused($focusedCast, equals: member.id)
     }
 
     private func castInitial(_ member: TMDBCastMember) -> some View {
         Text(String(member.name.prefix(1)))
             .font(.system(size: 38, weight: .bold))
             .foregroundStyle(.white.opacity(0.8))
+    }
+
+    // MARK: - Franchise strip (Idea 21)
+
+    /// The collection strip at the END of the detail: the
+    /// house Rail over the matched parts' PosterCards. A
+    /// tap opens that part's Movie through the navigator —
+    /// the detail's own route is cleared and re-minted, the
+    /// same fresh-detail build a rail tap gets (this detail's
+    /// @State was built from ITS route and cannot retarget
+    /// in place).
+    @ViewBuilder
+    private var franchiseStrip: some View {
+        if !franchiseMovies.isEmpty {
+            Rail(title: "🎞️ Thuộc bộ phim: \(franchiseName)") {
+                ForEach(franchiseMovies) { movie in
+                    Button { openFranchise(movie) } label: {
+                        PosterCard(
+                            title: movie.name,
+                            posterURL: movie.posterURL,
+                            tmdbId: movie.tmdbId,
+                            tmdbType: movie.tmdbType,
+                            meta: movie.cardMeta,
+                            badge: Providers.badge(movie.provider),
+                            form: .rail)
+                    }
+                    .joeCardButton()
+                    .focused($focusedFranchise, equals: movie.id)
+                }
+            }
+        }
+    }
+
+    private func openFranchise(_ movie: Movie) {
+        let movieRoute = MovieRoute(
+            provider: movie.provider, slug: movie.slug,
+            name: movie.name, poster: movie.poster, year: movie.year)
+        nav.movie = nil
+        Task { @MainActor in nav.movie = movieRoute }
+    }
+
+    /// Resolve the loaded TMDBInfo's collection into
+    /// PLAYABLE parts. Each part is searched by title across
+    /// the providers (priority order) and accepted ONLY on a
+    /// TMDB-id match — a title lookalike is not the part.
+    /// Bounded: at most one search pass per part, at most 8
+    /// cards. The current title's own part is EXCLUDED (the
+    /// owner is already on its detail; a "Đang xem" card for
+    /// it would be a dead-end duplicate). Unmatched parts
+    /// are dropped silently. Fail-soft throughout.
+    private func loadFranchise() async {
+        franchiseName = ""
+        franchiseMovies = []
+        guard let info = tmdb, info.collectionId > 0 else { return }
+        let parts = await TMDBClient.fetchCollection(id: info.collectionId)
+        let selfKey = detail?.movie.tmdbId ?? ""
+        var matched: [Movie] = []
+        for part in parts {
+            if Task.isCancelled { return }
+            if matched.count >= 8 { break }
+            let partKey = part.tmdbId
+            if !selfKey.isEmpty, partKey == selfKey { continue }
+            if matched.contains(where: { $0.tmdbId == partKey }) { continue }
+            for code in Providers.priority {
+                guard let results = try? await Providers.search(
+                    code, keyword: part.title)
+                else { continue }
+                if let hit = results.first(where: {
+                    $0.tmdbId == partKey && !$0.slug.isEmpty
+                        && ($0.tmdbType.isEmpty || $0.tmdbType == "movie")
+                }) {
+                    matched.append(hit)
+                    break
+                }
+            }
+        }
+        guard !Task.isCancelled else { return }
+        franchiseName = info.collectionName
+        franchiseMovies = matched
     }
 
     // MARK: - Play now
@@ -2040,6 +2164,33 @@ struct JoeMovieDetail: View {
         await Providers.preResolve(code: provider, detail: d,
                                    epName: target.name,
                                    epNum: target.num)
+        // Idea 23: VSMOV / Tủ Phim dwell warm — their first
+        // ladder entries are PROXY entries, so the warm
+        // builds the playable proxy URL EXACTLY as the play
+        // path in makeDirector's resolveLadder does (the
+        // JoeProxy.shared.playlistURL conversion) and warms
+        // THAT through warmUpcoming: the tap's first
+        // candidate is then the warmed item, and the
+        // StreamWarmer's take() can hand it over. If the
+        // proxy conversion fails (proxy down), the warm is
+        // skipped — never warm the direct URL behind the
+        // proxy's back. Film4K is EXCLUDED by law: its
+        // tokens rotate per API call, so a warmed F4K URL
+        // would be stale on arrival; F4K keeps only the
+        // URL-level pre-resolve above.
+        if provider == Providers.VS || provider == Providers.TP {
+            guard !Task.isCancelled else { return }
+            let ladder = await Providers.ladderFor(
+                code: provider, detail: d, filmTitle: d.movie.name,
+                epName: target.name, epNum: target.num)
+            if let first = ladder.entries.first, first.proxy,
+               let proxyURL = JoeProxy.shared.playlistURL(
+                   for: first.url, headers: first.headers) {
+                StreamWarmer.shared.warmUpcoming(
+                    url: proxyURL, headers: first.headers)
+            }
+            return
+        }
         // v2.0.24 (Sony D2's tvOS shape): for KK only, the
         // dwell warm now extends from the resolved URL to
         // the media itself. Build this episode's ladder —
@@ -2049,15 +2200,15 @@ struct JoeMovieDetail: View {
         // segments into a paused AVPlayer while the owner
         // keeps browsing; the Play tap then starts from
         // warm bytes (see JoeStreamWarmer.swift for the
-        // mechanism and its honest bounds). KK only: its
-        // entries are direct m3u8 from this session's fresh
-        // detail payload. VS/F4K/TP are excluded, as on
-        // Sony — their URLs are minted by a live resolve,
-        // and they keep the URL-level pre-resolve above.
-        // A proxy entry is skipped too (KK never proxies;
-        // the guard keeps the warm honest if that ever
-        // changes). Fail-soft throughout: a missed or stale
-        // warm leaves the tap's cold path exactly as it was.
+        // mechanism and its honest bounds). KK only here:
+        // its entries are direct m3u8 from this session's
+        // fresh detail payload. VS/TP warm through the
+        // proxy in the Idea 23 branch above; F4K stays
+        // excluded (rotating tokens). A proxy entry is
+        // skipped too (KK never proxies; the guard keeps
+        // the warm honest if that ever changes). Fail-soft
+        // throughout: a missed or stale warm leaves the
+        // tap's cold path exactly as it was.
         guard !Task.isCancelled, provider == Providers.KK
         else { return }
         let ladder = await Providers.ladderFor(
@@ -2172,18 +2323,41 @@ struct JoeMovieDetail: View {
             director.onPlayingStarted = {
                 // Playback has started: prepare episode N+1
                 // off the critical path. Every provider gets
-                // the resolver-memo pre-resolve; KK alone
-                // additionally warms the media itself, via
-                // the same ladder + first-entry pattern (and
-                // the same proxy guard) as the dwell warm in
-                // dwellPreResolve() — KK entries are direct
-                // m3u8, the other providers' URLs are minted
-                // by a live resolve and keep the URL-level
-                // preparation only. Fail-soft throughout.
+                // the resolver-memo pre-resolve; KK additionally
+                // warms the media itself, via the same ladder +
+                // first-entry pattern (and the same proxy guard)
+                // as the dwell warm in dwellPreResolve() — KK
+                // entries are direct m3u8. VSMOV / Tủ Phim warm
+                // through the proxy instead (Idea 23, the branch
+                // below — the same conversion the dwell warm
+                // performs); Film4K keeps the URL-level
+                // preparation only (rotating tokens). Fail-soft
+                // throughout.
                 Task.detached {
                     await Providers.preResolve(
                         code: sessionProvider, detail: sessionDetail,
                         epName: nextName, epNum: nextNum)
+                    // Idea 23: the VS/TP proxy warm for the
+                    // NEXT episode — the first ladder entry is
+                    // a proxy entry, so the playable proxy URL
+                    // is built exactly as makeDirector's
+                    // resolveLadder builds the play candidate
+                    // (JoeProxy.shared.playlistURL); a failed
+                    // conversion skips the warm.
+                    if sessionProvider == Providers.VS
+                        || sessionProvider == Providers.TP {
+                        let ladder = await Providers.ladderFor(
+                            code: sessionProvider, detail: sessionDetail,
+                            filmTitle: sessionDetail.movie.name,
+                            epName: nextName, epNum: nextNum)
+                        if let first = ladder.entries.first, first.proxy,
+                           let proxyURL = JoeProxy.shared.playlistURL(
+                               for: first.url, headers: first.headers) {
+                            StreamWarmer.shared.warmUpcoming(
+                                url: proxyURL, headers: first.headers)
+                        }
+                        return
+                    }
                     guard sessionProvider == Providers.KK else { return }
                     let ladder = await Providers.ladderFor(
                         code: sessionProvider, detail: sessionDetail,

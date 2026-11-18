@@ -74,14 +74,85 @@ enum Providers {
     /// network (the TVStore cache-first pattern). Genre/country
     /// requests exist only on KKPhim; the other providers are
     /// never asked for them.
-    enum ListRequest {
+    enum ListRequest: Hashable {
         case newest(page: Int)
         case byType(type: String, page: Int)
         case genre(slug: String, page: Int)
         case country(slug: String, page: Int, limit: Int?)
     }
 
+    // MARK: - Raw list memo (Idea 17, session in-memory)
+
+    /// Session in-memory memo of RAW list responses, keyed by
+    /// (provider code, ListRequest), TTL 120 s, lock-guarded
+    /// like the resolve memo below. It exists so the launch
+    /// gate does not pay for the same fetch twice: phase 1's
+    /// probe (SourceProbe, via fetchListRawFresh) lands its
+    /// real network responses here, and phase 2's PhimStore
+    /// "newest" jobs — which flow through fetchListRaw — read
+    /// them back instead of re-fetching the same four
+    /// endpoints. In-memory only: nothing is persisted, and
+    /// any fetch landing more than the TTL after the memoised
+    /// one (e.g. PhimStore's later staged refresh) misses and
+    /// goes to the network for real.
+    private struct RawMemoKey: Hashable {
+        var code: String
+        var req: ListRequest
+    }
+
+    private struct RawMemoEntry {
+        var root: [String: Any]
+        var at: Date
+    }
+
+    private static let rawMemoLock = NSLock()
+    private static var rawMemo: [RawMemoKey: RawMemoEntry] = [:]
+    private static let rawMemoTTL: TimeInterval = 120
+
+    private static func rawMemoGet(_ code: String, _ req: ListRequest) -> [String: Any]? {
+        rawMemoLock.lock()
+        defer { rawMemoLock.unlock() }
+        guard let hit = rawMemo[RawMemoKey(code: code, req: req)],
+              Date().timeIntervalSince(hit.at) <= rawMemoTTL
+        else { return nil }
+        return hit.root
+    }
+
+    private static func rawMemoSet(_ code: String, _ req: ListRequest,
+                                   _ root: [String: Any]) {
+        rawMemoLock.lock()
+        if rawMemo.count > 64 { rawMemo.removeAll() }
+        rawMemo[RawMemoKey(code: code, req: req)] =
+            RawMemoEntry(root: root, at: Date())
+        rawMemoLock.unlock()
+    }
+
+    /// Memoised raw fetch: a fresh memo hit returns the
+    /// stored root with NO network; a miss fetches for real
+    /// (fetchListRawNetwork) and writes the result into the
+    /// memo.
     static func fetchListRaw(_ code: String, _ req: ListRequest) async throws -> [String: Any] {
+        if let hit = rawMemoGet(code, req) { return hit }
+        let root = try await fetchListRawNetwork(code, req)
+        rawMemoSet(code, req, root)
+        return root
+    }
+
+    /// Fresh raw fetch for callers that must measure the REAL
+    /// network (SourceProbe's diagnostics — the gate's phase 1
+    /// and Settings' "Kiểm tra ngay"): bypasses the memo READ,
+    /// still writes every fresh result into the memo, so a
+    /// following memoised caller (the gate's phase 2) reuses
+    /// it instead of fetching again.
+    static func fetchListRawFresh(_ code: String, _ req: ListRequest) async throws -> [String: Any] {
+        let root = try await fetchListRawNetwork(code, req)
+        rawMemoSet(code, req, root)
+        return root
+    }
+
+    /// The unmemoised network fetch behind fetchListRaw /
+    /// fetchListRawFresh — the original dispatch, unchanged.
+    private static func fetchListRawNetwork(_ code: String, _ req: ListRequest) async throws -> [String: Any] {
         switch req {
         case .genre(let slug, let page):
             return try await KkClient.listByGenreRaw(slug, page: page)
@@ -128,6 +199,17 @@ enum Providers {
     static func newest(_ code: String, page: Int) async throws -> [Movie] {
         let req = ListRequest.newest(page: page)
         return parseList(code, req, try await fetchListRaw(code, req))
+    }
+
+    /// newest through the FRESH raw path: always a real
+    /// network fetch (see fetchListRawFresh), whose result
+    /// still lands in the raw memo for memoised callers.
+    /// SourceProbe uses this so its diagnostics keep
+    /// measuring the real network while exercising literally
+    /// the same Providers call the home's phase 2 reuses.
+    static func newestFresh(_ code: String, page: Int) async throws -> [Movie] {
+        let req = ListRequest.newest(page: page)
+        return parseList(code, req, try await fetchListRawFresh(code, req))
     }
 
     static func listByType(_ code: String, type: String, page: Int) async throws -> [Movie] {

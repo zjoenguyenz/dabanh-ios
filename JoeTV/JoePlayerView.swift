@@ -3,6 +3,7 @@ import AVKit
 import Combine
 import OSLog
 import SwiftUI
+import UIKit
 
 /// Playback failure log (v2.0.5, error 8a): the torrent path
 /// used to discard every engine error unread — the KS delegate
@@ -682,6 +683,100 @@ final class PlayDirector: ObservableObject {
         upNextSecondsLeft = nil
     }
 
+    // MARK: Player chrome actions (v2.0.27, Idea 13)
+    //
+    // The AVPlayer path's transport-bar menu (PlayerController
+    // below) drives these three; the KSPlayer path has its own
+    // settled chrome and never calls them. Each one reuses the
+    // standing machinery — no forked ladder, no forked advance.
+
+    /// "Đổi nguồn": a USER-initiated source switch while
+    /// playing. Advances the ladder exactly like itemFailed
+    /// (next candidate in the ladder, else the failover step
+    /// with its refresh → hop → substitution rungs), but it
+    /// is not a failure: lastFailure is left untouched and
+    /// the log records a switch, not an error. When no rung
+    /// remains the failover machinery lands on the exhausted
+    /// slate, which is the correct end state. A no-op
+    /// outside .playing.
+    func userSwitchSource() {
+        guard phase == .playing else { return }
+        let host = candidate?.url.host ?? "?"
+        PlaybackLog.logger.info(
+            "user switch source host=\(host, privacy: .public)")
+        candidateIndex += 1
+        if candidateIndex < candidates.count {
+            beginCandidate()
+        } else {
+            resolutionTask = Task { await failoverStep() }
+        }
+    }
+
+    /// "Yêu thích": toggle this title's favourite in
+    /// WatchStore. NOTE the key: identity.entry.key is the
+    /// PROGRESS key ("kk|<slug>|<episode name>"), while
+    /// favourites live under their own key (the detail
+    /// screens' favKey — WatchStore.movieFavKey /
+    /// torFavKey), so the entry handed to the store is a
+    /// copy of the session entry re-keyed to the favourite
+    /// key, exactly as the detail screens build theirs;
+    /// toggling the progress-keyed entry verbatim would
+    /// strand the favourite where no other screen ever
+    /// looks for it.
+    func toggleFavourite() {
+        var fav = identity.entry
+        fav.key = favouriteKey
+        fav.ts = Int64(Date().timeIntervalSince1970 * 1000)
+        store.toggleFavorite(fav)
+    }
+
+    /// "Tập tiếp theo": skip straight to the next episode,
+    /// from mid-play or from the countdown alike. The
+    /// current item's bookkeeping ends exactly like
+    /// itemEnded's (progress removed — the episode counts
+    /// as finished for Continue Watching), any active
+    /// countdown is cancelled through the standing cancel
+    /// path, and the advance itself runs through the same
+    /// runAdvanceFactory the countdown and "Phát ngay" use.
+    /// Sessions without a next episode do nothing.
+    func skipToNextEpisode() {
+        guard nextEpisodeFactory != nil else { return }
+        store.removeProgress(key: identity.progressKey)
+        cancelAdvance()
+        upNextGeneration += 1
+        let generation = upNextGeneration
+        upNextTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runAdvanceFactory(generation: generation)
+        }
+    }
+
+    /// The favourite key for this session's title — the
+    /// detail screens' derivation, shared by toggleFavourite
+    /// and isFavourite so the two can never disagree.
+    private var favouriteKey: String {
+        let e = identity.entry
+        if e.kind == WatchStore.kindTor {
+            return WatchStore.torFavKey(metaId: e.metaId, type: e.metaType)
+        }
+        return WatchStore.movieFavKey(provider: e.source, slug: e.slug)
+    }
+
+    /// Read by the player chrome (the menu's favourite
+    /// label) — the director owns the store, so the check
+    /// lives here.
+    var isFavourite: Bool { store.isFavorite(key: favouriteKey) }
+
+    /// Whether the transport menu offers "Tập tiếp theo".
+    var hasNextEpisode: Bool { nextEpisodeFactory != nil }
+
+    /// The session's identity entry, read by the player
+    /// chrome for the item metadata + info tab (title,
+    /// episode label, poster). Read-only: identity itself
+    /// stays private and changes only through the failover
+    /// hop, exactly as before.
+    var sessionEntry: WatchStore.Entry { identity.entry }
+
     /// Leaving the player: one last save under the same rule.
     func flush() {
         tick(positionMs: lastPosMs, durationMs: lastDurMs)
@@ -1150,6 +1245,61 @@ private struct JoePlayerSessionView: View {
     }
 }
 
+/// Info-tab page for the AVPlayer chrome (v2.0.27, Idea 13):
+/// the system player's info panel hosts this controller
+/// (AVPlayerViewController.customInfoViewControllers) — the
+/// film title, the episode label and the current source line
+/// as plain labels on a dark ground matching the player. The
+/// PlayerController Coordinator owns the one instance and
+/// re-points its labels at every new item.
+private final class JoePlayerInfoViewController: UIViewController {
+    private let titleLabel = UILabel()
+    private let episodeLabel = UILabel()
+    private let sourceLabel = UILabel()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(white: 0.08, alpha: 1)
+        titleLabel.font = .systemFont(ofSize: 38, weight: .bold)
+        titleLabel.textColor = .white
+        titleLabel.numberOfLines = 2
+        episodeLabel.font = .systemFont(ofSize: 29)
+        episodeLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        episodeLabel.numberOfLines = 1
+        sourceLabel.font = .systemFont(ofSize: 29)
+        sourceLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        sourceLabel.numberOfLines = 2
+        let stack = UIStackView(arrangedSubviews: [titleLabel, episodeLabel, sourceLabel])
+        stack.axis = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 48),
+            stack.trailingAnchor.constraint(
+                lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -48),
+            stack.topAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 48),
+        ])
+    }
+
+    /// Point the labels at a (new) item: the film title, its
+    /// episode label (hidden for single-episode titles) and
+    /// the live source line. Safe to call before the view has
+    /// loaded — the first item is observed before the info
+    /// panel is ever opened.
+    func update(title: String, episode: String, source: String) {
+        loadViewIfNeeded()
+        titleLabel.text = title
+        episodeLabel.text = episode
+        episodeLabel.isHidden = episode.isEmpty
+        sourceLabel.text = source
+        sourceLabel.isHidden = source.isEmpty
+    }
+}
+
 private struct PlayerController: UIViewControllerRepresentable {
     let candidate: PlayCandidate
     let director: PlayDirector
@@ -1179,6 +1329,7 @@ private struct PlayerController: UIViewControllerRepresentable {
             player = AVPlayer(playerItem: item)
         }
         controller.player = player
+        context.coordinator.attach(controller)
         context.coordinator.observe(item, player: player)
         player.play()
         return controller
@@ -1205,6 +1356,14 @@ private struct PlayerController: UIViewControllerRepresentable {
         private var endToken: NSObjectProtocol?
         private var timeToken: Any?
         private weak var player: AVPlayer?
+        /// Idea 13 chrome (v2.0.27): the hosting controller
+        /// (the transport menu + info tab are set on it), the
+        /// one info-tab controller whose labels follow the
+        /// item, and the in-flight poster fetch behind the
+        /// artwork metadata.
+        private weak var viewController: AVPlayerViewController?
+        private let infoController = JoePlayerInfoViewController()
+        private var artworkTask: Task<Void, Never>?
         private var failed = false
         /// U-1 stall watchdog: fires itemFailed() if the item
         /// has neither readied nor failed 20 s after observe().
@@ -1231,6 +1390,101 @@ private struct PlayerController: UIViewControllerRepresentable {
 
         init(director: PlayDirector) {
             self.director = director
+        }
+
+        /// Idea 13 (v2.0.27): adopt the hosting controller —
+        /// the info tab is installed here, once per session
+        /// view; the transport menu and the item metadata are
+        /// (re)built per item in refreshChrome, from
+        /// observe().
+        func attach(_ controller: AVPlayerViewController) {
+            viewController = controller
+            infoController.title = "Thông tin"
+            controller.customInfoViewControllers = [infoController]
+        }
+
+        /// The metadata title for an item: the film title,
+        /// plus the episode label when the entry carries one.
+        private static func displayTitle(for entry: WatchStore.Entry) -> String {
+            if entry.title.isEmpty { return entry.epLabel }
+            if entry.epLabel.isEmpty { return entry.title }
+            return "\(entry.title) — \(entry.epLabel)"
+        }
+
+        /// Per-item chrome refresh, called from observe():
+        /// the item's external metadata (title now, artwork
+        /// when the poster lands), a rebuilt transport menu
+        /// (favourite state / next-episode presence are read
+        /// at build time) and the info tab's labels.
+        private func refreshChrome(for item: AVPlayerItem) {
+            let entry = director.sessionEntry
+            let titleItem = AVMutableMetadataItem()
+            titleItem.identifier = .commonIdentifierTitle
+            titleItem.value = Self.displayTitle(for: entry) as NSString
+            titleItem.extendedLanguageTag = nil
+            DispatchQueue.main.async {
+                item.externalMetadata = [titleItem]
+            }
+            // Artwork: fetch the poster fail-soft and add it
+            // only if this item is still the player's current
+            // one when the data lands — a slow poster must
+            // never stamp itself onto the NEXT candidate.
+            artworkTask?.cancel()
+            artworkTask = nil
+            if let posterURL = entry.posterURL {
+                artworkTask = Task { [weak self] in
+                    let fetched = try? await URLSession.shared.data(from: posterURL)
+                    guard let (data, _) = fetched, !data.isEmpty else { return }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.player?.currentItem === item else { return }
+                        let artItem = AVMutableMetadataItem()
+                        artItem.identifier = .commonIdentifierArtwork
+                        artItem.value = data as NSData
+                        artItem.extendedLanguageTag = nil
+                        item.externalMetadata = [titleItem, artItem]
+                    }
+                }
+            }
+            refreshTransportMenu()
+            infoController.update(title: entry.title,
+                                  episode: entry.epLabel,
+                                  source: director.currentLabel)
+        }
+
+        /// (Re)build the "Joe TV" transport-bar menu from the
+        /// director's CURRENT state. Called per item (from
+        /// refreshChrome) and again right after a favourite
+        /// toggle, so the label the owner sees on the next
+        /// long-press is never stale.
+        private func refreshTransportMenu() {
+            guard let viewController else { return }
+            let isFav = director.isFavourite
+            let switchAction = UIAction(
+                title: "Đổi nguồn",
+                image: UIImage(systemName: "arrow.triangle.2.circlepath")
+            ) { [weak self] _ in
+                self?.director.userSwitchSource()
+            }
+            let favouriteAction = UIAction(
+                title: isFav ? "Bỏ yêu thích" : "Yêu thích",
+                image: UIImage(systemName: isFav ? "heart.fill" : "heart")
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.director.toggleFavourite()
+                self.refreshTransportMenu()
+            }
+            var children: [UIMenuElement] = [switchAction, favouriteAction]
+            if director.hasNextEpisode {
+                children.append(UIAction(
+                    title: "Tập tiếp theo",
+                    image: UIImage(systemName: "forward.end.fill")
+                ) { [weak self] _ in
+                    self?.director.skipToNextEpisode()
+                })
+            }
+            viewController.transportBarCustomMenuItems = [
+                UIMenu(title: "Joe TV", children: children)
+            ]
         }
 
         func observe(_ item: AVPlayerItem, player: AVPlayer) {
@@ -1310,6 +1564,9 @@ private struct PlayerController: UIViewControllerRepresentable {
                 let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
                 self.director.tick(positionMs: pos, durationMs: dur)
             }
+            // Idea 13: the new item gets its metadata, menu
+            // and info-tab labels (see refreshChrome).
+            refreshChrome(for: item)
         }
 
         /// The .readyToPlay transition, shared by the KVO
@@ -1393,6 +1650,8 @@ private struct PlayerController: UIViewControllerRepresentable {
         }
 
         func invalidate() {
+            artworkTask?.cancel()
+            artworkTask = nil
             watchdog?.cancel()
             watchdog = nil
             freezeTimer?.invalidate()
