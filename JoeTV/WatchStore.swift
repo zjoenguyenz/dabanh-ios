@@ -41,6 +41,16 @@ import Foundation
 /// played through the detail's Torrent entry — saved under
 /// "tor|<imdb>:1:2": two rows, and neither family's resume
 /// lookup could see the other's position.
+///
+/// L6 (v2.0.31): canonical identity is per title+episode,
+/// but the RAIL is per SERIES — the owner's rule is one
+/// Continue Watching card per series, pointing at the
+/// latest-watched episode. sameSeries + the folds in
+/// saveProgress / coalesceProgress enforce it: a save for
+/// any episode supersedes the stored row for a different
+/// episode of the same series, and the load-time coalesce
+/// applies the same fold to entries an older build left
+/// side by side (the owner's Tập 01 + Tập 02 pair).
 final class WatchStore: ObservableObject {
     static let kindKK = "kk"
     static let kindF4K = "f4k"
@@ -217,6 +227,30 @@ final class WatchStore: ObservableObject {
         return true
     }
 
+    /// v2.0.31 (L6): same SERIES, any episode — the owner's
+    /// Continue Watching rule from his 2.0.29 test (two
+    /// cards for one series, Tập 01 beside Tập 02): the
+    /// rail holds ONE card per series, pointing at the
+    /// latest-watched episode. canonicalMatch above folds
+    /// the same episode across sources; this folds ACROSS
+    /// episodes of one series. Both entries must carry an
+    /// episode number — a movie (episode -1) never folds
+    /// into a series row, and two movies never fold into
+    /// each other — and the season gate is canonicalMatch's
+    /// own, so two seasons of one show keep separate cards
+    /// when both sides state their season.
+    static func sameSeries(_ a: Entry, _ b: Entry) -> Bool {
+        guard canonicalEligible(a), canonicalEligible(b) else { return false }
+        guard episodeNumber(of: a) >= 0, episodeNumber(of: b) >= 0
+        else { return false }
+        guard sameFilm(a, b) else { return false }
+        if let sa = seasonNumber(of: a), let sb = seasonNumber(of: b),
+           sa != sb {
+            return false
+        }
+        return true
+    }
+
     /// Merge a canonical twin pair into ONE row. Progress
     /// fields always come from `incoming` (the live save /
     /// the newer entry). The surviving REOPEN identity is the
@@ -327,6 +361,19 @@ final class WatchStore: ObservableObject {
             progressEntries.removeAll { twinKeys.contains($0.key) }
         }
         progressEntries.removeAll { $0.key == merged.key }
+        // v2.0.31 (L6): one row per series — this save is
+        // the series' latest watching by construction (the
+        // tick stamps ts as it saves), so any stored row
+        // for a DIFFERENT episode of the same series is
+        // superseded and leaves; the rail's single card
+        // then points at the episode watched most
+        // recently. Same-episode rows under other keys
+        // were canonical twins and are already folded
+        // above, so what this removes is strictly other
+        // episodes.
+        progressEntries.removeAll {
+            $0.key != merged.key && Self.sameSeries($0, merged)
+        }
         progressEntries.insert(merged, at: 0)
         progressEntries.sort { $0.ts > $1.ts }
         while progressEntries.count > Self.maxProgress { progressEntries.removeLast() }
@@ -475,6 +522,19 @@ final class WatchStore: ObservableObject {
         for e in progressEntries.sorted(by: { $0.ts > $1.ts }) {
             if let i = kept.firstIndex(where: { Self.canonicalMatch($0, e) }) {
                 kept[i] = Self.mergedEntry(incoming: kept[i], old: e)
+            } else if kept.contains(where: { Self.sameSeries($0, e) }) {
+                // v2.0.31 (L6): a NEWER row for the same
+                // series already stands (the walk is
+                // newest-first) — this older episode's row
+                // is superseded by it, exactly as a fresh
+                // save would supersede it (see saveProgress).
+                // The series' card survives on the newest
+                // row with that row's own position intact;
+                // nothing else about the older row is
+                // carried over, because the card's meaning
+                // is "the episode watched last, where it
+                // stopped".
+                continue
             } else {
                 kept.append(e)
             }
