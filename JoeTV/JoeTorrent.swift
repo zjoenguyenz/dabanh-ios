@@ -620,6 +620,19 @@ struct JoeTorrentDetail: View {
             ], startPoint: .top, endPoint: .bottom)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // v2.0.23 (owner verdict on 2.0.22: every movie tab's
+        // theme is fixed, "Còn duy nhất tab torrent là chưa
+        // sửa"): this backdrop is the same fixed full-screen
+        // layer as JoeMovieDetail.ultraBackdrop — and it was
+        // the one the 2.0.22 fix missed. Without this it filled
+        // only the safe-area rect and painted as an inset
+        // framed picture, exactly as photographed (Resident
+        // Evil detail). The backdrop now bleeds edge-to-edge,
+        // the same platform idiom as the movie detail; the
+        // HStack content beside it keeps the HIG inset exactly
+        // as before, so no text or panel moves. Ultra-only —
+        // this layer exists for no other theme.
+        .ignoresSafeArea()
     }
 
     private var ultraBody: some View {
