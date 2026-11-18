@@ -153,6 +153,12 @@ final class PlayDirector: ObservableObject {
     /// cancel can never publish an advanceTarget.
     private var upNextTask: Task<Void, Never>?
     private var upNextGeneration = 0
+    /// FIX4 (fix 6): latched the first time the Up Next card
+    /// is armed for this item — by the last-10-seconds tick
+    /// trigger, or by itemEnded's fallback. A user cancel
+    /// must not let a later tick (or the end itself) re-arm
+    /// the card for the same item.
+    private var upNextArmed = false
     /// Once-per-session guard for onPlayingStarted (the
     /// firstFrameMarked guard below is its model).
     private var playingStartedNotified = false
@@ -579,6 +585,24 @@ final class PlayDirector: ObservableObject {
     func tick(positionMs: Int64, durationMs: Int64) {
         lastPosMs = positionMs
         lastDurMs = durationMs
+        // FIX4 (fix 6): the Up Next trigger moves from the
+        // END of the item to its last 10 seconds (owner
+        // finding on 2.0.27: the card appeared only once the
+        // episode had already ended). tick() runs ≈ every
+        // 5 s on both engines, so the first tick inside the
+        // window opens the card with the countdown started
+        // at the seconds ACTUALLY remaining (rounded up, so
+        // the factory fires at — never before — the item's
+        // end). Runs before the save rule below on purpose:
+        // the last-30 s branch returns early.
+        if nextEpisodeFactory != nil, !upNextArmed, durationMs > 0 {
+            let remainingMs = durationMs - positionMs
+            if remainingMs > 0, remainingMs <= 10_000 {
+                upNextArmed = true
+                startUpNextCountdown(
+                    initialSeconds: Int((remainingMs + 999) / 1000))
+            }
+        }
         guard durationMs > 0, positionMs > 10_000 else { return }
         if positionMs >= durationMs - 30_000 {
             store.removeProgress(key: identity.progressKey)
@@ -602,6 +626,12 @@ final class PlayDirector: ObservableObject {
     func itemEnded() {
         store.removeProgress(key: identity.progressKey)
         guard nextEpisodeFactory != nil else { return }
+        // FIX4 (fix 6): fallback only — when the tick
+        // trigger already armed the card, a countdown still
+        // running (or one the user cancelled inside the
+        // window) is left exactly as it stands.
+        guard !upNextArmed else { return }
+        upNextArmed = true
         startUpNextCountdown()
     }
 
@@ -611,13 +641,22 @@ final class PlayDirector: ObservableObject {
     /// runAdvanceFactory). Cancellable at every tick via
     /// cancelAdvance() / advanceNow() / deinit.
     private func startUpNextCountdown() {
+        startUpNextCountdown(initialSeconds: 10)
+    }
+
+    /// FIX4 (fix 6): the countdown's starting value as a
+    /// parameter — the tick trigger fires inside the
+    /// last-10 s window, not at its edge, so the card opens
+    /// showing the seconds actually left.
+    private func startUpNextCountdown(initialSeconds: Int) {
         upNextGeneration += 1
         let generation = upNextGeneration
         upNextTask?.cancel()
-        upNextSecondsLeft = 10
+        let start = max(1, min(10, initialSeconds))
+        upNextSecondsLeft = start
         upNextTask = Task { [weak self] in
             guard let self else { return }
-            var remaining = 10
+            var remaining = start
             while remaining > 0 {
                 do {
                     try await Task.sleep(nanoseconds: 1_000_000_000)

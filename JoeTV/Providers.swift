@@ -835,7 +835,8 @@ enum Providers {
     /// poll loop, the cache discipline and the return value's
     /// orderedAlternatives ordering are unchanged.
     static func findAlternatives(fromCode: String, name: String,
-                                 origin: String, year: String) async -> [(code: String, slug: String)] {
+                                 origin: String, year: String,
+                                 tmdbId: String = "") async -> [(code: String, slug: String)] {
         let key = filmKey(name: name, year: year) + "@" + fromCode
         if let hit = altCacheGet(key) {
             return orderedAlternatives(found: hit, fromCode: fromCode)
@@ -846,8 +847,15 @@ enum Providers {
             await withTaskGroup(of: (String, String?).self) { group in
                 for code in priority where code != fromCode {
                     group.addTask {
+                        // FIX4 (fix 8): the caller's TMDB id
+                        // rides along; only the Film4K leg
+                        // consumes it (see searchSlug) — that
+                        // leg is the TVB chain's new last rung
+                        // (Tủ Phim → KKPhim → VSMOV → Film4K,
+                        // owner-approved 2026-11-18).
                         let slug = await Providers.findSlug(
-                            code: code, name: name, origin: origin, year: year)
+                            code: code, name: name, origin: origin, year: year,
+                            tmdbId: tmdbId)
                         return (code, slug)
                     }
                 }
@@ -875,23 +883,63 @@ enum Providers {
     /// One provider's slug for a film, via its search API: search
     /// by Vietnamese name first, then by origin name; accept the
     /// first candidate that sameFilm() approves.
-    static func findSlug(code: String, name: String, origin: String, year: String) async -> String? {
-        var slug = await searchSlug(code: code, query: name, name: name, origin: origin, year: year)
+    static func findSlug(code: String, name: String, origin: String, year: String,
+                         tmdbId: String = "") async -> String? {
+        var slug = await searchSlug(code: code, query: name, name: name, origin: origin, year: year,
+                                    tmdbId: tmdbId)
         if slug == nil && !origin.trimmingCharacters(in: .whitespaces).isEmpty
             && origin.trimmingCharacters(in: .whitespaces).lowercased()
                 != name.trimmingCharacters(in: .whitespaces).lowercased() {
-            slug = await searchSlug(code: code, query: origin, name: name, origin: origin, year: year)
+            slug = await searchSlug(code: code, query: origin, name: name, origin: origin, year: year,
+                                    tmdbId: tmdbId)
         }
         return slug
     }
 
     private static func searchSlug(code: String, query: String, name: String,
-                                   origin: String, year: String) async -> String? {
+                                   origin: String, year: String,
+                                   tmdbId: String = "") async -> String? {
         let q = query.trimmingCharacters(in: .whitespaces)
         if q.isEmpty { return nil }
         guard let results = try? await search(code, keyword: q) else { return nil }
+        // FIX4 (fix 8): the Film4K leg accepts on TMDB id
+        // when the caller knows it. TVB titles are listed on
+        // Film4K under names that fail sameFilm's exact
+        // title+year test (the hunt measured 15 of 60 sampled
+        // TVB titles held by Film4K, all playable — most
+        // unreachable by name alone), while the opened
+        // detail knows the title's TMDB id. Scoped to
+        // Film4K only: the other providers' proven
+        // name-based acceptance is untouched. An id match
+        // outranks a same-title remake, so it is checked
+        // before sameFilm — on the rare result that carries
+        // an id at all (see the verification below).
+        if code == F4K, !tmdbId.isEmpty {
+            for m in results where m.tmdbId == tmdbId {
+                return m.slug
+            }
+        }
         for m in results where sameFilm(m, name: name, origin: origin, year: year) {
             return m.slug
+        }
+        // FIX4 (fix 8), the operative half: Film4K's SEARCH
+        // payload (/api/search/suggest — light items) carries
+        // NO tmdbId; the id lives only on the detail payload
+        // (/api/title — measured in F4kClient), so the loop
+        // above can almost never fire. When the name test
+        // failed and the caller knows the TMDB id, verify
+        // the search's top candidates BY DETAIL: the first
+        // whose detail carries the caller's id is the film.
+        // Bounded to 3 detail fetches per search pass,
+        // inside findAlternatives' existing 12 s envelope,
+        // and only on this leg.
+        if code == F4K, !tmdbId.isEmpty {
+            for m in results.prefix(3) {
+                if let d = try? await detail(code, slug: m.slug),
+                   d.movie.tmdbId == tmdbId {
+                    return m.slug
+                }
+            }
         }
         return nil
     }

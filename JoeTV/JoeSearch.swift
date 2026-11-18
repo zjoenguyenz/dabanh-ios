@@ -840,12 +840,21 @@ private struct JoeKeyCap: View {
 ///
 /// Focus is the known hard part on tvOS: the field must hold
 /// focus the moment the sheet lands or dictation has nowhere
-/// to go. Two constructions stack: the static .defaultFocus
-/// (the house construction — JoeMovieDetail's play button
-/// device-proves it) AND a delayed .task assignment that
-/// re-asserts the field if the cover's focus landing did not
-/// take. The task is guarded on nothing being focused yet,
-/// so it can never steal focus back from the buttons.
+/// to go — with no field focused, holding the remote's mic
+/// key summons SYSTEM Siri instead (the owner's 2.0.27
+/// finding: voice search "unusable as tested"). Two
+/// constructions stack: the static .defaultFocus (the house
+/// construction — JoeMovieDetail's play button device-proves
+/// it) AND a delayed .task assignment that claims the field
+/// shortly after appearance. FIX4 (fix 2): the claim is no
+/// longer guarded on NOTHING being focused — that guard was
+/// the fault. The cover's landing does take, but it takes
+/// on the Tìm/Huỷ buttons (their own focus section), so
+/// focus was never nil, the guarded claim never fired, and
+/// the field stayed unfocused. The claim now fires once at
+/// open unless the field already holds focus; it runs a
+/// single time, so it can never steal focus back from a
+/// user who has since navigated to the buttons.
 private struct JoeVoiceSearchSheet: View {
     @Binding var draft: String
     let onSubmit: () -> Void
@@ -862,7 +871,7 @@ private struct JoeVoiceSearchSheet: View {
             Text("Tìm bằng giọng nói")
                 .font(.system(size: 44, weight: .heavy))
                 .foregroundStyle(theme.text)
-            Text("Giữ nút micro trên remote rồi đọc tên phim — chữ hiện trong ô, bấm Tìm để tìm như gõ thường.")
+            Text("Giữ nút micro trên remote rồi đọc tên phim bằng tiếng Việt — chữ hiện trong ô, bấm Tìm để tìm như gõ thường.")
                 .font(.system(size: 25))
                 .foregroundStyle(theme.meta)
             // The field construction is JoeTorrent's search
@@ -901,11 +910,14 @@ private struct JoeVoiceSearchSheet: View {
         .onExitCommand { onCancel() }
         .defaultFocus($focus, .field)
         .task {
-            // Belt and braces beside .defaultFocus: if the
-            // cover's landing did not take, claim the field
-            // shortly after appearance.
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if focus == nil { focus = .field }
+            // Belt and braces beside .defaultFocus — FIX4
+            // (fix 2): claim the field once at open unless it
+            // already holds focus. NOT guarded on focus ==
+            // nil any more: the cover's landing puts focus on
+            // the buttons, and that state must be corrected,
+            // not respected (see the note above the struct).
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if focus != .field { focus = .field }
         }
     }
 }

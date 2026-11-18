@@ -621,6 +621,12 @@ struct JoeWallHomeView: View {
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var phim: PhimStore
+    /// FIX4 (fix 7): the wall observes the follow store so
+    /// the "📌 Đang theo dõi" shelf below appears the moment
+    /// anything is followed (and empties when the last
+    /// follow goes) — the same observation JoePhimHome's
+    /// rail home carries.
+    @ObservedObject private var followStore = FollowStore.shared
     @Environment(\.joeTheme) private var theme
     @State private var filter = JoeBrowseFilter()
     /// D-20: same "a load has been attempted" gate as the rail
@@ -757,6 +763,7 @@ struct JoeWallHomeView: View {
                     if !filter.filtersActive {
                         cwWallRail
                         favWallRail
+                        followWallRail
                     }
                     if wallMovies.isEmpty {
                         wallStateSurface
@@ -805,6 +812,7 @@ struct JoeWallHomeView: View {
                     }
                     cwWallRail
                     favWallRail
+                    followWallRail
                 }
                 if !filter.filtersActive {
                     wallCategorySections
@@ -1053,6 +1061,50 @@ struct JoeWallHomeView: View {
                             Text("Bỏ yêu thích")
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// FIX4 (fix 7): the third owner shelf — "📌 Đang theo
+    /// dõi" (idea 7a). It shipped in 2.0.25 for the A/F/Ultra
+    /// rail home only: this wall builds its shelves from the
+    /// raw joeRailSpecs list, which carries no Following
+    /// entry, so an owner on design D who pressed Theo dõi
+    /// on a detail page found the rail NOWHERE (his 2.0.27
+    /// finding). The shelf takes its place beside the other
+    /// two owner shelves (Continue Watching / Favourites —
+    /// the wall's own grouping for owner data, above the
+    /// catalogue), in their exact card construction: tap
+    /// clears the new-episode badge (markSeen, the A/F
+    /// rail's rule) and opens the title's detail; the meta
+    /// line carries the same episode text the A/F rail's
+    /// followedMovies mapping builds.
+    @ViewBuilder
+    private var followWallRail: some View {
+        if !followStore.followed.isEmpty {
+            Rail(title: "📌 Đang theo dõi") {
+                ForEach(followStore.followed) { f in
+                    Button {
+                        FollowStore.shared.markSeen(provider: f.provider,
+                                                    slug: f.slug)
+                        nav.movie = MovieRoute(
+                            provider: f.provider, slug: f.slug,
+                            name: f.title, poster: f.poster, year: "")
+                    } label: {
+                        PosterCard(
+                            title: f.title,
+                            posterURL: f.poster.isEmpty
+                                ? nil : URL(string: f.poster),
+                            meta: f.hasNewEpisodes
+                                ? "Tập mới · \(f.latestEpisodes) tập"
+                                : (f.latestEpisodes > 0
+                                    ? "\(f.latestEpisodes) tập" : ""),
+                            badge: Providers.badge(f.provider),
+                            form: .rail)
+                    }
+                    .joeCardButton()
+                    .focused($entryFocus, equals: "fol|" + f.id)
                 }
             }
         }

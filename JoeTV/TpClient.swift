@@ -153,6 +153,29 @@ enum TpClient {
             .joined(separator: " · ")
         m.imdbId = JSON.str(o, "imdbId")
         m.tmdbSeason = JSON.int(o, "tmdbSeason")
+        // FIX4 (fix 8): the TMDB id itself was never read
+        // here — parseMovie read tmdbSeason and imdbId but
+        // left tmdbId "", so a Tủ Phim detail (the TVB tab's
+        // home provider) could not feed the Film4K leg's
+        // TMDB-id acceptance in Providers.searchSlug, and
+        // the leg starved on exactly the titles it was wired
+        // for. Read tolerantly in both shapes this payload
+        // family uses — the flat field (Film4K's shape) and
+        // the KK-style tmdb object; a numeric 0 is the
+        // family's missing-value marker. Absent in both, the
+        // field stays "" and behaviour is unchanged.
+        let flatTmdbId = cleanField(JSON.str(o, "tmdbId"))
+        if !flatTmdbId.isEmpty && flatTmdbId != "0" {
+            m.tmdbId = flatTmdbId
+        } else if let tm = JSON.obj(o, "tmdb") {
+            let objTmdbId = cleanField(JSON.str(tm, "id"))
+            if !objTmdbId.isEmpty && objTmdbId != "0" {
+                m.tmdbId = objTmdbId
+            }
+            if m.tmdbType.isEmpty {
+                m.tmdbType = cleanField(JSON.str(tm, "type"))
+            }
+        }
         m.provider = Providers.TP
         return m
     }

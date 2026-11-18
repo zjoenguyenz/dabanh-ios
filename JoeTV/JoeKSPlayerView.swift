@@ -150,16 +150,27 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private let playPauseButton = UIButton(type: .system)
     private let subtitleButton = UIButton(type: .system)
     private let audioButton = UIButton(type: .system)
+    /// FIX4 (fix 4): the source switch, in the bar since
+    /// this round — idea 13's "Đổi nguồn" existed only in
+    /// the AVPlayer transport menu, so a torrent session
+    /// (this host) offered no way to change source at all
+    /// (owner finding on 2.0.27).
+    private let switchSourceButton = UIButton(type: .system)
     private let currentTimeLabel = UILabel()
     private let durationLabel = UILabel()
     private let seekBar = KSSeekBarView()
     private let bufferingSpinner = UIActivityIndicatorView(style: .medium)
     private var controlsBuilt = false
     private var controlsVisible = false
-    /// True while focus sits inside the bar or the picker:
-    /// auto-hide stands down then (hiding a focused bar would
-    /// strand the remote, the same trap class as the v2.0.5
-    /// error-8b slate).
+    /// True while focus sits inside the bar or the picker.
+    /// FIX4 (fix 5): this no longer vetoes auto-hide — it
+    /// never could be false while the bar was up (showControls
+    /// deliberately moves focus INTO the bar), so the bar
+    /// could never hide at all. Focus moves inside the bar
+    /// now simply re-arm the idle timer (see didUpdateFocus);
+    /// when it fires, the bar hides and focus returns to the
+    /// root through the same preferredFocusEnvironments path
+    /// that brought it in — the remote is never stranded.
     private var focusInControls = false
     /// 0.5 s refresh for the bar (time labels, seek fill,
     /// play/pause icon, buffering spinner) — the JTV surface's
@@ -456,7 +467,23 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // display manager in start()/viewDidAppear, so no
         // preference lingers after the session — the system
         // returns to its default mode.
-        if let window = view.window {
+        //
+        // FIX4 (fix 1): the clear is IDENTITY-GUARDED now.
+        // Hosts are recreated per attempt (.id(attemptID)),
+        // and SwiftUI's dismantle of an old attempt's host
+        // can land AFTER the replacement host's viewDidAppear
+        // already applied its own criteria to the SAME
+        // window's manager — the old unconditional clear then
+        // silently nilled the LIVE attempt's preference, and
+        // nothing ever re-applied it: display matching was
+        // dead for every session that churned an attempt
+        // before settling (the owner's 2.0.27 test: two
+        // torrent films, no badge, no mode change). Only
+        // clear while the manager still holds THIS host's
+        // object.
+        if let window = view.window,
+           let mine = pendingDisplayCriteria,
+           window.avDisplayManager.preferredDisplayCriteria === mine {
             window.avDisplayManager.preferredDisplayCriteria = nil
         }
         pendingDisplayCriteria = nil
@@ -585,6 +612,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                               for: .primaryActionTriggered)
         transportBar.addSubview(audioButton)
 
+        // FIX4 (fix 4): same dress as the track buttons,
+        // same right-hand cluster (laid out in
+        // layoutControls, left of Phụ đề).
+        styleTransportButton(switchSourceButton, title: "Đổi nguồn")
+        switchSourceButton.addTarget(self, action: #selector(switchSourceButtonTapped),
+                                     for: .primaryActionTriggered)
+        transportBar.addSubview(switchSourceButton)
+
         for label in [currentTimeLabel, durationLabel] {
             label.font = .monospacedDigitSystemFont(ofSize: 25, weight: .medium)
             label.textColor = .white
@@ -662,6 +697,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             subtitleButton.frame = CGRect(x: barWidth - 24 - audioW - (audioW > 0 ? 16 : 0) - subW,
                                           y: 12, width: subW, height: 64)
         }
+        // FIX4 (fix 4): Đổi nguồn closes the right cluster
+        // on the left — its offset walks past whichever
+        // track buttons are visible (their widths are 0
+        // while hidden, and the gaps follow the same rule
+        // as the subtitle button's own math above).
+        let switchW: CGFloat = 190
+        switchSourceButton.frame = CGRect(
+            x: barWidth - 24 - audioW - (audioW > 0 ? 16 : 0)
+               - subW - (subW > 0 ? 16 : 0) - switchW,
+            y: 12, width: switchW, height: 64)
 
         currentTimeLabel.frame = CGRect(x: 24, y: 94, width: 150, height: 48)
         durationLabel.frame = CGRect(x: barWidth - 24 - 150, y: 94, width: 150, height: 48)
@@ -739,11 +784,18 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     }
 
     /// The system bar's contract: it fades only while the
-    /// picture is actually playing, never while paused, never
-    /// while the user is standing inside it, and never under
-    /// an open picker.
+    /// picture is actually playing, never while paused, and
+    /// never under an open picker. FIX4 (fix 5): "never while
+    /// the user is standing inside it" is GONE — standing in
+    /// the bar is the bar's normal state (focus moves in when
+    /// it wakes), so that clause vetoed every hide and the
+    /// bar stayed on screen forever (owner finding on
+    /// 2.0.27). Idleness is now measured by the timer alone:
+    /// every show and every focus move inside the bar re-arms
+    /// it, and when it fires the bar hides and focus returns
+    /// to the root (setRootAcceptsFocus below).
     private func hideControlsIfIdle() {
-        guard controlsVisible, !pickerIsOpen, !focusInControls,
+        guard controlsVisible, !pickerIsOpen,
               let layer, layer.player.isPlaying else { return }
         controlsVisible = false
         controlsView.isHidden = true
@@ -759,7 +811,13 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         if focusInControls {
             controlsVisible = true
             controlsView.isHidden = false
-            hideTimer?.invalidate()
+            // FIX4 (fix 5): a focus move inside the bar is
+            // activity — restart the idle clock instead of
+            // cancelling it. The pre-fix invalidate here,
+            // combined with showControls moving focus into
+            // the bar, meant the hide timer was cancelled the
+            // moment the bar appeared and could never fire.
+            scheduleControlsHide()
         }
     }
 
@@ -1049,6 +1107,21 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         openPicker(kind: .audio)
     }
 
+    @objc private func switchSourceButtonTapped() {
+        // FIX4 (fix 4): the same user switch the AVPlayer
+        // transport menu has driven since idea 13 —
+        // PlayDirector.userSwitchSource() advances the
+        // ladder (or the failover rungs behind it) and the
+        // new candidate resumes at the live position through
+        // the standing itemReady resume rule, exactly as on
+        // the streaming path. No forked machinery. The bar
+        // is woken first so the press registers as activity
+        // even if the switch itself is a no-op outside
+        // .playing.
+        showControls()
+        director?.userSwitchSource()
+    }
+
     private func openPicker(kind: PickerKind) {
         guard ready, let layer else { return }
         pickerKind = kind
@@ -1166,6 +1239,18 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     func player(layer: KSPlayerLayer, state: KSPlayerState) {
         switch state {
         case .readyToPlay:
+            // FIX4 (fix 1): re-assert the display criteria at
+            // the moment playback actually starts. Apple's
+            // choreography (Tech Talk 503) is: state the
+            // criteria on the key window's AVDisplayManager,
+            // then start playback — the switch keys off the
+            // preference standing when frames begin. The
+            // viewDidAppear application can be lost before
+            // this point (a stale host's teardown landing
+            // late, the cover transition), so the preference
+            // is stated again here, per attempt, where it
+            // cannot be overtaken.
+            applyDisplayCriteria()
             // v2.0.5 (P3): readyToPlay disarms the first-frame
             // budget too — the engine has announced itself; a
             // start that is merely slow to fill its buffer is

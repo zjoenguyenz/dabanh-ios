@@ -806,6 +806,19 @@ struct JoeMovieDetail: View {
             // UI-6 defect D-17: F's fingerprint has NO cast
             // row (D keeps its own) — the castRow call that
             // stood here is removed.
+            // FIX4 (fix 3) — labelled DEVIATION from D-17:
+            // the owner tested 2.0.27 and found no cast
+            // anywhere in this theme, so the actor pages
+            // (idea 20) were unreachable from every F detail.
+            // The shared focusable cast row (the Ultra/D
+            // construction) is restored at exactly the slot
+            // D-17 emptied, with D's own top margin. The F
+            // drawing gains this one row; nothing else in
+            // the board changes.
+            if let tmdb, !tmdb.cast.isEmpty {
+                castRow(tmdb.cast)
+                    .padding(.top, 26)
+            }
             if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
                 Text((tmdb?.overview.isEmpty ?? true)
                      ? d.content : (tmdb?.overview ?? ""))
@@ -1093,21 +1106,73 @@ struct JoeMovieDetail: View {
     /// text line inside the info column, between the synopsis
     /// and the buttons. (Designs D and F keep the photo cast
     /// row; in A the line is the render's own presentation.)
+    ///
+    /// FIX4 (fix 3): the names are BUTTONS now — each opens
+    /// its actor page, exactly like the castRow cells in
+    /// Ultra/D. Pre-fix the line was one plain Text: visible
+    /// but not focusable, so idea 20 was unreachable in this
+    /// theme and the owner reported the cast as missing. The
+    /// line keeps its slot, prefix, 24 pt size and meta
+    /// colour; the separators ride between the buttons as
+    /// plain text, and focus paints the name alone (see
+    /// JoeActorNameLabel) — at rest the line renders as the
+    /// drawing's line.
     @ViewBuilder
     private var actorsLine: some View {
         if let tmdb, !tmdb.cast.isEmpty {
             // Design-A detail cast line: 24px in the meta colour,
             // margin-top 14 (the padding lives inside the
             // conditional so an absent cast collapses fully).
-            Text("Diễn viên: " + tmdb.cast.prefix(6)
-                .map { $0.name }.joined(separator: ", "))
-                .font(.system(size: 24))
-                .foregroundStyle(theme.meta)
-                .lineLimit(2)
-                .frame(maxWidth: 1050, alignment: .leading)
-                .padding(.top, 14)
+            HStack(spacing: 2) {
+                Text("Diễn viên: ")
+                    .font(.system(size: 24))
+                    .foregroundStyle(theme.meta)
+                ForEach(Array(tmdb.cast.prefix(6).enumerated()),
+                        id: \.offset) { index, member in
+                    if index > 0 {
+                        Text(", ")
+                            .font(.system(size: 24))
+                            .foregroundStyle(theme.meta)
+                    }
+                    Button {
+                        actorRoute = .tmdb(personId: member.id,
+                                            name: member.name,
+                                            photoURL: member.photoURL)
+                    } label: {
+                        JoeActorNameLabel(name: member.name)
+                    }
+                    .joeCardButton()
+                    .focused($focusedCast, equals: member.id)
+                }
+            }
+            .frame(maxWidth: 1050, alignment: .leading)
+            .padding(.top, 14)
         }
     }
+
+/// FIX4 (fix 3): one actor name inside design A's cast
+/// line. At rest it IS the drawing's line — 24 pt, meta
+/// colour, no chrome. Focused, the name alone gains a
+/// quiet plate and semibold weight (the house value-only
+/// focus convention for text, JoeChipLabel's family):
+/// the line's geometry and resting colours never change.
+private struct JoeActorNameLabel: View {
+    let name: String
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 24,
+                          weight: isFocused ? .semibold : .regular))
+            .foregroundStyle(isFocused ? theme.text : theme.meta)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(isFocused ? theme.surface2 : Color.clear))
+    }
+}
 
     // MARK: - Nguồn phát membership (ONE shared model, v2.0.5)
 
@@ -1948,7 +2013,8 @@ struct JoeMovieDetail: View {
                               paintedSlug: attemptedSlug)
                 alternatives = await Providers.findAlternatives(
                     fromCode: provider, name: d.movie.name,
-                    origin: d.movie.originName, year: d.movie.year)
+                    origin: d.movie.originName, year: d.movie.year,
+                    tmdbId: d.movie.tmdbId)
                 PerfLog.mark("detail.alternativesPaint")
                 // v2.0.5 (D3): the detail-time identity ladder
                 // runs alongside the alternatives lookup and lands
@@ -2110,7 +2176,8 @@ struct JoeMovieDetail: View {
         Task {
             let alts = await Providers.findAlternatives(
                 fromCode: fromCode, name: movie.name,
-                origin: movie.originName, year: movie.year)
+                origin: movie.originName, year: movie.year,
+                tmdbId: movie.tmdbId)
             guard provider == fromCode, slug == forSlug else { return }
             alternatives = alts
             PerfLog.mark("detail.alternativesPaint")
@@ -2494,7 +2561,8 @@ struct JoeMovieDetail: View {
                 else { return nil }
                 let alts = await Providers.findAlternatives(
                     fromCode: identity.entry.source, name: cur.movie.name,
-                    origin: cur.movie.originName, year: cur.movie.year)
+                    origin: cur.movie.originName, year: cur.movie.year,
+                    tmdbId: cur.movie.tmdbId)
                 // 1.9.2 (Team 9 item 2): iterate the alternatives
                 // in failover order (up to 3) instead of trying
                 // only alts.first — a first alternative whose
@@ -2612,7 +2680,8 @@ struct JoeMovieDetail: View {
                     let alts = await Providers.findAlternatives(
                         fromCode: identity.entry.source,
                         name: d.movie.name, origin: d.movie.originName,
-                        year: d.movie.year)
+                        year: d.movie.year,
+                        tmdbId: d.movie.tmdbId)
                     if let kk = alts.first(where: { $0.code == Providers.KK }),
                        let kd = try? await Providers.detail(kk.code, slug: kk.slug) {
                         tmdbId = kd.movie.tmdbId

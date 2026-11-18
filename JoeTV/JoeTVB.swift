@@ -713,6 +713,16 @@ struct JoeTVBView: View {
     /// existing alternatives search (Providers.findAlternatives,
     /// name + year over the other providers) — the detail's
     /// source chips cover switching, exactly as for any title.
+    /// FIX4 (fix 8): the chain for these titles now closes on
+    /// Film4K (owner-approved 2026-11-18: Tủ Phim → KKPhim →
+    /// VSMOV → Film4K) — the detail's alternatives search
+    /// carries the title's TMDB id into the Film4K leg, which
+    /// accepts on id where its name test fails (Providers
+    /// .searchSlug; TpClient now parses the id its payload
+    /// carries). Titles carried ONLY by Film4K still cannot
+    /// appear in this tab — the snapshot is the tab's
+    /// catalogue; that is a snapshot-rebuild question, not
+    /// this round's (see the FIX4 report).
     private func open(_ title: TVBTitle) {
         guard let target = title.routeTarget else { return }
         nav.movie = MovieRoute(
