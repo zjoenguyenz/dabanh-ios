@@ -171,9 +171,10 @@ final class MatchReminderStore: ObservableObject {
         reminders.first { $0.matchKey == key }
     }
 
-    /// Store (or replace) a reminder and schedule its local
-    /// notification 15 minutes before kickoff. Replacing an
-    /// existing key reschedules with the new kickoff.
+    /// Store (or replace) a reminder for the
+    /// 15-minutes-before-kickoff reminder. Replacing an
+    /// existing key refreshes it with the new kickoff. On
+    /// tvOS the reminder is in-app only (see schedule()).
     func setReminder(matchKey: String, title: String, kickoff: Date) {
         let reminder = Reminder(matchKey: matchKey, title: title, kickoff: kickoff)
         if let index = reminders.firstIndex(where: { $0.matchKey == matchKey }) {
@@ -228,31 +229,35 @@ final class MatchReminderStore: ObservableObject {
         notificationPrefix + matchKey
     }
 
-    /// (Re)schedule the 15-minutes-before notification for one
+    /// (Re)schedule the 15-minutes-before reminder for one
     /// reminder. Any previous pending request for the same
     /// match is replaced. If the fire date is already past,
     /// nothing is scheduled (the reminder stays stored;
     /// revalidate cleans expired reminders up).
+    ///
+    /// tvOS reality (compile fix, v2.0.27): there is NO
+    /// tvOS-supported way to present this alert. Apple's
+    /// documentation for UNMutableNotificationContent lists
+    /// the title, body and sound properties for iOS, iPadOS,
+    /// macOS, visionOS and watchOS only — in the tvOS Swift
+    /// SDK all three are unavailable, so the content object
+    /// for a presentable notification cannot even be built.
+    /// Scheduling therefore deliberately NO-OPS on tvOS:
+    /// the reminder itself stays stored and surfaced in-app
+    /// (the follow/reminder surfaces read this store), and
+    /// any stale pending request is still cleaned up below.
+    /// Do not "fix" this by restoring the iOS-shaped code —
+    /// it does not compile here, by the platform's design.
     private func schedule(_ reminder: Reminder) {
         let center = UNUserNotificationCenter.current()
         let identifier = Self.notificationID(for: reminder.matchKey)
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
         let fireDate = reminder.kickoff.addingTimeInterval(-15 * 60)
         guard fireDate > Date() else { return }
-        let title = reminder.title
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            guard granted else { return }
-            let content = UNMutableNotificationContent()
-            content.title = "⚽ Sắp đá: \(title)"
-            content.body = "Trận đấu bắt đầu sau 15 phút"
-            content.sound = .default
-            let components = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute], from: fireDate)
-            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-            let request = UNNotificationRequest(
-                identifier: identifier, content: content, trigger: trigger)
-            center.add(request, withCompletionHandler: nil)
-        }
+        // Deliberate no-op beyond the cleanup above: see the
+        // tvOS note in this method's doc comment. The
+        // reminder lives in the store and in the app's own
+        // surfaces; no system notification is scheduled.
     }
 
     private func save() {

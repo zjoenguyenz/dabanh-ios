@@ -792,6 +792,7 @@ final class PlayDirector: ObservableObject {
 /// re-subscribes to the NEW director, so a chain of
 /// episodes (each factory-built director carrying its own
 /// factory) advances repeatedly through the same box.
+@MainActor
 private final class JoeDirectorBox: ObservableObject {
     @Published private(set) var director: PlayDirector
     private var advanceSubscription: AnyCancellable?
@@ -1416,6 +1417,7 @@ private struct PlayerController: UIViewControllerRepresentable {
         /// when the poster lands), a rebuilt transport menu
         /// (favourite state / next-episode presence are read
         /// at build time) and the info tab's labels.
+        @MainActor
         private func refreshChrome(for item: AVPlayerItem) {
             let entry = director.sessionEntry
             let titleItem = AVMutableMetadataItem()
@@ -1456,6 +1458,7 @@ private struct PlayerController: UIViewControllerRepresentable {
         /// refreshChrome) and again right after a favourite
         /// toggle, so the label the owner sees on the next
         /// long-press is never stale.
+        @MainActor
         private func refreshTransportMenu() {
             guard let viewController else { return }
             let isFav = director.isFavourite
@@ -1487,6 +1490,7 @@ private struct PlayerController: UIViewControllerRepresentable {
             ]
         }
 
+        @MainActor
         func observe(_ item: AVPlayerItem, player: AVPlayer) {
             self.player = player
             // U-1: without this, an item whose status stays

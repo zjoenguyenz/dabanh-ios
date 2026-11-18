@@ -1,4 +1,6 @@
 import AVFoundation
+import AVKit
+import CoreMedia
 import KSPlayer
 import SwiftUI
 import UIKit
@@ -106,6 +108,13 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// (v2.0.5, error 3b — see beginPlaybackIfPossible), so the
     /// candidate waits here until the view has a true size.
     private var pendingCandidate: PlayCandidate?
+    /// v2.0.27 (idea 10, tvOS-corrected): the display
+    /// criteria built in start() from the candidate's
+    /// display features. start() runs before the host has a
+    /// window, so the criteria wait here and are handed to
+    /// the window's AVDisplayManager by applyDisplayCriteria
+    /// (retried from viewDidAppear, when a window exists).
+    private var pendingDisplayCriteria: AVDisplayCriteria?
     private var failed = false
     private var ready = false
     private var playing = false
@@ -246,6 +255,10 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         super.viewDidAppear(animated)
         setNeedsFocusUpdate()
         showControls()
+        // The host has a window by now: hand the window's
+        // display manager the criteria start() prepared
+        // (applyDisplayCriteria no-ops without a window).
+        applyDisplayCriteria()
         beginPlaybackIfPossible()
     }
 
@@ -269,32 +282,97 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         self.director = director
         externalSubtitleURL = candidate.subtitleURL
         pendingCandidate = candidate
-        // v2.0.26 (idea 10): display-mode matching for the
-        // torrent path. The AVPlayer path is matched by the
-        // system automatically; KSPlayer/FFmpeg is not, so
-        // the host states the candidate's display features
-        // (stamped by TorrentClient.playCandidates from the
-        // stream's own parse) through the view controller's
-        // preferredDisplayCriteria — Apple's prescribed
-        // mechanism for non-AVPlayer playback. This is a
-        // PREFERENCE the system honours subject to the
-        // user's Match Content settings (Settings > Video
-        // and Audio > Match Content) — that is Apple's
-        // intended behaviour; do not try to force or
-        // override system settings. With no rate in the
-        // release name the torrent path is film/series
-        // content, so the rate defaults to 23.976.
-        let dynamicRange: AVVideoDynamicRange =
-            candidate.dv ? .dolbyVision : (candidate.hdr ? .hdr10 : .sdr)
-        preferredDisplayCriteria = AVDisplayCriteria(
-            refreshRate: candidate.fps ?? 23.976,
-            videoDynamicRange: dynamicRange)
+        // v2.0.26 (idea 10), tvOS-corrected in v2.0.27:
+        // display-mode matching for the torrent path. The
+        // AVPlayer path is matched by the system
+        // automatically; KSPlayer/FFmpeg is not, so the host
+        // states the candidate's display features (stamped
+        // by TorrentClient.playCandidates from the stream's
+        // own parse) as an AVDisplayCriteria on the window's
+        // AVDisplayManager — Apple's prescribed mechanism
+        // for non-AVPlayer playback (Tech Talk 503). The
+        // v2.0.26 code set a `preferredDisplayCriteria`
+        // property on the view controller and built the
+        // criteria from an AVVideoDynamicRange: neither
+        // exists in the tvOS SDK (verified against Apple's
+        // documentation — AVDisplayCriteria's sole
+        // initializer is init(refreshRate:formatDescription:)
+        // and the manager is vended by the window as
+        // UIWindow.avDisplayManager). This is a PREFERENCE
+        // the system honours subject to the user's Match
+        // Content settings (Settings > Video and Audio >
+        // Match Content) — that is Apple's intended
+        // behaviour; do not try to force or override system
+        // settings. With no rate in the release name the
+        // torrent path is film/series content, so the rate
+        // defaults to 23.976.
+        pendingDisplayCriteria = Self.makeDisplayCriteria(for: candidate)
+        applyDisplayCriteria()
         view.backgroundColor = .black
         // makeUIViewController calls this BEFORE the view has
         // been laid out — creating the layer there froze the
         // surface at the pre-layout (safe-area) size forever
         // (error 3b). Actual creation waits for bounds.
         beginPlaybackIfPossible()
+    }
+
+    /// Builds the candidate's AVDisplayCriteria in the only
+    /// form the tvOS SDK offers: a refresh rate plus a
+    /// CMFormatDescription whose colour extensions carry the
+    /// dynamic range (BT.2020 primaries/matrix + SMPTE
+    /// ST 2084 PQ transfer for DV/HDR, BT.709 for SDR). The
+    /// release-name parse carries no codec or resolution, so
+    /// the description states HEVC at a nominal 3840×2160 —
+    /// the torrent ladder is x265-dominated and the DV/HDR
+    /// flags come from 2160p names; the display manager's
+    /// mode decision rides on the rate and the colour
+    /// extensions, not the stated size. Dolby Vision is
+    /// expressed as its PQ base layer: a bare format
+    /// description cannot carry the DV configuration
+    /// record, so the system may match a DV candidate as
+    /// HDR10 — the supported subset, stated plainly.
+    /// Fail-soft: any failure returns nil (no preference).
+    private static func makeDisplayCriteria(for candidate: PlayCandidate) -> AVDisplayCriteria? {
+        let primaries: CFString
+        let transfer: CFString
+        let matrix: CFString
+        if candidate.dv || candidate.hdr {
+            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_2020
+            transfer = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
+            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        } else {
+            primaries = kCMFormatDescriptionColorPrimaries_ITU_R_709_2
+            transfer = kCMFormatDescriptionTransferFunction_ITU_R_709_2
+            matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
+        }
+        let extensions: [CFString: CFString] = [
+            kCMFormatDescriptionExtension_ColorPrimaries: primaries,
+            kCMFormatDescriptionExtension_TransferFunction: transfer,
+            kCMFormatDescriptionExtension_YCbCrMatrix: matrix,
+        ]
+        var formatDescription: CMFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_HEVC,
+            width: 3840, height: 2160,
+            extensions: extensions as CFDictionary,
+            formatDescriptionOut: &formatDescription)
+        guard status == noErr, let formatDescription else { return nil }
+        return AVDisplayCriteria(
+            refreshRate: Float(candidate.fps ?? 23.976),
+            formatDescription: formatDescription)
+    }
+
+    /// Hands the pending criteria to the window's
+    /// AVDisplayManager (UIWindow.avDisplayManager — the
+    /// manager "vended by the key UIWindow" in Apple's
+    /// guidance). start() runs before the host has a window,
+    /// so this no-ops then and is retried from
+    /// viewDidAppear; assigning the (possibly nil) pending
+    /// value also clears a previous session's preference.
+    private func applyDisplayCriteria() {
+        guard let window = view.window else { return }
+        window.avDisplayManager.preferredDisplayCriteria = pendingDisplayCriteria
     }
 
     /// Creates the KSPlayerLayer and starts playback — but
@@ -373,10 +451,15 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     }
 
     func teardown() {
-        // v2.0.26 (idea 10): clear the display criteria set
-        // in start() so no preference lingers after the
-        // session — the system returns to its default mode.
-        preferredDisplayCriteria = nil
+        // v2.0.26 (idea 10), tvOS-corrected in v2.0.27:
+        // clear the display criteria handed to the window's
+        // display manager in start()/viewDidAppear, so no
+        // preference lingers after the session — the system
+        // returns to its default mode.
+        if let window = view.window {
+            window.avDisplayManager.preferredDisplayCriteria = nil
+        }
+        pendingDisplayCriteria = nil
         // A dismantled host must never begin playback late:
         // drop the deferred candidate first.
         pendingCandidate = nil
