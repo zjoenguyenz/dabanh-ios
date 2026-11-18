@@ -187,13 +187,22 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private let pickerTitleLabel = UILabel()
     private var pickerButtons: [UIButton] = []
     private var pickerIsOpen = false
-    private enum PickerKind { case subtitles, audio }
+    private enum PickerKind { case subtitles, audio, sources }
     private var pickerKind: PickerKind = .subtitles
     /// The subtitle rows' infos, cached at picker opening so
     /// a button's tag indexes the same array the selection
     /// writes back into the host's subtitle model.
     private var pickerSubtitleInfos: [any SubtitleInfo] = []
     private var pickerAudioTracks: [MediaPlayerTrack] = []
+    /// v2.0.29 (item 3): the source chooser's rows, cached at
+    /// opening like the track rows beside them — a button's
+    /// tag is the candidate's ladder index, the value
+    /// userSwitchSource(to:) consumes. pickerSourceIndex is
+    /// the CURRENT candidate's index at opening: the focus
+    /// landing (preferredFocusEnvironments) and the row's
+    /// check mark both read it.
+    private var pickerSourceLabels: [PlayDirector.SourceChoice] = []
+    private var pickerSourceIndex = -1
     /// The subtitle selection model, owned by this host.
     /// KSPlayerLayer has NO subtitle model of its own (the
     /// first 2.0.12 draft wrote against `layer.subtitleModel`
@@ -244,8 +253,18 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // that ("chỉ cho kéo tới kéo lui"). With focus IN the
         // bar, Left/Right walk the button row and Down drops
         // to the seek bar, where Left/Right step ∓30 s.
-        if pickerIsOpen, let first = pickerButtons.first {
-            return [first]
+        if pickerIsOpen {
+            // v2.0.29 (item 3): the source chooser lands on
+            // the CURRENT source's row — the owner starts
+            // from where he is and walks from there. The
+            // track pickers keep their first-row landing.
+            if pickerKind == .sources,
+               let current = pickerButtons.first(where: { $0.tag == pickerSourceIndex }) {
+                return [current]
+            }
+            if let first = pickerButtons.first {
+                return [first]
+            }
         }
         if controlsVisible {
             return [playPauseButton]
@@ -759,6 +778,11 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // v2.0.18: the bar being up means the root must not
         // hold focus (see KSPlayerHostRootView.acceptsFocus).
         setRootAcceptsFocus(false)
+        // v2.0.29 (item 2): the shell's status capsule is
+        // bound to the bar through the director — the bar
+        // waking wakes the capsule (source label / resume
+        // line) with it, and only with it.
+        director?.setTransportBarVisible(true)
         if !controlsVisible {
             controlsVisible = true
             controlsView.isHidden = false
@@ -795,10 +819,30 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// it, and when it fires the bar hides and focus returns
     /// to the root (setRootAcceptsFocus below).
     private func hideControlsIfIdle() {
-        guard controlsVisible, !pickerIsOpen,
-              let layer, layer.player.isPlaying else { return }
+        guard controlsVisible, !pickerIsOpen, let layer else { return }
+        guard layer.player.isPlaying else {
+            // v2.0.29 (item 2, the Billboard single-source
+            // case): the pre-fix guard simply returned, and
+            // NOTHING ever re-armed the timer — one veto at
+            // the fire instant (the engine momentarily not
+            // reporting its playing state: a slow first
+            // buffer, a rebuffer dip) retired the hide
+            // mechanism for the rest of the session, and the
+            // bar stayed on screen forever. The veto now
+            // re-arms the idle timer and the decision is
+            // retried on the next cycle. The paused contract
+            // is unchanged — the bar still never hides while
+            // the engine is not playing; it merely keeps
+            // checking instead of giving up after one check.
+            scheduleControlsHide()
+            return
+        }
         controlsVisible = false
         controlsView.isHidden = true
+        // v2.0.29 (item 2): the capsule hides WITH the bar —
+        // the same director flag the AVPlayer path's
+        // delegate callback drives.
+        director?.setTransportBarVisible(false)
         // v2.0.18: the bar is gone — the root takes focus back.
         setRootAcceptsFocus(true)
     }
@@ -811,6 +855,9 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         if focusInControls {
             controlsVisible = true
             controlsView.isHidden = false
+            // v2.0.29 (item 2): focus resurrecting the bar
+            // resurrects the capsule with it.
+            director?.setTransportBarVisible(true)
             // FIX4 (fix 5): a focus move inside the bar is
             // activity — restart the idle clock instead of
             // cancelling it. The pre-fix invalidate here,
@@ -1081,6 +1128,20 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         layoutSubtitleViews()
     }
 
+    /// v2.0.29 (item 3): a candidate label flattened for a
+    /// one-line picker row — Torrentio/MF stream names are
+    /// multi-line (a source line, a quality line), and the
+    /// picker rows are single-line, so the lines join with
+    /// " · " instead of truncating at the first break.
+    /// Display only; the candidate's own label is unchanged
+    /// everywhere else (the status capsule shows it whole).
+    private static func flattenedSourceLabel(_ label: String) -> String {
+        label.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
     private static func trackLabel(_ track: MediaPlayerTrack) -> String {
         var parts: [String] = []
         if let language = track.language, !language.isEmpty {
@@ -1108,21 +1169,31 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     }
 
     @objc private func switchSourceButtonTapped() {
-        // FIX4 (fix 4): the same user switch the AVPlayer
-        // transport menu has driven since idea 13 —
-        // PlayDirector.userSwitchSource() advances the
-        // ladder (or the failover rungs behind it) and the
-        // new candidate resumes at the live position through
-        // the standing itemReady resume rule, exactly as on
-        // the streaming path. No forked machinery. The bar
-        // is woken first so the press registers as activity
-        // even if the switch itself is a no-op outside
-        // .playing.
+        // v2.0.29 (item 3): the button now OPENS THE SOURCE
+        // CHOOSER — the same picker panel the subtitle/audio
+        // buttons open, listing the session's candidates —
+        // instead of the FIX4 behaviour of blindly advancing
+        // to the next candidate (owner finding on 2.0.28:
+        // "bấm là nó tự lấy một nguồn khác, không hiện danh
+        // sách cho chọn"; manual selection is his standing
+        // rule). The pick itself goes through
+        // PlayDirector.userSwitchSource(to:) — see
+        // pickerButtonTapped's .sources case. The bar is
+        // woken first so the press registers as activity.
         showControls()
-        director?.userSwitchSource()
+        openPicker(kind: .sources)
     }
 
     private func openPicker(kind: PickerKind) {
+        // v2.0.29 (item 3): the source chooser's rows come
+        // from the director's ladder, not the engine, so it
+        // is not held to the track pickers' ready + layer
+        // guard below — their rows ARE the engine's live
+        // lists, its rows exist from the session's start.
+        if kind == .sources {
+            openSourceChooser()
+            return
+        }
         guard ready, let layer else { return }
         pickerKind = kind
         for button in pickerButtons { button.removeFromSuperview() }
@@ -1132,6 +1203,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             pickerTitleLabel.text = "Phụ đề"
             pickerSubtitleInfos = subtitleModel.subtitleInfos
             pickerAudioTracks = []
+            pickerSourceLabels = []
+            pickerSourceIndex = -1
             addPickerButton(title: "Tắt", checked: subtitleModel.selectedSubtitleInfo == nil, tag: -1)
             for (index, info) in pickerSubtitleInfos.enumerated() {
                 let checked = subtitleModel.selectedSubtitleInfo?.subtitleID == info.subtitleID
@@ -1142,17 +1215,65 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             pickerTitleLabel.text = "Âm thanh"
             pickerAudioTracks = layer.player.tracks(mediaType: .audio)
             pickerSubtitleInfos = []
+            pickerSourceLabels = []
+            pickerSourceIndex = -1
             for (index, track) in pickerAudioTracks.enumerated() {
                 addPickerButton(title: Self.trackLabel(track),
                                 checked: track.isEnabled, tag: index)
             }
+        case .sources:
+            // Unreachable — routed to openSourceChooser()
+            // above; the case exists so the switch stays
+            // exhaustive over PickerKind.
+            break
         }
+        showPickerPanel()
+    }
+
+    /// v2.0.29 (item 3): the "Đổi nguồn" chooser — the
+    /// session's candidate list in the host's standing
+    /// picker panel: one row per candidate in the current
+    /// ladder, the candidate's own label (flattened to one
+    /// line), the current candidate checked, focus landing
+    /// on the current row (preferredFocusEnvironments).
+    /// Picking a row switches through
+    /// PlayDirector.userSwitchSource(to:) — the position
+    /// is kept by the standing itemReady resume rule, the
+    /// same machinery the old blind advance used.
+    private func openSourceChooser() {
+        guard let director else { return }
+        pickerKind = .sources
+        for button in pickerButtons { button.removeFromSuperview() }
+        pickerButtons.removeAll()
+        pickerTitleLabel.text = "Chọn nguồn"
+        let choices = director.sourceChoices
+        pickerSourceLabels = choices
+        pickerSubtitleInfos = []
+        pickerAudioTracks = []
+        pickerSourceIndex = choices.first(where: { $0.isCurrent })?.index ?? -1
+        for choice in choices {
+            addPickerButton(title: Self.flattenedSourceLabel(choice.label),
+                            checked: choice.isCurrent, tag: choice.index)
+        }
+        showPickerPanel()
+    }
+
+    /// The picker tail shared by every kind (extracted in
+    /// v2.0.29 from openPicker, byte-identical in effect):
+    /// the panel replaces the bar, the hide timer stands
+    /// down while a choice is open, focus moves to the
+    /// picker's preferred landing.
+    private func showPickerPanel() {
         guard !pickerButtons.isEmpty else { return }
         pickerIsOpen = true
         pickerView.isHidden = false
         transportBar.isHidden = true
         controlsVisible = true
         controlsView.isHidden = false
+        // v2.0.29 (item 2): the picker is summoned chrome —
+        // the status capsule stays with the chrome while a
+        // choice is open, like it does with the bar.
+        director?.setTransportBarVisible(true)
         hideTimer?.invalidate()
         layoutPicker()
         setNeedsFocusUpdate()
@@ -1208,6 +1329,19 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                     }
                 }
             }
+        case .sources:
+            // v2.0.29 (item 3): the tag IS the candidate's
+            // ladder index (openSourceChooser). The panel
+            // closes first — the switch recreates this host
+            // for the chosen attempt (.id(attemptID)), so no
+            // track refresh applies here — then the director
+            // switches, keeping the position through the
+            // standing itemReady resume rule. Picking the
+            // current row is the director's no-op.
+            let index = sender.tag
+            closePicker()
+            director?.userSwitchSource(to: index)
+            return
         }
         refreshTrackButtons()
         closePicker()
@@ -1222,6 +1356,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         pickerButtons.removeAll()
         pickerSubtitleInfos = []
         pickerAudioTracks = []
+        pickerSourceLabels = []
+        pickerSourceIndex = -1
         setNeedsFocusUpdate()
         showControls()
     }

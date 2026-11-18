@@ -106,6 +106,26 @@ final class PlayDirector: ObservableObject {
     @Published private(set) var attemptID = 0
     @Published var notice: String?
     @Published private(set) var currentLabel = ""
+    /// v2.0.29 (item 2): the live host's transport-bar
+    /// visibility, reported by the host itself — the KS
+    /// host from its show/hide path, the AVPlayer host from
+    /// the fix-9 delegate callback. The shell binds the
+    /// status capsule's visibility to this, so the capsule
+    /// (the candidate's source label / the resume and
+    /// failover notices) hides and returns WITH the bar on
+    /// both engines and can never linger on its own: the
+    /// capsule itself has no timer and no other state.
+    /// Starts true — both hosts open with their bar up.
+    @Published private(set) var transportBarVisible = true
+
+    /// Hosts report their bar's visibility here. Only a
+    /// change publishes, so a host re-asserting its state
+    /// (every press wakes the KS bar) costs no re-render.
+    func setTransportBarVisible(_ visible: Bool) {
+        if transportBarVisible != visible {
+            transportBarVisible = visible
+        }
+    }
     /// The most recent candidate failure's short cause (an
     /// engine error's description, or a watchdog label) — the
     /// exhausted slate shows it ("Lỗi cuối: …") so a dead
@@ -605,7 +625,7 @@ final class PlayDirector: ObservableObject {
         }
         guard durationMs > 0, positionMs > 10_000 else { return }
         if positionMs >= durationMs - 30_000 {
-            store.removeProgress(key: identity.progressKey)
+            store.removeProgress(matching: identity.entry)
             return
         }
         var e = identity.entry
@@ -624,7 +644,7 @@ final class PlayDirector: ObservableObject {
     /// follows a genuine finish. With no factory set this
     /// is byte-for-byte the pre-Up-Next behaviour.
     func itemEnded() {
-        store.removeProgress(key: identity.progressKey)
+        store.removeProgress(matching: identity.entry)
         guard nextEpisodeFactory != nil else { return }
         // FIX4 (fix 6): fallback only — when the tick
         // trigger already armed the card, a countdown still
@@ -751,6 +771,58 @@ final class PlayDirector: ObservableObject {
         }
     }
 
+    /// One row of the source chooser (v2.0.29, item 3): the
+    /// session's CURRENT candidate ladder as the player
+    /// chrome presents it — the index into the ladder, the
+    /// candidate's own label (the text the status capsule
+    /// shows for it), and whether it is the candidate on
+    /// screen. An unlabelled candidate falls back to a
+    /// numbered name, so a chooser row is never blank.
+    struct SourceChoice {
+        let index: Int
+        let label: String
+        let isCurrent: Bool
+    }
+
+    /// The chooser's rows, rebuilt from the live ladder on
+    /// every read — a failover hop replaces the ladder, and
+    /// the next menu/picker opening must show the NEW list
+    /// with the NEW current candidate marked.
+    var sourceChoices: [SourceChoice] {
+        candidates.enumerated().map { pair in
+            SourceChoice(
+                index: pair.offset,
+                label: pair.element.label.isEmpty
+                    ? "Nguồn \(pair.offset + 1)" : pair.element.label,
+                isCurrent: pair.offset == candidateIndex)
+        }
+    }
+
+    /// "Đổi nguồn" to a CHOSEN candidate (v2.0.29, item 3):
+    /// the owner picks from sourceChoices in the player
+    /// chrome (the KS host's source picker; the AVPlayer
+    /// transport-bar submenu) instead of the button blindly
+    /// advancing to the next candidate — manual source
+    /// selection is his standing rule. The switch itself is
+    /// beginCandidate(), the same re-arm the failover ladder
+    /// uses, so the standing itemReady resume rule carries
+    /// the live position (lastPosMs, kept current by tick())
+    /// onto the chosen candidate exactly as it does for
+    /// userSwitchSource() and itemFailed. Picking the
+    /// current candidate, an out-of-ladder index, or
+    /// picking outside .playing is a no-op. Auto failover
+    /// (itemFailed and its rungs) is untouched.
+    func userSwitchSource(to index: Int) {
+        guard phase == .playing,
+              candidates.indices.contains(index),
+              index != candidateIndex else { return }
+        let host = candidates[index].url.host ?? "?"
+        PlaybackLog.logger.info(
+            "user switch source (chosen) host=\(host, privacy: .public)")
+        candidateIndex = index
+        beginCandidate()
+    }
+
     /// "Yêu thích": toggle this title's favourite in
     /// WatchStore. NOTE the key: identity.entry.key is the
     /// PROGRESS key ("kk|<slug>|<episode name>"), while
@@ -780,7 +852,7 @@ final class PlayDirector: ObservableObject {
     /// Sessions without a next episode do nothing.
     func skipToNextEpisode() {
         guard nextEpisodeFactory != nil else { return }
-        store.removeProgress(key: identity.progressKey)
+        store.removeProgress(matching: identity.entry)
         cancelAdvance()
         upNextGeneration += 1
         let generation = upNextGeneration
@@ -973,7 +1045,22 @@ private struct JoePlayerSessionView: View {
                             .ignoresSafeArea()
                     }
                 }
+                // v2.0.29 (item 2): the capsule — the source
+                // label, the resume line, every failover
+                // notice — is bound to the SAME visibility
+                // state as the live host's transport bar,
+                // reported into the director by the host
+                // itself (KS: its show/hide path; AVPlayer:
+                // the fix-9 delegate callback). Bar hidden →
+                // capsule hidden; bar summoned → capsule back.
+                // No separate timer exists for it any more:
+                // pre-fix it was rendered unconditionally in
+                // .playing, and since `notice` is never
+                // cleared, the "Tiếp tục từ …" line in
+                // particular stayed on screen for the whole
+                // film after the bar had gone.
                 statusCapsule
+                    .opacity(director.transportBarVisible ? 1 : 0)
             case .exhausted:
                 // §8 error slate: message + cause + reachable
                 // buttons, focus on the first button. (v1.8's
@@ -1449,6 +1536,16 @@ private struct PlayerController: UIViewControllerRepresentable {
             // INCLUDED — it belongs with the bar.
             controller.delegate = self
             controller.transportBarIncludesTitleView = true
+            // v2.0.29 (item 2): a freshly attached
+            // controller's bar starts visible — report that
+            // to the director so the status capsule starts
+            // with the bar even when a previous attempt in
+            // this session (e.g. a KS attempt before the
+            // torrent substitution rung, or the reverse) had
+            // reported its own bar hidden.
+            DispatchQueue.main.async { [weak self] in
+                self?.director.setTransportBarVisible(true)
+            }
         }
 
         /// FIX4 (fix 9): the Title View binding. AVKit renders
@@ -1472,6 +1569,32 @@ private struct PlayerController: UIViewControllerRepresentable {
             with _: AVPlayerViewControllerAnimationCoordinator
         ) {
             playerViewController.transportBarIncludesTitleView = visible
+            // v2.0.29 (item 2): the SAME announced state is
+            // reported into the director, where the shell's
+            // status capsule is bound to it — the capsule
+            // (source label / resume line) now follows this
+            // path's bar exactly as the Title View does,
+            // from the one announcement, so the three can
+            // never drift apart. (Pre-fix the capsule was
+            // rendered unconditionally and the resume line
+            // lingered after bar + title had hidden — the
+            // owner's normal-film finding on 2.0.28.)
+            DispatchQueue.main.async { [weak self] in
+                self?.director.setTransportBarVisible(visible)
+            }
+        }
+
+        /// v2.0.29 (item 3): a candidate label flattened for
+        /// a one-line menu row — the same treatment as the
+        /// KS host's chooser rows (multi-line stream names
+        /// join with " · " instead of truncating at the
+        /// first line break). Display only; the candidate's
+        /// own label is unchanged everywhere else.
+        private static func flattenedSourceLabel(_ label: String) -> String {
+            label.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
         }
 
         /// The metadata title for an item: the film title,
@@ -1540,12 +1663,30 @@ private struct PlayerController: UIViewControllerRepresentable {
         private func refreshTransportMenu() {
             guard let viewController else { return }
             let isFav = director.isFavourite
-            let switchAction = UIAction(
+            // v2.0.29 (item 3): "Đổi nguồn" is a SUBMENU —
+            // the session's candidate list, each row the
+            // candidate's own label with the current one
+            // checked (.on) — instead of the pre-fix single
+            // action that blindly advanced to the next
+            // candidate. Picking a row switches to THAT
+            // candidate through userSwitchSource(to:),
+            // which keeps the playback position via the
+            // standing itemReady resume rule. The menu is
+            // rebuilt per item (refreshChrome) and after a
+            // favourite toggle, so the check mark is never
+            // stale. Same transport-menu pattern as the
+            // rest of this menu — no new presentation form.
+            let switchMenu = UIMenu(
                 title: "Đổi nguồn",
-                image: UIImage(systemName: "arrow.triangle.2.circlepath")
-            ) { [weak self] _ in
-                self?.director.userSwitchSource()
-            }
+                image: UIImage(systemName: "arrow.triangle.2.circlepath"),
+                children: director.sourceChoices.map { choice in
+                    UIAction(
+                        title: Self.flattenedSourceLabel(choice.label),
+                        state: choice.isCurrent ? .on : .off
+                    ) { [weak self] _ in
+                        self?.director.userSwitchSource(to: choice.index)
+                    }
+                })
             let favouriteAction = UIAction(
                 title: isFav ? "Bỏ yêu thích" : "Yêu thích",
                 image: UIImage(systemName: isFav ? "heart.fill" : "heart")
@@ -1554,7 +1695,7 @@ private struct PlayerController: UIViewControllerRepresentable {
                 self.director.toggleFavourite()
                 self.refreshTransportMenu()
             }
-            var children: [UIMenuElement] = [switchAction, favouriteAction]
+            var children: [UIMenuElement] = [switchMenu, favouriteAction]
             if director.hasNextEpisode {
                 children.append(UIAction(
                     title: "Tập tiếp theo",
