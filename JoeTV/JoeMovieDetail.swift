@@ -65,6 +65,25 @@ struct JoeMovieDetail: View {
     @State private var lastGoodProvider: String
     @State private var lastGoodSlug: String
     @State private var switchNotice: String?
+    /// v2.0.31 (L7): TVB holders struck during this page's
+    /// life — a holder whose loaded payload CONTRADICTED
+    /// the snapshot identity (or, for a name-fallback
+    /// record, failed to affirm it), or that failed to
+    /// load at all, is never retried on this page; the
+    /// load walks the remaining holders and lands on the
+    /// honest no-exact-source state when none are left.
+    /// Empty on every non-TVB page.
+    @State private var tvbStruck: Set<String> = []
+    /// v2.0.31 (L7): every TVB holder struck — the error
+    /// slate is showing the no-exact-source wording
+    /// instead of a film (and instead of the generic
+    /// network wording).
+    @State private var tvbNoExactSource = false
+    /// v2.0.31 (I1): the auto-pick runs at most once per
+    /// page — after it moves the page to a playable
+    /// holder, later loads (the switch that follows
+    /// included) never re-evaluate into a second move.
+    @State private var tvbAutoPickDone = false
     /// Owner source-priority policy (2026-11-15, IN v2.0.0 per
     /// the owner's 16:08 ruling): the Nguồn phát mode for THIS
     /// film's play sessions — Tự động (true, the default) or a
@@ -161,17 +180,26 @@ struct JoeMovieDetail: View {
                     franchiseStrip
                 } else if loadFailed {
                     // §8: the G3 error shape + Retry.
+                    // v2.0.31 (L7): a TVB page that exhausted
+                    // its holders says THAT — the app never
+                    // substitutes a different film, and the
+                    // wording must not blame the network for
+                    // an identity verdict.
                     VStack(alignment: .leading, spacing: 16) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 44))
                             .foregroundStyle(.orange)
-                        Text("Không tải được thông tin phim.")
+                        Text(tvbNoExactSource
+                             ? "Không mở được đúng phim này."
+                             : "Không tải được thông tin phim.")
                             .font(.system(size: 29, weight: .semibold))
                             .foregroundStyle(theme.text)
-                        Text("Kiểm tra mạng rồi thử lại.")
+                        Text(tvbNoExactSource
+                             ? "Các nguồn TVB đều không dùng được hoặc không khớp đúng phim — app không mở thay bằng phim khác."
+                             : "Kiểm tra mạng rồi thử lại.")
                             .font(.system(size: 25))
                             .foregroundStyle(theme.meta)
-                        Button { Task { await load() } } label: {
+                        Button { Task { await retryLoad() } } label: {
                             JoePrimaryLabel(title: "Thử lại")
                         }
                         .joeCardButton()
@@ -2146,6 +2174,14 @@ private struct JoeCastCellLabel: View {
                 let d = try await Providers.detail(provider, slug: slug)
                 JoeDetailCache.write(d, provider: attemptedProvider,
                                      slug: attemptedSlug)
+                // v2.0.31 (L7): the TVB identity gate — a
+                // payload that is not the snapshot's film
+                // never paints (see tvbGate). Non-TVB
+                // routes pass straight through.
+                guard tvbGate(d, attemptedProvider: attemptedProvider) else {
+                    switching = false
+                    return
+                }
                 detail = d
                 PerfLog.mark("detail.networkPaint")
                 switching = false
@@ -2154,18 +2190,29 @@ private struct JoeCastCellLabel: View {
                 launchTPProbe(painted: d,
                               paintedProvider: attemptedProvider,
                               paintedSlug: attemptedSlug)
-                alternatives = await Providers.findAlternatives(
-                    fromCode: provider, name: d.movie.name,
-                    origin: d.movie.originName, year: d.movie.year,
-                    tmdbId: d.movie.tmdbId)
+                // v2.0.31 (L7): a TVB page's alternatives
+                // are the snapshot's own holders, never a
+                // name search (see tvbOrderedAlternatives);
+                // every other route keeps findAlternatives.
+                if route.tvb != nil {
+                    alternatives = await tvbOrderedAlternatives(playable: nil)
+                } else {
+                    alternatives = await Providers.findAlternatives(
+                        fromCode: provider, name: d.movie.name,
+                        origin: d.movie.originName, year: d.movie.year,
+                        tmdbId: d.movie.tmdbId)
+                }
                 PerfLog.mark("detail.alternativesPaint")
                 // v2.0.5 (D3): the detail-time identity ladder
                 // runs alongside the alternatives lookup and lands
                 // in view state, so the source row re-renders with
                 // the Torrent entry's state the moment it resolves.
-                filmIdentity = await Providers.resolveIdentity(
-                    movie: d.movie, fromCode: provider,
-                    alternatives: alternatives)
+                // v2.0.31 (L7): for a TVB session the ladder's
+                // answer is pinned to the snapshot's ids.
+                filmIdentity = tvbPinnedIdentity(
+                    await Providers.resolveIdentity(
+                        movie: d.movie, fromCode: provider,
+                        alternatives: alternatives))
                 PerfLog.mark("detail.identityPaint")
             } catch {
                 switching = false
@@ -2204,6 +2251,13 @@ private struct JoeCastCellLabel: View {
             if let cached = await JoeDetailCache.readAsync(
                 provider: attemptedProvider, slug: attemptedSlug),
                !race.networkPainted {
+                // v2.0.31 (L7): the TVB identity gate covers
+                // the cache paint too — a cached payload for
+                // a name-fallback slug can be a different
+                // film, and the owner's complaint is exactly
+                // that the wrong film OPENS.
+                guard tvbGate(cached, attemptedProvider: attemptedProvider)
+                else { return }
                 detail = cached
                 landInitialFocus(on: cached)
                 race.cachedPaint = cached
@@ -2218,6 +2272,14 @@ private struct JoeCastCellLabel: View {
             JoeDetailCache.write(d, provider: attemptedProvider,
                                  slug: attemptedSlug)
             race.networkPainted = true
+            // v2.0.31 (L7): the TVB identity gate (see
+            // tvbGate). A strike here advances provider/slug
+            // and the .task(id:) re-fire loads the next
+            // holder; nothing of this payload paints.
+            guard tvbGate(d, attemptedProvider: attemptedProvider) else {
+                switching = false
+                return
+            }
             if let cachedPaint = race.cachedPaint {
                 if JoeDetailCache.fingerprint(d)
                     != JoeDetailCache.fingerprint(cachedPaint) {
@@ -2274,6 +2336,24 @@ private struct JoeCastCellLabel: View {
                     movie: cachedPaint.movie,
                     fromCode: attemptedProvider,
                     forSlug: attemptedSlug)
+            } else if route.tvb != nil,
+                      attemptedProvider == provider,
+                      attemptedSlug == slug,
+                      tvbStrikeAndAdvance(reason: "không tải được") {
+                // v2.0.31 (I1/L7): a TVB holder that fails
+                // to LOAD at all is struck like a
+                // contradicting one — the page walks the
+                // snapshot's holders before it gives up,
+                // instead of dying on the first source.
+                // The provider/slug change re-fires this
+                // task for the next holder. Exhaustion
+                // (tvbStrikeAndAdvance returning false) has
+                // already set the no-exact-source state and
+                // falls through to the plain error below.
+                // The attempted==current guard keeps a
+                // CANCELLED fetch (the owner switched
+                // provider mid-flight) from striking the
+                // provider he just chose.
             } else {
                 loadFailed = true
                 focusedRetry = true
@@ -2320,6 +2400,39 @@ private struct JoeCastCellLabel: View {
                                                fromCode: String,
                                                forSlug: String) {
         Task {
+            // v2.0.31 (L7 + I1): a TVB session's alternatives
+            // are the snapshot's own holders (never a name
+            // search), ordered by whether their ladders
+            // actually resolve (I1 — see tvbPlayableHolders);
+            // when the CURRENT holder does not resolve and
+            // another does, the page auto-picks the playable
+            // holder — Tự động mode only (a pinned source is
+            // never overridden), never once playback has
+            // started, and at most once per page.
+            if route.tvb != nil {
+                let playable = await tvbPlayableHolders()
+                guard provider == fromCode, slug == forSlug else { return }
+                alternatives = await tvbOrderedAlternatives(playable: playable)
+                PerfLog.mark("detail.alternativesPaint")
+                if !playable.contains(provider), autoSource,
+                   playerHolder == nil, !tvbAutoPickDone,
+                   let pick = alternatives.first(where: {
+                       playable.contains($0.code)
+                   }) {
+                    tvbAutoPickDone = true
+                    switchNotice = "Nguồn \(Providers.displayName(provider)) không phát được tập này — đã tự chọn nguồn \(Providers.displayName(pick.code))"
+                    provider = pick.code
+                    slug = pick.slug
+                    return
+                }
+                let identity = await Providers.resolveIdentity(
+                    movie: movie, fromCode: fromCode,
+                    alternatives: alternatives)
+                guard provider == fromCode, slug == forSlug else { return }
+                filmIdentity = tvbPinnedIdentity(identity)
+                PerfLog.mark("detail.identityPaint")
+                return
+            }
             let alts = await Providers.findAlternatives(
                 fromCode: fromCode, name: movie.name,
                 origin: movie.originName, year: movie.year,
@@ -2336,6 +2449,206 @@ private struct JoeCastCellLabel: View {
             filmIdentity = identity
             PerfLog.mark("detail.identityPaint")
         }
+    }
+
+    // MARK: - v2.0.31 TVB identity + auto-pick (L7 / I1)
+    //
+    // Everything below serves ONLY routes carrying a TVB
+    // snapshot context (route.tvb != nil); the non-TVB
+    // flows never reach it (tvbGate passes straight
+    // through, the alternatives builders are only called
+    // behind the same condition).
+
+    /// The identity gate every TVB paint passes through
+    /// (L7): the payload must be ACCEPTED by the snapshot
+    /// context for the provider it was fetched from
+    /// (TVBRouteContext.accepts). A rejected payload
+    /// strikes its holder and advances the page to the
+    /// next one — the change re-fires load() through
+    /// .task(id:) — or lands on the no-exact-source state
+    /// at exhaustion. A landing for a provider the page
+    /// has already left (attempted != current) is dropped
+    /// silently: never painted, never struck twice — the
+    /// current holder's own load is deciding.
+    private func tvbGate(_ d: Detail, attemptedProvider: String) -> Bool {
+        guard let ctx = route.tvb else { return true }
+        guard attemptedProvider == provider else { return false }
+        if ctx.accepts(d.movie, provider: attemptedProvider) { return true }
+        _ = tvbStrikeAndAdvance(reason: "không khớp đúng phim này")
+        return false
+    }
+
+    /// Strike the CURRENT holder and move the page to the
+    /// next unstruck snapshot holder, if one remains.
+    /// Returns true when it advanced. At exhaustion: with
+    /// a detail on screen (a switch-path strike-out) the
+    /// page reverts to the last-good holder — the C-9
+    /// shape — and says so; with nothing on screen (a
+    /// first-open strike-out) it sets the no-exact-source
+    /// error state. Either way it returns false. The
+    /// notice names the providers so the owner sees the
+    /// move and its reason (§8).
+    @discardableResult
+    private func tvbStrikeAndAdvance(reason: String) -> Bool {
+        guard let ctx = route.tvb else { return false }
+        tvbStruck.insert(provider)
+        if let next = ctx.holders.first(where: {
+            $0.provider != provider && !tvbStruck.contains($0.provider)
+        }) {
+            switchNotice = "Nguồn \(Providers.displayName(provider)) \(reason) — đã chuyển sang nguồn \(Providers.displayName(next.provider))"
+            provider = next.provider
+            slug = next.slug
+            return true
+        }
+        if detail != nil {
+            provider = lastGoodProvider
+            slug = lastGoodSlug
+            switchNotice = "Không nguồn nào khớp đúng phim này — vẫn dùng nguồn \(Providers.displayName(lastGoodProvider))"
+            return false
+        }
+        tvbNoExactSource = true
+        loadFailed = true
+        focusedRetry = true
+        return false
+    }
+
+    /// The error slate's Retry: for a TVB page that
+    /// exhausted its holders, a retry first clears the
+    /// strikes and restarts from the snapshot's primary
+    /// holder (a changed provider/slug re-fires load()
+    /// through .task(id:) by itself; an unchanged pair
+    /// runs load() here). Every other page retries
+    /// exactly as before.
+    private func retryLoad() async {
+        guard route.tvb != nil else { await load(); return }
+        tvbStruck = []
+        tvbNoExactSource = false
+        loadFailed = false
+        if let first = route.tvb?.holders.first,
+           first.provider != provider || first.slug != slug {
+            provider = first.provider
+            slug = first.slug
+        } else {
+            await load()
+        }
+    }
+
+    /// For a TVB session the SNAPSHOT is the identity
+    /// authority: the ladder's answer is pinned to its
+    /// ids, so the Torrent entry and the substitution
+    /// rung address the snapshot's series, never an
+    /// identity a name search drifted to.
+    private func tvbPinnedIdentity(
+        _ id: Providers.FilmIdentity
+    ) -> Providers.FilmIdentity {
+        guard let ctx = route.tvb else { return id }
+        var pinned = id
+        if !ctx.imdbId.isEmpty { pinned.imdbId = ctx.imdbId }
+        pinned.tmdbId = "\(ctx.tmdbId)"
+        pinned.tmdbType = "tv"
+        return pinned
+    }
+
+    /// The TVB alternatives list, built from the
+    /// snapshot's holders only (excluding the current
+    /// provider and any struck holder): with a
+    /// playability verdict (the first-open evaluation),
+    /// resolving holders lead in snapshot order with
+    /// SourceHealth-demoted providers behind healthy
+    /// ones (the standing orderedAlternatives
+    /// discipline), and non-resolving holders follow in
+    /// snapshot order — the manual source chips list
+    /// every surviving holder either way, so manual
+    /// selection is untouched. Without a verdict
+    /// (provider switches) the order is plain snapshot
+    /// order — the chain's TP → KK → VS priority. The
+    /// Film4K leg — found by Providers.findSlug, whose
+    /// Film4K acceptance is a TMDB-id detail match —
+    /// closes the list when Film4K is not itself a
+    /// holder: the chain's standing last rung.
+    private func tvbOrderedAlternatives(
+        playable: Set<String>?
+    ) async -> [(code: String, slug: String)] {
+        guard let ctx = route.tvb else { return [] }
+        let others = ctx.holders.filter {
+            $0.provider != provider && !tvbStruck.contains($0.provider)
+        }
+        let ordered: [TVBRouteContext.Holder]
+        if let playable {
+            let resolving = others.filter { playable.contains($0.provider) }
+            ordered = resolving.filter {
+                !SourceHealth.providerDemoted($0.provider)
+            } + resolving.filter {
+                SourceHealth.providerDemoted($0.provider)
+            } + others.filter { !playable.contains($0.provider) }
+        } else {
+            ordered = others
+        }
+        var result = ordered.map { (code: $0.provider, slug: $0.slug) }
+        if !ctx.holders.contains(where: { $0.provider == Providers.F4K }),
+           !tvbStruck.contains(Providers.F4K),
+           let f4kSlug = await Providers.findSlug(
+               code: Providers.F4K, name: route.name, origin: "",
+               year: route.year, tmdbId: "\(ctx.tmdbId)") {
+            result.append((code: Providers.F4K, slug: f4kSlug))
+        }
+        return result
+    }
+
+    /// I1's playability verdict: which of the snapshot's
+    /// holders can actually play this title's start
+    /// episode, judged by the app's own resolution
+    /// machinery — each holder's detail is fetched and
+    /// Providers.ladderFor must produce at least one
+    /// entry, the same ladder the player would build,
+    /// with SourceHealth's server gates inside it. The
+    /// CURRENT holder is judged from the detail already
+    /// on screen (no second fetch). A holder whose
+    /// payload fails the L7 identity verdict is never
+    /// playable. All other holders are judged
+    /// concurrently; a failed fetch or empty ladder
+    /// simply reads unplayable (fail-soft). The
+    /// resolutions land in the resolver memo, so the
+    /// Play tap that follows starts warm.
+    private func tvbPlayableHolders() async -> Set<String> {
+        guard let ctx = route.tvb, let current = detail else { return [] }
+        let target = dwellTarget(detail: current)
+        var playable: Set<String> = []
+        if let target {
+            let ladder = await Providers.ladderFor(
+                code: provider, detail: current,
+                filmTitle: current.movie.name,
+                epName: target.name, epNum: target.num)
+            if !ladder.entries.isEmpty { playable.insert(provider) }
+        }
+        let others = ctx.holders.filter {
+            $0.provider != provider && !tvbStruck.contains($0.provider)
+        }
+        if !others.isEmpty {
+            let epName = target?.name
+            let epNum = target?.num ?? 0
+            let found = await withTaskGroup(of: String?.self) { group in
+                for holder in others {
+                    group.addTask {
+                        guard let d = try? await Providers.detail(
+                            holder.provider, slug: holder.slug)
+                        else { return nil }
+                        guard ctx.accepts(d.movie, provider: holder.provider)
+                        else { return nil }
+                        let ladder = await Providers.ladderFor(
+                            code: holder.provider, detail: d,
+                            filmTitle: d.movie.name,
+                            epName: epName, epNum: epNum)
+                        return ladder.entries.isEmpty ? nil : holder.provider
+                    }
+                }
+                var collected: [String] = []
+                for await r in group { if let r { collected.append(r) } }
+                return collected
+            }
+            playable.formUnion(found)
+        }
+        return playable
     }
 
     /// TMDB backdrop hunt for the staged TMDB task (Phase 2):
@@ -2504,7 +2817,8 @@ private struct JoeCastCellLabel: View {
             : "Nguồn: \(Providers.displayName(provider)) · đã ghim"
         let director = Self.makeDirector(
             provider: provider, detail: d, epName: epName,
-            watch: watch, torrentFirst: torrentFirst)
+            watch: watch, torrentFirst: torrentFirst,
+            tvb: route.tvb, tvbHopList: alternatives)
         // Idea 6 (checkpoint 2.0.25) — Up Next wiring,
         // EPISODE sessions only. Every play in this file is
         // built from the detail's CURRENT provider state
@@ -2525,13 +2839,19 @@ private struct JoeCastCellLabel: View {
             let sessionProvider = provider
             let sessionDetail = d
             let sessionWatch = watch
+            // v2.0.31 (L7/I1): the next-episode session
+            // inherits the TVB context + hop list exactly
+            // as it inherits the provider (see above).
+            let sessionTVB = route.tvb
+            let sessionHopList = alternatives
             let nextNum = Providers.episodeNumber(nextName)
             director.nextEpisodeTitle = nextName
             director.nextEpisodeFactory = {
                 Self.makeDirector(
                     provider: sessionProvider, detail: sessionDetail,
                     epName: nextName, watch: sessionWatch,
-                    torrentFirst: torrentFirst)
+                    torrentFirst: torrentFirst,
+                    tvb: sessionTVB, tvbHopList: sessionHopList)
             }
             director.onPlayingStarted = {
                 // Playback has started: prepare episode N+1
@@ -2608,9 +2928,18 @@ private struct JoeCastCellLabel: View {
     /// one cross-provider hop (KK ↔ Film4K ↔ VSMOV), with the
     /// resume position carried from the stored entry. Mirrors
     /// the Android player wiring.
+    /// v2.0.31 (L7): `tvb` carries the TVB snapshot context
+    /// for TVB sessions (nil otherwise) — the hop then walks
+    /// only the snapshot's holders (`tvbHopList` first: the
+    /// detail's evaluated alternatives) under the identity
+    /// verdict, and the torrent rung is pinned to the
+    /// snapshot's IMDb id. Non-TVB sessions are unchanged.
     static func makeDirector(provider: String, detail: Detail,
                              epName: String, watch: WatchStore,
-                             torrentFirst: Bool = false) -> PlayDirector {
+                             torrentFirst: Bool = false,
+                             tvb: TVBRouteContext? = nil,
+                             tvbHopList: [(code: String, slug: String)] = [])
+        -> PlayDirector {
         let m = detail.movie
         var entry = WatchStore.Entry()
         entry.kind = Providers.kindOf(provider)
@@ -2662,7 +2991,8 @@ private struct JoeCastCellLabel: View {
                 if torrentFirst {
                     first = await JoeMovieDetail.torrentFallbackCandidates(
                         identity: identity, originDetail: detail,
-                        originProvider: provider, highQualityOnly: true)
+                        originProvider: provider, highQualityOnly: true,
+                        pinnedImdbId: tvb?.imdbId ?? "")
                 }
                 // First call for the ORIGIN identity: the
                 // on-screen detail IS the metadata (see the
@@ -2708,21 +3038,49 @@ private struct JoeCastCellLabel: View {
                 }
             },
             hopIdentity: { identity in
-                guard let cur = try? await Providers.detail(
-                    identity.entry.source, slug: identity.entry.slug)
-                else { return nil }
-                let alts = await Providers.findAlternatives(
-                    fromCode: identity.entry.source, name: cur.movie.name,
-                    origin: cur.movie.originName, year: cur.movie.year,
-                    tmdbId: cur.movie.tmdbId)
-                // 1.9.2 (Team 9 item 2): iterate the alternatives
-                // in failover order (up to 3) instead of trying
-                // only alts.first — a first alternative whose
-                // detail fetch fails no longer ends the hop while
-                // a second carrier of the same film stands ready.
-                for alt in alts.prefix(3) {
+                // v2.0.31 (L7): a TVB session hops ONLY
+                // inside the snapshot's holders — the
+                // detail's evaluated hop list first, then
+                // any remaining holders — and every
+                // candidate payload must pass the snapshot
+                // identity verdict before it is adopted.
+                // The name-search hop below never runs for
+                // TVB: a same-named different film is not a
+                // failover target, it is the fault itself.
+                let hopCandidates: [(code: String, slug: String)]
+                if let tvb {
+                    var order = tvbHopList
+                    for holder in tvb.holders
+                    where !order.contains(where: {
+                        $0.code == holder.provider
+                    }) {
+                        order.append((code: holder.provider,
+                                      slug: holder.slug))
+                    }
+                    hopCandidates = order.filter {
+                        $0.code != identity.entry.source
+                    }
+                } else {
+                    guard let cur = try? await Providers.detail(
+                        identity.entry.source, slug: identity.entry.slug)
+                    else { return nil }
+                    let alts = await Providers.findAlternatives(
+                        fromCode: identity.entry.source, name: cur.movie.name,
+                        origin: cur.movie.originName, year: cur.movie.year,
+                        tmdbId: cur.movie.tmdbId)
+                    // 1.9.2 (Team 9 item 2): iterate the alternatives
+                    // in failover order (up to 3) instead of trying
+                    // only alts.first — a first alternative whose
+                    // detail fetch fails no longer ends the hop while
+                    // a second carrier of the same film stands ready.
+                    hopCandidates = Array(alts.prefix(3))
+                }
+                for alt in hopCandidates {
                     guard let d = try? await Providers.detail(alt.code, slug: alt.slug)
                     else { continue }
+                    if let tvb, !tvb.accepts(d.movie, provider: alt.code) {
+                        continue
+                    }
                     let epNum = Providers.episodeNumber(identity.entry.ep)
                     var newEp = identity.entry.ep
                     outer: for s in d.servers {
@@ -2758,7 +3116,8 @@ private struct JoeCastCellLabel: View {
                 if torrentFirst { return [] }
                 return await JoeMovieDetail.torrentFallbackCandidates(
                     identity: identity, originDetail: detail,
-                    originProvider: provider)
+                    originProvider: provider,
+                    pinnedImdbId: tvb?.imdbId ?? "")
             })
     }
 
@@ -2791,7 +3150,8 @@ private struct JoeCastCellLabel: View {
     private static func torrentFallbackCandidates(
         identity: PlayIdentity, originDetail: Detail,
         originProvider: String,
-        highQualityOnly: Bool = false) async -> [PlayCandidate] {
+        highQualityOnly: Bool = false,
+        pinnedImdbId: String = "") async -> [PlayCandidate] {
         guard let base = TorrentSettings.effectiveBase else { return [] }
 
         // After a hop the session lives on another provider:
@@ -2809,6 +3169,16 @@ private struct JoeCastCellLabel: View {
         var imdbId = d.movie.imdbId
         var tmdbType = d.movie.tmdbType
         var tmdbSeason = d.movie.tmdbSeason
+        // v2.0.31 (L7): a TVB session's snapshot IMDb id,
+        // when the spine carries one, outranks every
+        // derivation below — the rung addresses the
+        // snapshot's series directly, as a TV series, and
+        // the derivation block (which contains the
+        // name-search KK leg) is skipped entirely.
+        if !pinnedImdbId.isEmpty {
+            imdbId = pinnedImdbId
+            tmdbType = "tv"
+        }
         if imdbId.isEmpty {
             // v2.0.5 (D3): consume the detail-time ladder's
             // result FIRST. The ladder (Providers

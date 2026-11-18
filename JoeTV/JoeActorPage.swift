@@ -388,7 +388,8 @@ struct JoeActorPage: View {
         guard let target = title.routeTarget else { return }
         open(MovieRoute(provider: target.provider, slug: target.slug,
                         name: title.titleVi, poster: title.posterURLString,
-                        year: title.yearString))
+                        year: title.yearString,
+                        tvb: title.routeContext))
     }
 
     /// Present the route through the navigator — SEQUENCED

@@ -181,6 +181,28 @@ struct TVBTitle: Codable, Sendable, Identifiable {
         return nil
     }
 
+    /// v2.0.31 (L7/I1): the route context for a tap — the
+    /// snapshot's own identity for this title: its TMDB id,
+    /// its IMDb id when the spine carries one, and every
+    /// holder record as an exact (provider, slug) pair in
+    /// TP → KK → VS order, flagged by the pipeline's own
+    /// match key. The detail verifies against it (L7) and
+    /// orders its holders by measured playability (I1).
+    var routeContext: TVBRouteContext {
+        var holders: [TVBRouteContext.Holder] = []
+        for key in Self.priorityKeys {
+            guard let record = providers[key],
+                  let slug = record.slugs.first, !slug.isEmpty
+            else { continue }
+            holders.append(TVBRouteContext.Holder(
+                provider: Self.appProviderCode(key),
+                slug: slug,
+                idMatched: record.matchKey != "fallback"))
+        }
+        return TVBRouteContext(
+            tmdbId: tmdbId, imdbId: imdbId ?? "", holders: holders)
+    }
+
     /// The primary holder's dub form, exactly as the provider
     /// states it (plan §2: non-dubbed titles are shown by their
     /// real form, never relabelled).
@@ -728,7 +750,8 @@ struct JoeTVBView: View {
         nav.movie = MovieRoute(
             provider: target.provider, slug: target.slug,
             name: title.titleVi, poster: title.posterURLString,
-            year: title.yearString)
+            year: title.yearString,
+            tvb: title.routeContext)
     }
 }
 
@@ -878,7 +901,8 @@ struct JoeTVBSearchView: View {
         nav.movie = MovieRoute(
             provider: target.provider, slug: target.slug,
             name: title.titleVi, poster: title.posterURLString,
-            year: title.yearString)
+            year: title.yearString,
+            tvb: title.routeContext)
     }
 
     /// Tier ranking over the normalized keys (plan §3.1): a

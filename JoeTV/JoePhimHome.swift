@@ -1,6 +1,77 @@
 import SwiftUI
 import Darwin
 
+/// v2.0.31 (L7/I1): the TVB snapshot identity a TVB-tab
+/// route carries into the detail — the snapshot's own
+/// TMDB/IMDb identifiers for the title and its holder
+/// records (provider code + slug, in the snapshot's
+/// TP → KK → VS priority order), each record flagged
+/// with whether the pipeline matched it by ID or only
+/// by its name fallback. A detail opened with this
+/// context verifies every loaded payload against these
+/// ids, builds its alternatives from these exact slugs
+/// (plus the ID-verified Film4K leg), and lets the play
+/// session hop only inside this list — a TVB title can
+/// never be silently replaced by a same-named different
+/// film anywhere in the chain. Nil on every non-TVB
+/// route; those flows are untouched.
+struct TVBRouteContext: Hashable {
+    struct Holder: Hashable {
+        var provider: String
+        var slug: String
+        /// True when the pipeline matched this record by
+        /// TMDB/IMDb id; false for its name fallback —
+        /// a fallback record must AFFIRM itself against
+        /// the snapshot's ids at load (see accepts(_:)).
+        var idMatched: Bool
+    }
+    var tmdbId: Int
+    var imdbId: String
+    var holders: [Holder]
+
+    /// Does a loaded payload CONTRADICT this identity?
+    /// Only a stated id can contradict: a payload whose
+    /// TMDB id is present and different, or whose IMDb
+    /// id is present and different from the snapshot's,
+    /// is a DIFFERENT film — the exact failure the owner
+    /// hit (a TVB title opening a US series). A payload
+    /// stating no ids contradicts nothing; its standing
+    /// rides accepts(_:) instead.
+    func contradicts(_ m: Movie) -> Bool {
+        if !m.tmdbId.isEmpty, let id = Int(m.tmdbId), id != tmdbId {
+            return true
+        }
+        if !imdbId.isEmpty, !m.imdbId.isEmpty, m.imdbId != imdbId {
+            return true
+        }
+        return false
+    }
+
+    /// May a page stand on this payload for the given
+    /// holder? An ID-matched snapshot record (the
+    /// pipeline matched it by TMDB/IMDb id) stands
+    /// unless the payload contradicts it. A name-FALLBACK
+    /// record — the pipeline's guess, 548 of the shipped
+    /// snapshot's 790 primaries — must AFFIRM: the
+    /// payload's own TMDB or IMDb id must equal the
+    /// snapshot's. A payload carrying no ids at all can
+    /// neither affirm nor contradict; it stands (nothing
+    /// better exists to check against — every client in
+    /// the chain stamps a TMDB id when its backend knows
+    /// one, so this is the rare tail, not the rule).
+    func accepts(_ m: Movie, provider: String) -> Bool {
+        if contradicts(m) { return false }
+        guard let holder = holders.first(where: { $0.provider == provider })
+        else { return true }
+        if holder.idMatched { return true }
+        if !m.tmdbId.isEmpty || !m.imdbId.isEmpty {
+            return (!m.tmdbId.isEmpty && Int(m.tmdbId) == tmdbId)
+                || (!imdbId.isEmpty && !m.imdbId.isEmpty && m.imdbId == imdbId)
+        }
+        return true
+    }
+}
+
 /// Route into a movie detail, from any rail or search result.
 struct MovieRoute: Hashable {
     var provider: String
@@ -10,6 +81,10 @@ struct MovieRoute: Hashable {
     var year: String
     /// Episode to preselect (Continue Watching taps).
     var preselectEp: String = ""
+    /// v2.0.31 (L7/I1): the TVB snapshot context, when the
+    /// route was minted by the TVB tab (or an actor page's
+    /// TVB card). See TVBRouteContext.
+    var tvb: TVBRouteContext? = nil
 }
 
 /// The Phim section root (v2.0.0, Team UI-5). One root, three
