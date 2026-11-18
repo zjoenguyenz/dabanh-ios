@@ -126,6 +126,41 @@ final class PlayDirector: ObservableObject {
             transportBarVisible = visible
         }
     }
+
+    /// v2.0.31 (L5): the KS host's picker state, reported
+    /// by the host on the same pattern as the bar
+    /// visibility above. The shell's exit command consults
+    /// it: a Menu press while a picker is open closes the
+    /// PICKER — through the host's own closePicker, via the
+    /// registered handler — instead of dismissing the
+    /// player. The host deliberately no longer intercepts
+    /// Menu in its pressesEnded: on the owner's set the
+    /// press reached BOTH consumers (the host closed the
+    /// panel and the shell still dismissed), so Back out
+    /// of the subtitle panel exited the film. With the
+    /// host's interception gone, the shell is the one
+    /// Menu arbiter for both engines, exactly as it
+    /// already was whenever no picker was open.
+    @Published private(set) var pickerOpen = false
+    /// The live KS host's close-the-picker action,
+    /// registered while its picker is open (nil on the
+    /// AVPlayer path, between attempts, and once closed).
+    private var pickerCloseHandler: (() -> Void)?
+
+    func setPickerOpen(_ open: Bool, closeHandler: (() -> Void)? = nil) {
+        pickerCloseHandler = open ? closeHandler : nil
+        if pickerOpen != open {
+            pickerOpen = open
+        }
+    }
+
+    /// Menu with a picker open: close just the picker.
+    /// The handler is the host's closePicker, so focus
+    /// landing and bar state are restored by the same code
+    /// that closes the panel after a selection.
+    func requestPickerClose() {
+        pickerCloseHandler?()
+    }
     /// The most recent candidate failure's short cause (an
     /// engine error's description, or a watchdog label) — the
     /// exhausted slate shows it ("Lỗi cuối: …") so a dead
@@ -1110,7 +1145,14 @@ private struct JoePlayerSessionView: View {
             // Menu during an active countdown cancels the
             // advance instead of leaving the player; with
             // no countdown active Menu exits as always.
-            if director.upNextSecondsLeft != nil {
+            // v2.0.31 (L5): a picker open in the KS host owns
+            // the FIRST Menu press — it closes, and focus /
+            // playback state are restored by the host; the
+            // countdown rule and the plain exit keep their
+            // order behind it.
+            if director.pickerOpen {
+                director.requestPickerClose()
+            } else if director.upNextSecondsLeft != nil {
                 director.cancelAdvance()
             } else {
                 dismiss()

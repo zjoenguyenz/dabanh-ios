@@ -44,7 +44,9 @@ import UIKit
 /// the host controller adds click handling — Select toggles
 /// play/pause, Left/Right clicks seek ∓30 s. Menu is never
 /// swallowed: it propagates to the shell's exit command, like
-/// the AVPlayer path.
+/// the AVPlayer path — which since v2.0.31 (L5) first asks
+/// the director whether this host's picker is open and
+/// closes just the picker in that case.
 ///
 /// Transport bar (v2.0.12, owner defect on 2.0.10): the bare
 /// layer above had NO on-screen controls at all — the owner
@@ -285,6 +287,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         super.viewDidAppear(animated)
         setNeedsFocusUpdate()
         showControls()
+        // v2.0.31 (L4): force this fresh host's focus
+        // landing (the play button, per
+        // preferredFocusEnvironments) instead of leaving it
+        // pending — after a source switch this host replaces
+        // one the focus engine was still resolving, and a
+        // landing left to the engine's leisure is the one
+        // the owner's dead play press followed.
+        updateFocusIfNeeded()
         // The host has a window by now: hand the window's
         // display manager the criteria start() prepared
         // (applyDisplayCriteria no-ops without a window).
@@ -556,15 +566,19 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                 seekBy(30)
                 handled = true
             case .menu:
-                // Menu backs out of an open track picker
-                // first (the system menus' behaviour); with
-                // no picker open it is NOT handled here and
-                // propagates to the shell's exit command,
-                // exactly as before the bar existed.
-                if pickerIsOpen {
-                    closePicker()
-                    handled = true
-                }
+                // v2.0.31 (L5): Menu is NOT handled here any
+                // more, picker open or not — it propagates
+                // to the shell's exit command, which asks the
+                // director whether a picker is open: open →
+                // the shell closes just the picker (through
+                // this host's closePicker, registered with
+                // the director); closed → the film exits, as
+                // always. Pre-fix the host closed the picker
+                // here AND the press still reached the shell
+                // on the owner's set — one press, two
+                // consumers — and the film exited behind the
+                // closing panel (his subtitle-panel finding).
+                break
             default:
                 // Up/Down (and anything else) only wake the
                 // bar; they are never swallowed, so the focus
@@ -1379,9 +1393,23 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // the status capsule stays with the chrome while a
         // choice is open, like it does with the bar.
         director?.setTransportBarVisible(true)
+        // v2.0.31 (L5): the shell's exit command owns Menu
+        // now — register this host's close so its first
+        // press closes just this panel (see PlayDirector
+        // .pickerOpen). Registered on every opening; the
+        // matching clear rides closePicker.
+        director?.setPickerOpen(true) { [weak self] in
+            self?.closePicker()
+        }
         hideTimer?.invalidate()
         layoutPicker()
         setNeedsFocusUpdate()
+        // v2.0.31 (L4/L5): force the landing NOW — the
+        // picker's first row must actually hold focus when
+        // the panel is up, not whenever the engine gets to
+        // the pending update: a panel whose rows never took
+        // focus is the panel whose presses go nowhere.
+        updateFocusIfNeeded()
     }
 
     private func addPickerButton(title: String, checked: Bool, tag: Int) {
@@ -1454,12 +1482,45 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             return
         }
         refreshTrackButtons()
-        closePicker()
+        // v2.0.31 (L4): the track pickers close DEFERRED —
+        // never inside the tapped row's own press dispatch
+        // (see closePickerDeferred). The source chooser
+        // above keeps its immediate close: its switch tears
+        // this host down and rebuilds it, so no focus state
+        // of this host's survives to be stranded.
+        closePickerDeferred()
+    }
+
+    /// v2.0.31 (L4): close the picker on the next runloop
+    /// turn instead of inside the tapped button's action.
+    /// The tapped row IS the focused view; the pre-fix
+    /// closePicker removed it from the hierarchy in the
+    /// middle of its own .primaryActionTriggered dispatch,
+    /// and on the owner's set the focus engine never
+    /// landed anywhere afterwards — later presses were
+    /// delivered to no focused view at all, so with the
+    /// film paused his play press (the button showing the
+    /// triangle, its state read correctly by
+    /// refreshTransport) did nothing, every time, until
+    /// the session changed. Deferred, the press cycle
+    /// completes with the hierarchy intact; the close then
+    /// runs as an ordinary state change, and closePicker's
+    /// forced focus update lands focus on the play button
+    /// deterministically — the same landing the bar-wake
+    /// path has always made. Idempotent: a second queued
+    /// close reads pickerIsOpen false and no-ops.
+    private func closePickerDeferred() {
+        DispatchQueue.main.async { [weak self] in
+            self?.closePicker()
+        }
     }
 
     private func closePicker() {
         guard pickerIsOpen else { return }
         pickerIsOpen = false
+        // v2.0.31 (L5): the shell's Menu routing stands
+        // down with the panel.
+        director?.setPickerOpen(false)
         pickerView.isHidden = true
         transportBar.isHidden = false
         for button in pickerButtons { button.removeFromSuperview() }
@@ -1469,6 +1530,17 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         pickerSourceLabels = []
         pickerSourceIndex = -1
         setNeedsFocusUpdate()
+        // v2.0.31 (L4): force the relocation to the play
+        // button NOW (the host's preferredFocusEnvironments
+        // names it while the bar is up) instead of leaving
+        // it to the engine's next cycle — the relocation is
+        // the step whose absence stranded the owner's
+        // presses after a pick. Skipped during teardown
+        // (no window): a dying host must not reach for
+        // focus on its way out.
+        if view.window != nil {
+            updateFocusIfNeeded()
+        }
         showControls()
     }
 
