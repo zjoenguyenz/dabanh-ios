@@ -456,11 +456,12 @@ struct JoePhimHome: View {
         }
     }
 
-    /// The Ultra hero text column: logo art first (the Sony
-    /// rule: the logo replaces the text title and hides the
-    /// origin line), gold meta with the IMDb pill appended,
-    /// synopsis up to 4 lines, then the action row — the
-    /// v2.0.19 column verbatim, now hosted by ultraHeroBlock.
+    /// The Ultra hero text column: logo art first with the
+    /// Vietnamese title under it (v2.0.22 — the drawing's
+    /// arrangement; the v2.0.19 "logo replaces the title"
+    /// rule was the Sony port's, not the drawing's), the
+    /// drawing's white meta row, synopsis up to 4 lines, then
+    /// the action row.
     private func ultraHeroText(_ featured: Movie) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer(minLength: 0)
@@ -469,8 +470,22 @@ struct JoePhimHome: View {
                     Color.clear
                 }
                 .frame(maxWidth: 640, maxHeight: 120, alignment: .leading)
+                // v2.0.22 (Ultra fidelity — the Phim4K home
+                // drawing, caps p4k-1/p4k-2): the Vietnamese
+                // title stands UNDER the logo art, white bold
+                // caps. The v2.0.19 column let the logo REPLACE
+                // the title (the Sony port's rule); the drawing
+                // carries both, logo over title.
+                Text(featured.name.uppercased())
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                    .padding(.top, 14)
             } else {
-                Text(featured.name)
+                // Drawing fallback (ULTRA-DIFF row 2): the
+                // Vietnamese title in bold caps when the film
+                // has no logo art.
+                Text(featured.name.uppercased())
                     .font(.system(size: 68, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
@@ -484,29 +499,14 @@ struct JoePhimHome: View {
                     .lineLimit(1)
                     .padding(.top, 10)
             }
-            HStack(spacing: 16) {
-                Text(heroMetaLine(featured))
-                    .font(.system(size: 27, weight: .medium))
-                    .foregroundStyle(theme.heroMeta)
-                    .lineLimit(1)
-                if heroRating > 0 {
-                    Text(String(format: "IMDb %.1f", heroRating))
-                        .font(.system(size: 23, weight: .bold))
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 7)
-                            .fill(Color(red: 0.961, green: 0.773, blue: 0.094)))
-                }
-            }
-            .padding(.top, 12)
-            if !heroGenres.isEmpty {
-                Text(heroGenres.joined(separator: " · "))
-                    .font(.system(size: 23))
-                    .foregroundStyle(theme.text.opacity(0.85))
-                    .lineLimit(1)
-                    .padding(.top, 10)
-            }
+            // v2.0.22: the drawing's meta row (see ultraMetaRow
+            // below) replaces the shared heroMetaLine here —
+            // and the genres line the v2.0.19 column carried
+            // under it is GONE: the drawing's home hero block
+            // is logo / title / meta / synopsis, no genre line
+            // (genres belong to the detail screen's block).
+            ultraMetaRow(featured)
+                .padding(.top, 12)
             if let synopsis = heroDetail?.content, !synopsis.isEmpty {
                 Text(synopsis)
                     .font(.system(size: 26))
@@ -548,6 +548,50 @@ struct JoePhimHome: View {
             .padding(.top, 26)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The Ultra hero meta row (v2.0.22 — the drawing's line,
+    /// caps p4k-1/p4k-2): quality · year · IMDb badge + score
+    /// · runtime, in WHITE. The v2.0.19 column painted the
+    /// whole line in the gold heroMeta token and folded the
+    /// score INTO the gold pill ("IMDb 8.2" as one black-on-
+    /// gold chip); the drawing's line is white text, the
+    /// yellow badge carries only the word "IMDb", and the
+    /// score stands in white after it. Ultra-only — design
+    /// A's hero keeps the shared heroMetaLine verbatim.
+    private func ultraMetaRow(_ featured: Movie) -> some View {
+        let time = !featured.time.isEmpty
+            ? featured.time : (heroDetail?.movie.time ?? "")
+        let head = [featured.quality, featured.year]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        return HStack(spacing: 10) {
+            if !head.isEmpty {
+                Text(head)
+            }
+            if heroRating > 0 {
+                if !head.isEmpty {
+                    Text("·")
+                }
+                Text("IMDb")
+                    .font(.system(size: 23, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 5)
+                        .fill(Color(red: 0.961, green: 0.773, blue: 0.094)))
+                Text(String(format: "%.1f", heroRating))
+            }
+            if !time.isEmpty {
+                if !head.isEmpty || heroRating > 0 {
+                    Text("·")
+                }
+                Text(time)
+            }
+        }
+        .font(.system(size: 27, weight: .medium))
+        .foregroundStyle(theme.text)
+        .lineLimit(1)
     }
 
     // MARK: - Rail specs (single source of truth for order)

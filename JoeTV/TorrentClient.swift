@@ -732,6 +732,18 @@ enum TorrentClient {
     /// 12 s timeout each). Metas merge across catalogs,
     /// deduped by id, capped at the tab's limit of 60.
     ///
+    /// v2.0.22 (events first): the merge order is a STABLE
+    /// PARTITION of the manifest order — every "events"
+    /// catalog's metas land before every "tv" catalog's,
+    /// each group keeping its manifest order. In pure
+    /// manifest order the standing live-TV channels (populated
+    /// 24/7, ~150 of them on the owner's profile) filled the
+    /// merge — and the cap — ahead of the actual sport events
+    /// the tab exists for, so events sat buried below the
+    /// channel list (the Sony build proved the same fault and
+    /// the same cure on 2026-11-17; the ordering design is
+    /// ported here in this code's own shape, not its code).
+    ///
     /// Fallback: if the manifest cannot be fetched or
     /// parsed, the fetch degrades to the v2.0.16 plain
     /// `live_sport_events` query, unchanged — never worse
@@ -740,12 +752,17 @@ enum TorrentClient {
         if let manifest = try? await JoeHTTP.getJSON(
                 base + "/manifest.json", timeout: 12),
            let catalogs = JSON.arr(manifest, "catalogs") {
-            let live: [(type: String, id: String)] = catalogs.compactMap { c in
+            let manifestLive: [(type: String, id: String)] = catalogs.compactMap { c in
                 let t = JSON.str(c, "type")
                 let i = JSON.str(c, "id")
                 guard t == "events" || t == "tv", !i.isEmpty else { return nil }
                 return (type: t, id: i)
             }
+            // v2.0.22: stable partition — events catalogs
+            // first (manifest order), then tv catalogs
+            // (manifest order). See the doc comment above.
+            let live = manifestLive.filter { $0.type == "events" }
+                + manifestLive.filter { $0.type == "tv" }
             guard !live.isEmpty else {
                 return MfSportEventsResult(metas: [],
                                            manifestLiveCatalogs: false)

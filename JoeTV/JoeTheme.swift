@@ -632,8 +632,14 @@ struct PosterCard: View {
     // rCard − artInset reproduces D (18−0) and F (22−12) exactly,
     // but for A it yields 0 (10−10) while the approved drawing
     // specifies 2 — hence the billboard floor of 2.
+    // v2.0.22 (Ultra fidelity): Ultra's drawing (the Phim4K
+    // home/grid caps) rounds its posters at ~24 — the Ultra
+    // token's rCard (10) is shared with the detail poster's
+    // chrome, so the value is applied HERE, in the Ultra card
+    // branch's own radius, not by moving the token.
     private var artRadius: CGFloat {
-        max(theme.rCard - theme.artInset, theme.id == .billboard ? 2 : 0)
+        if theme.id == .ultra { return 24 }
+        return max(theme.rCard - theme.artInset, theme.id == .billboard ? 2 : 0)
     }
 
     var body: some View {
@@ -800,12 +806,19 @@ struct PosterCard: View {
     /// full-bleed art with its four corner badges, title and
     /// meta below on the page background — no painted face.
     /// The focus ring rides the art (inset, the theme's cyan).
+    /// v2.0.22 (Ultra fidelity, caps p4k-1/p4k-2): a resting
+    /// Ultra poster carries NO outline — the 1.5 pt white-14%
+    /// resting stroke is removed (colour/width are values in
+    /// the always-installed overlay, the wallBody pattern) —
+    /// and the focused ring is the drawing's thick cyan band
+    /// (6, measured on the caps) rather than the shared token
+    /// width the buttons and chips keep.
     private var ultraBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             art
                 .overlay(RoundedRectangle(cornerRadius: artRadius)
-                    .strokeBorder(isFocused ? theme.focus : Color.white.opacity(0.14),
-                                  lineWidth: isFocused ? theme.ringWidth : 1.5))
+                    .strokeBorder(isFocused ? theme.focus : .clear,
+                                  lineWidth: isFocused ? 6 : 0))
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)

@@ -18,20 +18,42 @@ enum SourceProbe {
 
     /// Probe all four providers concurrently; results come back
     /// in the fixed display order KK / F4K / VS / TP.
-    static func run() async -> [Result] {
-        async let kk = probe(name: "KKPhim") {
-            try await KkClient.newest(page: 1).count
+    ///
+    /// v2.0.22: the probes run in a task group and `onEach`
+    /// fires as EACH provider answers (completion order, not
+    /// display order) — the launch gate's progress bar counts
+    /// those completions. Callers that pass no callback (the
+    /// Settings diagnostics button) observe no change: same
+    /// probes, same order, same results.
+    static func run(onEach: (@Sendable (Result) -> Void)? = nil) async -> [Result] {
+        await withTaskGroup(of: (Int, Result).self) { group in
+            group.addTask {
+                (0, await probe(name: "KKPhim") {
+                    try await KkClient.newest(page: 1).count
+                })
+            }
+            group.addTask {
+                (1, await probe(name: "Film4K") {
+                    try await F4kClient.newest(page: 1).count
+                })
+            }
+            group.addTask {
+                (2, await probe(name: "VSMOV") {
+                    try await VsClient.newest(page: 1).count
+                })
+            }
+            group.addTask {
+                (3, await probe(name: "Tủ Phim") {
+                    try await TpClient.newest(page: 1).count
+                })
+            }
+            var landed: [(Int, Result)] = []
+            for await item in group {
+                landed.append(item)
+                onEach?(item.1)
+            }
+            return landed.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        async let f4k = probe(name: "Film4K") {
-            try await F4kClient.newest(page: 1).count
-        }
-        async let vs = probe(name: "VSMOV") {
-            try await VsClient.newest(page: 1).count
-        }
-        async let tp = probe(name: "Tủ Phim") {
-            try await TpClient.newest(page: 1).count
-        }
-        return await [kk, f4k, vs, tp]
     }
 
     /// 1.9.2 (Team 9 item 5): single-target KK reachability

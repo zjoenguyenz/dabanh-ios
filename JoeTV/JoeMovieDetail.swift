@@ -429,6 +429,21 @@ struct JoeMovieDetail: View {
             ], startPoint: .top, endPoint: .bottom)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // v2.0.22 (owner photo verdict on 2.0.21: "Ko tràn
+        // hết màn hình"): the frame above filled only the
+        // SAFE-AREA rect — neither this layer nor the detail's
+        // presenting layer in JoeRootView ignores the safe
+        // area (only the theme.bg behind them does), so the
+        // "full-screen" backdrop painted as an inset picture
+        // with near-black bands on all four sides (80 pt
+        // sides, 60 pt top/bottom) and the scroll's last rows
+        // sat over its raw bottom edge. The backdrop layer
+        // now bleeds edge-to-edge, the platform's own idiom
+        // (background layers ignore, content respects): the
+        // detailScroll beside it keeps the HIG inset exactly
+        // as before, so no text moves. Ultra-only — this
+        // layer exists for no other theme.
+        .ignoresSafeArea()
     }
 
     /// Ultra — the Sony detail composition (v2.0.19): no

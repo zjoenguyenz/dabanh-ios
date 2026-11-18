@@ -215,6 +215,11 @@ final class JoeNavigator: ObservableObject {
 /// so one press still closes exactly one layer.
 struct JoeRootView: View {
     @StateObject private var nav = JoeNavigator()
+    /// v2.0.22: the launch gate (see LaunchGate below) — the
+    /// root shows its loading screen until the gate's real
+    /// work (connection check → catalogue → poster preload)
+    /// completes, then hands over to the shell.
+    @StateObject private var launchGate = LaunchGate()
     @EnvironmentObject private var watch: WatchStore
     /// v2.0.10 (Package B): the Top Shelf writer resolves its
     /// hot list against the catalogue, so the root also reads
@@ -310,7 +315,7 @@ struct JoeRootView: View {
                     // inside this region.
                     .focusSection()
             }
-            .disabled(nav.movie != nil || nav.tor != nil)
+            .disabled(nav.movie != nil || nav.tor != nil || !launchGate.finished)
             if let route = nav.movie {
                 ZStack {
                     theme.bg.ignoresSafeArea()
@@ -338,6 +343,15 @@ struct JoeRootView: View {
                 // handler lives on JoeTorrentDetail's own root.
                 .transition(.opacity)
                 .zIndex(3)
+            }
+            // v2.0.22: the launch loading screen — above the
+            // shell, below nothing else; it has no focusable
+            // elements and the shell beneath it is disabled
+            // while it is up (see the .disabled above), so a
+            // launch can never take input meant for the home.
+            if !launchGate.finished {
+                LaunchLoadingView(progress: launchGate.progress)
+                    .zIndex(10)
             }
         }
         .onAppear {
@@ -412,6 +426,11 @@ struct JoeRootView: View {
         // consumes URLs.
         .onOpenURL { url in handleDeepLink(url) }
         .task {
+            // v2.0.22: the launch gate runs FIRST (connection
+            // check → catalogue → poster preload behind the
+            // loading screen). Idempotent — its own `started`
+            // flag makes repeat .task firings no-ops.
+            launchGate.run(phim: phim, watch: watch, nav: nav)
             // UI-5 pipeline: warm the owner's own posters at
             // launch (Continue Watching + favourites render from
             // the decoded cache on cold open, no network wait).
@@ -820,3 +839,241 @@ private struct TopLinkLabel: View {
 // geometric between the bar's and the content's
 // .focusSection()s, with .defaultFocus as the bar's entry
 // policy only (see the pillFocus note in JoeRootView).
+
+// MARK: - Launch gate (v2.0.22)
+
+/// The launch sequence (owner order 2026-11-17 — the Ultra
+/// launch pattern he specified from the Phim4K reference and
+/// had built into the Sony app the same evening): at app
+/// open the app FIRST establishes its connections, THEN
+/// loads the catalogue, THEN preloads the home's posters —
+/// all behind the loading screen — and the home is entered
+/// ready. It exists because of the 2.0.21 cold-start disease
+/// he reported verbatim: posters hung at first open until he
+/// went into Settings and pressed the connection check
+/// himself, after which they loaded. The check he pressed is
+/// SourceProbe.run (the Settings "Kiểm tra ngay" diagnostics
+/// — the providers exercised through the SAME client calls
+/// the home makes); the gate runs exactly that check
+/// automatically as phase 1, so no manual step remains.
+///
+/// Progress is REAL, by the phase model the owner approved
+/// on the Sony build: fixed phase weights (probe 0–10,
+/// data 10–30, posters 30–100) and, inside each phase, the
+/// bar is the measured fraction — probes answered of four,
+/// "newest" rails landed of four, posters completed of the
+/// preload total. No animation, no timer-driven creep: the
+/// loading view sets the fill width straight from
+/// `progress` with no .animation anywhere.
+///
+/// Bounds: a hard 50 s cap ends the gate whatever state the
+/// phases are in (the home's own error surfaces own a dead
+/// network from there — the bar can never spin forever);
+/// a Top Shelf deep link ends it at once (a link launch
+/// must land on its route, not on a loading screen); the
+/// screen dwells at least 0.7 s so a fully cached launch
+/// does not flash it for a single frame.
+@MainActor
+final class LaunchGate: ObservableObject {
+    @Published private(set) var progress: Double = 0
+    @Published private(set) var finished = false
+    private var started = false
+
+    func run(phim: PhimStore, watch: WatchStore, nav: JoeNavigator) {
+        if started { return }
+        started = true
+        Task { await execute(phim: phim, watch: watch, nav: nav) }
+    }
+
+    private func execute(phim: PhimStore, watch: WatchStore,
+                         nav: JoeNavigator) async {
+        let t0 = Date()
+        let hardCap: TimeInterval = 50
+        func overCap() -> Bool { Date().timeIntervalSince(t0) > hardCap }
+        func deepLinked() -> Bool { nav.movie != nil || nav.tor != nil }
+
+        // Phase 1 — the connection check (0 → 0.10): the
+        // Settings diagnostics run, automatic. The probe runs
+        // detached; each provider's answer increments the
+        // box, and this loop publishes the answered fraction.
+        let probeBox = LaunchProgressBox()
+        let probeTask = Task.detached {
+            _ = await SourceProbe.run { _ in probeBox.increment() }
+        }
+        while probeBox.count < 4, !overCap(), !deepLinked() {
+            progress = 0.10 * Double(probeBox.count) / 4
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        probeTask.cancel()
+        if deepLinked() { await finish(t0: t0); return }
+        progress = max(progress, 0.10)
+
+        // Phase 2 — catalogue data (0.10 → 0.30): the store's
+        // own load (cache-first, staged, deadline-bounded —
+        // unchanged). The phase ends on the FIRST data (the
+        // home can paint) or when the load itself ends; the
+        // fraction inside the phase is the landed count of
+        // the four "newest" rails that head the home.
+        phim.loadIfNeeded()
+        while !overCap(), !deepLinked() {
+            let landed = [phim.kkNew, phim.f4kNew, phim.vsNew, phim.tpNew]
+                .filter { !$0.isEmpty }.count
+            progress = 0.10 + 0.20 * Double(landed) / 4
+            if phim.hasData || !phim.loading { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if deepLinked() { await finish(t0: t0); return }
+        progress = max(progress, 0.30)
+
+        // Phase 3 — poster preload (0.30 → 1.0): every poster
+        // of the home as it will first render — the owner's
+        // rails, then the catalogue rails in home order, then
+        // the genre/country shelves — deduped, capped at 80,
+        // plus the featured film's hero thumb. Six workers
+        // pull from a shared claim counter; each awaited
+        // pipeline load (hit or miss) is one completion.
+        var urls: [URL] = []
+        var seen = Set<String>()
+        func add(_ u: URL?) {
+            guard let u, seen.insert(u.absoluteString).inserted
+            else { return }
+            urls.append(u)
+        }
+        for e in watch.progress() + watch.favorites() { add(e.posterURL) }
+        let railsInOrder: [[Movie]] = [
+            phim.merged, phim.chieuRap, phim.vietnamAll,
+            phim.kkNew, phim.kkSeries, phim.kkMovies, phim.kkAnime,
+            phim.f4kNew, phim.f4kMovies, phim.vsNew, phim.vsSeries,
+            phim.tpNew, phim.tpMovies, phim.tpSeries]
+        for rail in railsInOrder {
+            for m in rail { add(m.posterURL) }
+        }
+        for spec in PhimStore.genreSpec {
+            for m in phim.genreLists[spec.slug] ?? [] { add(m.posterURL) }
+        }
+        for spec in PhimStore.countrySpec {
+            for m in phim.countryLists[spec.slug] ?? [] { add(m.posterURL) }
+        }
+        if let featured = (phim.merged + phim.kkNew)
+            .first(where: { !$0.thumb.isEmpty }) {
+            add(featured.thumbURL)
+        }
+        let targets = Array(urls.prefix(80))
+        if targets.isEmpty || deepLinked() {
+            await finish(t0: t0)
+            return
+        }
+        let posterBox = LaunchProgressBox()
+        let pool = Task.detached {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<6 {
+                    group.addTask {
+                        while let i = posterBox.claim(total: targets.count) {
+                            _ = await JoeImagePipeline.shared.image(
+                                for: targets[i], targetPixels: 720)
+                            posterBox.increment()
+                        }
+                    }
+                }
+            }
+        }
+        while posterBox.count < targets.count, !overCap(), !deepLinked() {
+            progress = 0.30 + 0.70 * Double(posterBox.count)
+                / Double(targets.count)
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        pool.cancel()
+        await finish(t0: t0)
+    }
+
+    /// Handover: enforce the minimum dwell, then the bar
+    /// reads full and the screen lifts. The shell's content
+    /// was live beneath the screen the whole time (disabled),
+    /// so the lift is a pure overlay removal — no view is
+    /// rebuilt and no focus state is disturbed.
+    private func finish(t0: Date) async {
+        let remaining = 0.7 - Date().timeIntervalSince(t0)
+        if remaining > 0 {
+            try? await Task.sleep(
+                nanoseconds: UInt64(remaining * 1_000_000_000))
+        }
+        progress = 1
+        finished = true
+    }
+}
+
+/// Lock-guarded counters shared between the launch gate's
+/// detached workers and its main-actor publisher (the
+/// codebase's box pattern — PhimLoadBox, KKProbeBox): the
+/// workers never touch the published progress directly.
+private final class LaunchProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counted = 0
+    private var claimed = 0
+
+    func increment() {
+        lock.lock()
+        counted += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counted
+    }
+
+    /// Claim the next work index, or nil when the list is
+    /// drained — each index is claimed exactly once.
+    func claim(total: Int) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed >= total { return nil }
+        let i = claimed
+        claimed += 1
+        return i
+    }
+}
+
+/// The launch loading screen (owner spec, verbatim): ONLY
+/// the big Joe TV wordmark and one slim cyan loading bar on
+/// a glossy black ground — no text, no other UI, and NO
+/// animation of any kind: the fill width is the gate's real
+/// progress value, set directly.
+private struct LaunchLoadingView: View {
+    let progress: Double
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.075, green: 0.075, blue: 0.08),
+                         .black],
+                startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+            VStack(spacing: 56) {
+                if UIImage(named: "LogoWordmark") != nil {
+                    Image("LogoWordmark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 150)
+                        .accessibilityLabel("Joe TV")
+                } else {
+                    Text("Joe TV")
+                        .font(.system(size: 84, weight: .heavy))
+                        .foregroundStyle(.white)
+                }
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.14))
+                    Capsule()
+                        .fill(LinearGradient(colors: [
+                            Color(red: 0.0, green: 0.533, blue: 0.639),
+                            Color(red: 0.0, green: 0.898, blue: 1.0),
+                            Color(red: 0.49, green: 0.957, blue: 1.0)
+                        ], startPoint: .leading, endPoint: .trailing))
+                        .frame(width: 560 * CGFloat(min(max(progress, 0), 1)))
+                }
+                .frame(width: 560, height: 10)
+            }
+        }
+    }
+}
