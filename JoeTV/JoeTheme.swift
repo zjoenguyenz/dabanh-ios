@@ -933,25 +933,41 @@ struct PosterCard: View {
     private var railBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             art
-            Text(title)
-                .font(.system(size: 25, weight: .semibold))
-                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
-                .lineLimit(1)
-                .padding(.top, 12)
-            if !meta.isEmpty {
-                Text(meta)
-                    .font(.system(size: 23))
-                    .foregroundStyle(theme.meta)
+            // v2.0.31 (L1): the text stack is inset by the
+            // ring's own width. Pre-fix the texts sat flush
+            // at the card edge (artInset 0 under D) and the
+            // FOCUSED title takes the ring's own colour
+            // (#FFD60A on #FFD60A), so the band's inner edge
+            // ran through the first glyphs — the owner's
+            // "viền … cắt chữ" on the device photo, which
+            // survived the v2.0.29 draw-order change because
+            // that change only moved the ring UNDER the
+            // content (see the overlay note below). The
+            // inset is a constant (theme.ringWidth), never
+            // focus-conditional, so the resting card's text
+            // clears the resting stroke by the same margin.
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                     .lineLimit(1)
-                    .padding(.top, 5)
+                    .padding(.top, 12)
+                if !meta.isEmpty {
+                    Text(meta)
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                        .padding(.top, 5)
+                }
+                if let subline {
+                    Text(subline)
+                        .font(.system(size: 21))
+                        .foregroundStyle(JoeTheme.accentRed)
+                        .lineLimit(1)
+                        .padding(.top, 3)
+                }
             }
-            if let subline {
-                Text(subline)
-                    .font(.system(size: 21))
-                    .foregroundStyle(JoeTheme.accentRed)
-                    .lineLimit(1)
-                    .padding(.top, 3)
-            }
+            .padding(.horizontal, theme.ringWidth)
         }
         .padding(.horizontal, theme.artInset)
         .padding(.top, theme.artInset)
@@ -968,6 +984,21 @@ struct PosterCard: View {
         // stroke, same values (focus colour / resting
         // stroke, ringWidth / 1.5), painted between the
         // fill and the text instead of over it.
+        //
+        // v2.0.31 (L1): the owner's 2.0.29 device photo
+        // proved that shape still wrong — with the ring in
+        // the background, the opaque full-width art paints
+        // OVER the ring's top and side segments beside the
+        // poster, so on device the band survived only
+        // beside the title plate ("viền màu vàng nó không
+        // bao hết cái poster"). The RESTING stroke keeps
+        // the v2.0.29 background placement (the resting
+        // card is pixel-identical), but the FOCUSED band
+        // now ALSO rides an overlay on the same shape:
+        // over the art's edge, around the whole card —
+        // poster + plate — exactly the wrap the owner
+        // asked for. It cannot cut the text any more: the
+        // text stack above is inset by the ring's width.
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: theme.rCard)
@@ -976,6 +1007,10 @@ struct PosterCard: View {
                     .strokeBorder(isFocused ? theme.focus : theme.stroke,
                                   lineWidth: isFocused ? theme.ringWidth : 1.5)
             })
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.rCard)
+                .strokeBorder(theme.focus,
+                              lineWidth: isFocused ? theme.ringWidth : 0))
     }
 }
 
