@@ -21,6 +21,26 @@ import Foundation
 /// position ONLY — never a stream URL. Resuming re-opens the
 /// provider's detail and resolves the stream fresh at that moment
 /// (stream URLs expire; a stored URL would be a dead URL).
+///
+/// CANONICAL IDENTITY (v2.0.29, cluster C — owner defect, item 6
+/// of the 2.0.28 test): the per-source keys above stay the
+/// REOPEN identity, but progress is matched across sources by a
+/// canonical identity derived from the title itself — the
+/// app's own cross-provider film identity (the
+/// Providers.sameFilm / filmKey discipline: normalized title
+/// + year, ±1-year tolerance gated on the exact title match,
+/// IMDb/TMDB id shortcuts) PLUS the
+/// episode NUMBER (Providers.episodeNumber on the provider
+/// side; the S:E tail of the torrent stream id on the torrent
+/// side). saveProgress merges a save into its canonical twin
+/// instead of stranding a second row, and the canonical
+/// lookups (progressFor(matching:) / progressForTitle /
+/// removeProgress(matching:)) find or clear that row from
+/// either family's session. Pre-fix, episode 1 of a series
+/// saved under "kk|<slug>|Tập 1" and episode 2 — KK empty, so
+/// played through the detail's Torrent entry — saved under
+/// "tor|<imdb>:1:2": two rows, and neither family's resume
+/// lookup could see the other's position.
 final class WatchStore: ObservableObject {
     static let kindKK = "kk"
     static let kindF4K = "f4k"
@@ -56,6 +76,13 @@ final class WatchStore: ObservableObject {
         var metaBase = ""
         var background = ""
         var desc = ""
+        // canonical identity bridges (v2.0.29, cluster C):
+        // stamped by save call sites when the title's stable
+        // ids are known; empty on every pre-2.0.29 entry and
+        // on call sites that cannot know them — the canonical
+        // match then falls back to normalized title + year.
+        var imdbId = ""
+        var tmdbId = ""
 
         var id: String { key }
         var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
@@ -103,6 +130,170 @@ final class WatchStore: ObservableObject {
         progressEntries.first { $0.key == key }
     }
 
+    // MARK: - Canonical identity (v2.0.29, cluster C)
+
+    /// The episode NUMBER an entry addresses, per family:
+    /// torrent series entries parse it from the stream id's
+    /// "imdbId:season:episode" tail (the video LABEL is not
+    /// used — it carries the episode's name, whose own digits
+    /// would corrupt Providers.episodeNumber's last-run rule);
+    /// everything else reads the stored episode name exactly
+    /// as the failover hop matches episodes. -1 = no episode
+    /// number (a movie / "Full" entry).
+    static func episodeNumber(of e: Entry) -> Int {
+        if e.kind == kindTor {
+            let parts = e.streamId.split(separator: ":")
+            if parts.count >= 3, let n = Int(String(parts[parts.count - 1])) {
+                return n
+            }
+            if !e.ep.isEmpty { return Providers.episodeNumber(e.ep) }
+            return -1
+        }
+        return Providers.episodeNumber(e.ep)
+    }
+
+    /// The season an entry addresses, when either family
+    /// states one: the stream id's middle component on the
+    /// torrent side, Providers.seasonNumber on the provider
+    /// side (KK episode names are normally season-free — nil).
+    static func seasonNumber(of e: Entry) -> Int? {
+        if e.kind == kindTor {
+            let parts = e.streamId.split(separator: ":")
+            if parts.count >= 3, let s = Int(String(parts[parts.count - 2])) {
+                return s
+            }
+            return nil
+        }
+        return Providers.seasonNumber(e.ep)
+    }
+
+    /// The IMDb id an entry carries: the stamped field when a
+    /// call site knew it, else the torrent meta id itself
+    /// (Torrentio/Cinemeta meta ids ARE IMDb ids).
+    static func imdbId(of e: Entry) -> String {
+        if !e.imdbId.isEmpty { return e.imdbId }
+        return e.metaId.hasPrefix("tt") ? e.metaId : ""
+    }
+
+    /// Live/sports rows are never canonical progress: their
+    /// "episodes" are events, and a title coincidence must
+    /// never merge one into a film's row (or vice versa).
+    private static func canonicalEligible(_ e: Entry) -> Bool {
+        if e.key.hasPrefix("mf-event|") { return false }
+        if e.metaType == "events" || e.metaType == "tv" { return false }
+        return !e.title.isEmpty
+    }
+
+    /// Same-film test for two entries, mirroring
+    /// Providers.sameFilm's discipline: a shared IMDb or TMDB
+    /// id decides outright; otherwise the normalized titles
+    /// must be exactly equal and the years equal, either side
+    /// empty, or ±1 (the cross-catalogue year-variant
+    /// tolerance, gated on the exact title match).
+    private static func sameFilm(_ a: Entry, _ b: Entry) -> Bool {
+        let ia = imdbId(of: a), ib = imdbId(of: b)
+        if !ia.isEmpty && ia == ib { return true }
+        if !a.tmdbId.isEmpty && a.tmdbId == b.tmdbId { return true }
+        let ta = Providers.normalizeTitle(a.title)
+        let tb = Providers.normalizeTitle(b.title)
+        guard !ta.isEmpty && ta == tb else { return false }
+        let ya = Providers.yearOf(a.year), yb = Providers.yearOf(b.year)
+        if ya.isEmpty || yb.isEmpty || ya == yb { return true }
+        if let x = Int(ya), let y = Int(yb), abs(x - y) == 1 { return true }
+        return false
+    }
+
+    /// True when two entries are the same title + episode
+    /// under the canonical identity, whatever source saved
+    /// each of them.
+    static func canonicalMatch(_ a: Entry, _ b: Entry) -> Bool {
+        guard canonicalEligible(a), canonicalEligible(b) else { return false }
+        guard sameFilm(a, b) else { return false }
+        guard episodeNumber(of: a) == episodeNumber(of: b) else { return false }
+        if let sa = seasonNumber(of: a), let sb = seasonNumber(of: b),
+           sa != sb {
+            return false
+        }
+        return true
+    }
+
+    /// Merge a canonical twin pair into ONE row. Progress
+    /// fields always come from `incoming` (the live save /
+    /// the newer entry). The surviving REOPEN identity is the
+    /// provider side's whenever either side is a provider
+    /// entry — its key/kind/slug/source/ep are what the Phim
+    /// Continue Watching rails render and what the provider
+    /// detail pages address — and the other side contributes
+    /// every identity field the survivor lacks, so the merged
+    /// row can still reopen through the torrent side too
+    /// (metaId/streamId/metaBase ride along). Two provider
+    /// entries (a failover hop) or two torrent entries keep
+    /// the incoming side's identity, exactly as before.
+    private static func mergedEntry(incoming: Entry, old: Entry) -> Entry {
+        let incomingIsProvider = incoming.kind != kindTor
+        let oldIsProvider = old.kind != kindTor
+        var base: Entry
+        let donor: Entry
+        if oldIsProvider && !incomingIsProvider {
+            base = old
+            donor = incoming
+            base.pos = incoming.pos
+            base.dur = incoming.dur
+            base.ts = incoming.ts
+        } else {
+            base = incoming
+            donor = old
+        }
+        if base.slug.isEmpty { base.slug = donor.slug }
+        if base.source.isEmpty { base.source = donor.source }
+        if base.metaId.isEmpty { base.metaId = donor.metaId }
+        if base.metaType.isEmpty { base.metaType = donor.metaType }
+        if base.streamId.isEmpty { base.streamId = donor.streamId }
+        if base.metaBase.isEmpty { base.metaBase = donor.metaBase }
+        if base.background.isEmpty { base.background = donor.background }
+        if base.desc.isEmpty { base.desc = donor.desc }
+        if base.imdbId.isEmpty { base.imdbId = donor.imdbId }
+        if base.tmdbId.isEmpty { base.tmdbId = donor.tmdbId }
+        if base.poster.isEmpty { base.poster = donor.poster }
+        if base.year.isEmpty { base.year = donor.year }
+        return base
+    }
+
+    /// Resume lookup by ENTRY TEMPLATE (v2.0.29, cluster C):
+    /// the exact per-source key first (unchanged behaviour),
+    /// then the canonical title+episode twin — so a session
+    /// starting on KK finds the position episode 2 accumulated
+    /// on the torrent side, and vice versa.
+    func progressFor(matching template: Entry) -> Entry? {
+        if let exact = progressFor(key: template.key) { return exact }
+        return progress().first { Self.canonicalMatch($0, template) }
+    }
+
+    /// The detail pages' "this title has progress" lookup
+    /// (v2.0.29, cluster C): the historic slug+source match
+    /// first, byte-identical semantics (the latest entry for
+    /// the title on this provider, any episode); then a
+    /// canonical film match — the latest entry for the same
+    /// film from ANY source family, any episode, exactly the
+    /// shape the historic predicate returned for its own
+    /// provider. Lets a KK detail show "Xem tiếp" and
+    /// preselect the episode for progress that only ever
+    /// played through the Torrent entry.
+    func progressForTitle(slug: String, provider: String,
+                          title: String, year: String) -> Entry? {
+        if let e = progress().first(where: {
+            $0.slug == slug && $0.source == provider }) {
+            return e
+        }
+        guard !title.isEmpty else { return nil }
+        var probe = Entry()
+        probe.title = title
+        probe.year = year
+        return progress().first {
+            Self.canonicalEligible($0) && Self.sameFilm($0, probe)
+        }
+    }
+
     // 1.9.2 (Team 9 item 3): mutations mutate the IN-MEMORY
     // published state — the arrays loaded once at init are the
     // single truth, and persist() writes them out whole. The
@@ -117,8 +308,26 @@ final class WatchStore: ObservableObject {
 
     func saveProgress(_ e: Entry) {
         guard !e.key.isEmpty else { return }
-        progressEntries.removeAll { $0.key == e.key }
-        progressEntries.insert(e, at: 0)
+        // v2.0.29 (cluster C): fold the save into its
+        // canonical twin when one is stored — the same-key
+        // entry included, so identity fields merged in by an
+        // earlier cross-source save survive a same-source
+        // re-save. The twins leave the array; the merged row
+        // is inserted once, under the surviving identity
+        // (see mergedEntry).
+        var merged = e
+        let twins = progressEntries.filter {
+            $0.key == e.key || Self.canonicalMatch($0, e)
+        }
+        for old in twins {
+            merged = Self.mergedEntry(incoming: merged, old: old)
+        }
+        if !twins.isEmpty {
+            let twinKeys = Set(twins.map { $0.key })
+            progressEntries.removeAll { twinKeys.contains($0.key) }
+        }
+        progressEntries.removeAll { $0.key == merged.key }
+        progressEntries.insert(merged, at: 0)
         progressEntries.sort { $0.ts > $1.ts }
         while progressEntries.count > Self.maxProgress { progressEntries.removeLast() }
         persist()
@@ -127,6 +336,21 @@ final class WatchStore: ObservableObject {
     func removeProgress(key: String) {
         let before = progressEntries.count
         progressEntries.removeAll(where: { $0.key == key })
+        if progressEntries.count != before { persist() }
+    }
+
+    /// Completion / removal by ENTRY TEMPLATE (v2.0.29,
+    /// cluster C): removes the exact-key entry AND any
+    /// canonical twin, so finishing an episode under one
+    /// source clears the merged Continue Watching row
+    /// whichever source's key it survives under. (The
+    /// per-card long-press removal stays on removeProgress
+    /// (key:) with the row's own key — unchanged.)
+    func removeProgress(matching template: Entry) {
+        let before = progressEntries.count
+        progressEntries.removeAll {
+            $0.key == template.key || Self.canonicalMatch($0, template)
+        }
         if progressEntries.count != before { persist() }
     }
 
@@ -234,6 +458,31 @@ final class WatchStore: ObservableObject {
         }
         progressEntries = doc.progress
         favoriteEntries = doc.favorites
+        coalesceProgress()
+    }
+
+    /// One-pass coalesce of progress entries already on disk
+    /// that are canonical twins — the same film + episode an
+    /// older build saved under two sources' keys (the owner's
+    /// existing Continue Watching list is exactly this case).
+    /// Newest entry wins the progress fields; identity fields
+    /// union via mergedEntry. Idempotent, and persists only
+    /// when a twin pair actually collapsed. Favorites are not
+    /// progress and are never coalesced.
+    private func coalesceProgress() {
+        guard progressEntries.count > 1 else { return }
+        var kept: [Entry] = []
+        for e in progressEntries.sorted(by: { $0.ts > $1.ts }) {
+            if let i = kept.firstIndex(where: { Self.canonicalMatch($0, e) }) {
+                kept[i] = Self.mergedEntry(incoming: kept[i], old: e)
+            } else {
+                kept.append(e)
+            }
+        }
+        if kept.count != progressEntries.count {
+            progressEntries = kept
+            persist()
+        }
     }
 
     private func preserveUnreadable() {
@@ -306,7 +555,7 @@ extension WatchStore.Entry {
     private enum EntryKeys: String, CodingKey {
         case key, kind, pos, dur, ts, ep, epLabel, title, poster,
              year, slug, source, metaId, metaType, streamId,
-             metaBase, background, desc
+             metaBase, background, desc, imdbId, tmdbId
     }
 
     init(from decoder: Decoder) throws {
@@ -329,5 +578,7 @@ extension WatchStore.Entry {
         metaBase = try c.decodeIfPresent(String.self, forKey: .metaBase) ?? ""
         background = try c.decodeIfPresent(String.self, forKey: .background) ?? ""
         desc = try c.decodeIfPresent(String.self, forKey: .desc) ?? ""
+        imdbId = try c.decodeIfPresent(String.self, forKey: .imdbId) ?? ""
+        tmdbId = try c.decodeIfPresent(String.self, forKey: .tmdbId) ?? ""
     }
 }
