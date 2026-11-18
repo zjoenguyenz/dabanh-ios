@@ -222,13 +222,23 @@ struct JoeRootView: View {
     @EnvironmentObject private var phim: PhimStore
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
-    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
     /// v2.0.19: one-time landing on Ultra — the owner's Apple
     /// TV already carries a stored picker choice from an older
     /// build, which would otherwise win over the new default
     /// and hide this release's design behind a Settings hunt.
     /// The flag flips once; any later picker choice stands.
     @AppStorage("joeThemeUltraV2019") private var ultraMigrated = false
+    /// v2.0.20 RESCUE: Ultra's home broke the shell on device
+    /// (owner report 2026-11-17: top menu bar unreachable and
+    /// the backdrop pinned over the scrolling list), trapping
+    /// the owner inside Ultra with no path to Settings. This
+    /// one-time migration lands the app back on the pre-Ultra
+    /// default (sourceBoard) so the shell works and every
+    /// other function is testable again; Ultra stays in the
+    /// picker and returns once its home is fixed against the
+    /// owner's clip evidence. Any later picker choice stands.
+    @AppStorage("joeThemeRescueV2020") private var rescueMigrated = false
     /// The pill row's focus identity — the six pills (five
     /// sections + Tìm phim) share this one @FocusState, written
     /// ONLY by the focus engine itself.
@@ -266,7 +276,7 @@ struct JoeRootView: View {
     @State private var lastFocusedPill: String?
 
     private var theme: ThemeTokens {
-        ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .ultra)
+        ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .sourceBoard)
     }
 
     /// The corner version label reads the REAL bundle version
@@ -341,8 +351,15 @@ struct JoeRootView: View {
             }
         }
         .onAppear {
-            if !ultraMigrated {
-                themeIDRaw = JoeThemeID.ultra.rawValue
+            if !rescueMigrated {
+                // v2.0.20 rescue (see the flag's note above):
+                // land back on sourceBoard once; the v2.0.19
+                // Ultra landing below is superseded and must
+                // not re-trap the owner after the rescue.
+                themeIDRaw = JoeThemeID.sourceBoard.rawValue
+                rescueMigrated = true
+                ultraMigrated = true
+            } else if !ultraMigrated {
                 ultraMigrated = true
             }
         }
