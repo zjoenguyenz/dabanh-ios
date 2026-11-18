@@ -10,6 +10,9 @@ Presnap: `~/workspace/dabanh-ios/backup-dabanhtv-v135-presnap/`
 (target sources + shared engine files + project.yml, taken before
 any edit).
 
+Push commit (code + report): `b9bfe60ef968127b9ce29c85302be8864e5d947a`
+on `main` (this line added by a docs-only follow-up commit).
+
 ## Per-area verdicts
 
 ### Focus — NO CHANGE (already current)
