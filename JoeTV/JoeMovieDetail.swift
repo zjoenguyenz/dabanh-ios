@@ -74,6 +74,15 @@ struct JoeMovieDetail: View {
     private var isFav: Bool { watch.isFavorite(key: favKey) }
 
     var body: some View {
+        ZStack(alignment: .topLeading) {
+            if theme.id == .ultra {
+                ultraBackdrop
+            }
+            detailScroll
+        }
+    }
+
+    private var detailScroll: some View {
         ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7): lazy root — server groups and
             // their episode chips build as they scroll into
@@ -100,6 +109,8 @@ struct JoeMovieDetail: View {
                         wallDetail(detail)
                     case .sourceBoard:
                         boardDetail(detail)
+                    case .ultra:
+                        ultraDetail(detail)
                     }
                 } else if loadFailed {
                     // §8: the G3 error shape + Retry.
@@ -275,6 +286,26 @@ struct JoeMovieDetail: View {
                 }
                 Spacer(minLength: 0)
             }
+        case .ultra:
+            // Ultra's placeholder rides the full-screen
+            // backdrop layer in body (painted from the launch
+            // payload): just the title column, in the loaded
+            // composition's rhythm.
+            VStack(alignment: .leading, spacing: 0) {
+                Text(route.name)
+                    .font(.system(size: 60, weight: .heavy))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(3)
+                    .padding(.top, 30)
+                if !route.year.isEmpty {
+                    Text(route.year)
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.heroMeta)
+                        .padding(.top, 12)
+                }
+                providerChip
+                    .padding(.top, 14)
+            }
         case .billboard:
             // v2.0.1: the placeholder carries the SAME band +
             // overlap composition as the loaded detail (the
@@ -363,6 +394,157 @@ struct JoeMovieDetail: View {
             servers(d, heading: "Chọn tập", headingSize: 30)
                 .padding(.top, 36)
         }
+    }
+
+    /// Ultra's fixed full-screen backdrop (v2.0.19): the same
+    /// staged stack as the home hero — poster blur field,
+    /// provider thumb, TMDB backdrop — behind the whole
+    /// detail page, with the Sony scrims (left + a gentle
+    /// vertical melt to the page background at the bottom).
+    private var ultraBackdrop: some View {
+        let m = detail?.movie ?? placeholderMovie()
+        return ZStack {
+            if let url = m.posterURL {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+            }
+            if let url = m.thumbURL, url != m.posterURL {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+            }
+            if let u = tmdbBackdropURL {
+                JoeBandImage(url: u, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+            }
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.85), location: 0),
+                .init(color: .black.opacity(0.40), location: 0.5),
+                .init(color: .black.opacity(0.05), location: 1)
+            ], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.30), location: 0),
+                .init(color: .clear, location: 0.35),
+                .init(color: theme.bg.opacity(0.88), location: 0.85),
+                .init(color: theme.bg, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Ultra — the Sony detail composition (v2.0.19): no
+    /// poster frame; one left column over the full-screen
+    /// backdrop — logo art (or the text title), gold origin,
+    /// gold meta with the IMDb pill, genre chips, the action
+    /// row (play + favourite CIRCLE), synopsis, cast circles —
+    /// then the shared source chips and episode servers.
+    private func ultraDetail(_ d: Detail) -> some View {
+        let hasGenres = !d.categories
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .isEmpty
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                if let logo = tmdb?.logoURL, !logo.isEmpty,
+                   let u = URL(string: logo) {
+                    JoeRemoteImage(url: u, targetPixels: 1000, fit: true) {
+                        Color.clear
+                    }
+                    .frame(maxWidth: 640, maxHeight: 120, alignment: .leading)
+                    .padding(.top, 30)
+                } else {
+                    Text(d.movie.name)
+                        .font(.system(size: 60, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(3)
+                        .padding(.top, 30)
+                }
+                if (tmdb?.logoURL.isEmpty ?? true),
+                   !d.movie.originName.isEmpty,
+                   d.movie.originName != d.movie.name {
+                    Text(d.movie.originName.uppercased())
+                        .font(.system(size: 24, weight: .semibold))
+                        .tracking(4)
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                        .padding(.top, 10)
+                }
+                HStack(spacing: 16) {
+                    if !d.metaLine.isEmpty {
+                        Text(d.metaLine)
+                            .font(.system(size: 27, weight: .medium))
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                    }
+                    if let r = tmdb?.voteAverage, r > 0 {
+                        Text(String(format: "IMDb %.1f", r))
+                            .font(.system(size: 23, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(red: 0.961, green: 0.773, blue: 0.094)))
+                    }
+                }
+                .padding(.top, 12)
+                genreChips(d)
+                    .padding(.top, hasGenres ? 14 : 0)
+                HStack(spacing: 18) {
+                    playButton(d)
+                    ultraFavCircle(d)
+                }
+                .padding(.top, 22)
+                if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
+                    Text((tmdb?.overview.isEmpty ?? true)
+                         ? d.content : (tmdb?.overview ?? ""))
+                        .font(.system(size: 27))
+                        .foregroundStyle(theme.text.opacity(0.92))
+                        .lineSpacing(8)
+                        .lineLimit(4)
+                        .frame(maxWidth: 1150, alignment: .leading)
+                        .padding(.top, 20)
+                }
+                if let tmdb, !tmdb.cast.isEmpty {
+                    castRow(tmdb.cast)
+                        .padding(.top, 24)
+                }
+            }
+            .focusSection()
+            sourceChips
+                .padding(.top, 38)
+            servers(d, heading: "Chọn tập", headingSize: 30)
+                .padding(.top, 36)
+        }
+    }
+
+    /// Ultra's favourite: the reference's round heart button
+    /// (favButton's action, a circle face).
+    private func ultraFavCircle(_ d: Detail) -> some View {
+        Button {
+            var e = WatchStore.Entry()
+            e.kind = Providers.kindOf(provider)
+            e.key = favKey
+            e.title = d.movie.name
+            e.poster = d.movie.poster
+            e.year = d.movie.year
+            e.slug = slug
+            e.source = provider
+            e.ts = Int64(Date().timeIntervalSince1970 * 1000)
+            watch.toggleFavorite(e)
+        } label: {
+            Text(isFav ? "♥" : "♡")
+                .font(.system(size: 34))
+                .foregroundStyle(isFav
+                                 ? Color(red: 0.878, green: 0.169, blue: 0.227)
+                                 : theme.text)
+                .frame(width: 76, height: 76)
+                .background(Circle().fill(theme.surface2))
+                .overlay(Circle().strokeBorder(
+                    focusedFav ? theme.focus : theme.stroke,
+                    lineWidth: focusedFav ? theme.ringWidth : 1.5))
+        }
+        .joeCardButton()
+        .focused($focusedFav)
     }
 
     /// D — Poster Wall: everything centred (poster, title, meta,
@@ -1056,6 +1238,7 @@ struct JoeMovieDetail: View {
         case .billboard: return CGSize(width: 288, height: 432)
         case .posterWall: return CGSize(width: 300, height: 450)
         case .sourceBoard: return CGSize(width: 160, height: 240)
+        case .ultra: return CGSize(width: 288, height: 432)
         }
     }
 

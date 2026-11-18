@@ -17,12 +17,18 @@ enum JoeThemeID: String, CaseIterable {
     case billboard
     case posterWall
     case sourceBoard
+    /// v2.0.19: the Phim4K "Ultra" design, ported from the
+    /// Sony build the owner approved (2.3.31/2.3.32) — red
+    /// system, gold meta, full-bleed backdrops, 4-badge
+    /// posters, frosted server panel.
+    case ultra
 
     var pickerLabel: String {
         switch self {
         case .billboard: return "Billboard"
         case .posterWall: return "Tường Poster"
         case .sourceBoard: return "Bảng Nguồn"
+        case .ultra: return "Ultra"
         }
     }
 }
@@ -151,17 +157,42 @@ struct ThemeTokens {
         ringWidth: 4, cardTitleSize: 25, cardMetaSize: 23,
         scrimFloor: 0)
 
+    /// Ultra (v2.0.19) — the Sony build's token values: red
+    /// accent #E02B3A, deep red #C81E30, gold #FFC759 meta,
+    /// cyan #00E5FF focus, full-bleed art (inset 0).
+    static let ultra = ThemeTokens(
+        id: .ultra,
+        bg: Color(red: 0.039, green: 0.039, blue: 0.039),                  // #0A0A0A
+        surfaceTop: Color(red: 0.137, green: 0.137, blue: 0.137),          // #232323
+        surfaceBottom: Color(red: 0.090, green: 0.090, blue: 0.090),       // #171717
+        surface2: Color(red: 0.110, green: 0.110, blue: 0.110),            // #1C1C1C
+        stroke: Color.white.opacity(0.14),
+        accent: Color(red: 0.878, green: 0.169, blue: 0.227),              // #E02B3A
+        accent2: Color(red: 0.784, green: 0.118, blue: 0.188),             // #C81E30
+        onAccent: .white,
+        focus: Color(red: 0.0, green: 0.898, blue: 1.0),                   // #00E5FF
+        focusTitle: Color(red: 0.0, green: 0.898, blue: 1.0),
+        text: .white,
+        meta: Color(red: 0.659, green: 0.659, blue: 0.659),                // #A8A8A8
+        heroMeta: Color(red: 1.0, green: 0.780, blue: 0.349),              // #FFC759
+        badgeBg: Color.black.opacity(0.70),
+        badgeText: .white,
+        rCard: 10, rField: 10, artInset: 0, cardArtW: 240, railGap: 26,
+        ringWidth: 4, cardTitleSize: 25, cardMetaSize: 23,
+        scrimFloor: 0.55)
+
     static func tokens(for id: JoeThemeID) -> ThemeTokens {
         switch id {
         case .billboard: return .billboard
         case .posterWall: return .posterWall
         case .sourceBoard: return .sourceBoard
+        case .ultra: return .ultra
         }
     }
 }
 
 private struct JoeThemeKey: EnvironmentKey {
-    static let defaultValue: ThemeTokens = .sourceBoard
+    static let defaultValue: ThemeTokens = .ultra
 }
 
 extension EnvironmentValues {
@@ -549,6 +580,11 @@ struct PosterCard: View {
     var meta: String = ""
     var badge: String? = nil        // provider code (KK / F4K / VS / TP)
     var quality: String = ""        // quality tag (FHD / HD / CAM …)
+    /// Ultra's corner badges (v2.0.19): runtime top-left and
+    /// year bottom-left; the IMDb badge (bottom-right) is
+    /// resolved from the TMDB identity in ultraBody's task.
+    var timeBadge: String = ""
+    var yearBadge: String = ""
     var progress: Double? = nil
     var subline: String? = nil
     /// Which of design D's two card forms a horizontal rail
@@ -574,6 +610,9 @@ struct PosterCard: View {
     // the engine's own update raced.
     @Environment(\.isFocused) private var isFocused
     @Environment(\.joeTheme) private var theme
+    /// Ultra only: the TMDB vote average for the art's
+    /// bottom-right badge (nil until resolved / when unknown).
+    @State private var imdbRating: Double?
 
     // Design .card .art border-radius: A 2px, D 18px, F 10px.
     // rCard − artInset reproduces D (18−0) and F (22−12) exactly,
@@ -590,6 +629,8 @@ struct PosterCard: View {
             } else {
                 wallBody
             }
+        } else if theme.id == .ultra {
+            ultraBody
         } else {
             faceBody
         }
@@ -629,20 +670,43 @@ struct PosterCard: View {
             // opacity .55 (both card forms agree).
             if theme.id == .posterWall && form == .wall {
                 theme.surface2
+            } else if theme.id == .ultra {
+                Color(red: 0.149, green: 0.149, blue: 0.169)   // #26262B
             } else {
                 Color.black.opacity(0.35)
             }
             JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true,
                            slotClass: .portrait,
                            fallbackProvider: tmdbFallback) {
-                Image(systemName: "film")
-                    .font(.system(size: 64))
-                    .foregroundStyle(theme.meta.opacity(0.55))
+                if theme.id == .ultra {
+                    // The Sony Ultra placeholder: the red
+                    // wordmark on the grey art slot.
+                    Text("JOE TV")
+                        .font(.system(size: 30, weight: .heavy))
+                        .tracking(3)
+                        .foregroundStyle(Color(red: 0.878, green: 0.169, blue: 0.227))
+                } else {
+                    Image(systemName: "film")
+                        .font(.system(size: 64))
+                        .foregroundStyle(theme.meta.opacity(0.55))
+                }
             }
         }
         .frame(width: theme.cardArtW, height: theme.cardArtH)
         .overlay(alignment: .topLeading) {
-            if !quality.isEmpty {
+            if theme.id == .ultra {
+                // Ultra: runtime badge, red fill (Sony #D81F36).
+                if !timeBadge.isEmpty {
+                    Text(timeBadge)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(red: 0.847, green: 0.122, blue: 0.212)))
+                        .padding(10)
+                }
+            } else if !quality.isEmpty {
                 Text(quality)
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(theme.badgeText)
@@ -652,8 +716,33 @@ struct PosterCard: View {
                     .padding(10)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if theme.id == .ultra, !quality.isEmpty {
+                Text(quality)
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundStyle(theme.badgeText)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(theme.badgeBg))
+                    .padding(10)
+            }
+        }
         .overlay(alignment: .bottomLeading) {
-            if let badge {
+            if theme.id == .ultra {
+                // Ultra: year badge, purple fill (Sony #7B1FA2).
+                if !yearBadge.isEmpty {
+                    Text(yearBadge)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(red: 0.482, green: 0.122, blue: 0.635)))
+                        .padding(.leading, 10)
+                        .padding(.bottom, progress != nil ? 16 : 10)
+                }
+            } else if let badge {
                 Text(badge)
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(theme.id == .sourceBoard ? theme.focus : .white)
@@ -661,6 +750,20 @@ struct PosterCard: View {
                     .padding(.vertical, 5)
                     .background(Capsule().fill(theme.badgeBg))
                     .padding(.leading, 10)
+                    .padding(.bottom, progress != nil ? 16 : 10)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if theme.id == .ultra, let imdbRating {
+                // Ultra: IMDb badge, yellow fill (Sony #F5C518).
+                Text(String(format: "IMDb %.1f", imdbRating))
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(red: 0.961, green: 0.773, blue: 0.094)))
+                    .padding(.trailing, 10)
                     .padding(.bottom, progress != nil ? 16 : 10)
             }
         }
@@ -677,6 +780,43 @@ struct PosterCard: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: artRadius))
+    }
+
+    /// Ultra's card (v2.0.19, the Sony/Phim4K form): the bare
+    /// full-bleed art with its four corner badges, title and
+    /// meta below on the page background — no painted face.
+    /// The focus ring rides the art (inset, the theme's cyan).
+    private var ultraBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            art
+                .overlay(RoundedRectangle(cornerRadius: artRadius)
+                    .strokeBorder(isFocused ? theme.focus : Color.white.opacity(0.14),
+                                  lineWidth: isFocused ? theme.ringWidth : 1.5))
+            Text(title)
+                .font(.system(size: theme.cardTitleSize, weight: .semibold))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 12)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 5)
+            }
+            if let subline {
+                Text(subline)
+                    .font(.system(size: 21))
+                    .foregroundStyle(JoeTheme.accentRed)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .frame(width: theme.cardWidth, alignment: .leading)
+        .task(id: tmdbId) {
+            guard theme.id == .ultra, !tmdbId.isEmpty else { return }
+            imdbRating = await TMDBClient.rating(tmdbId: tmdbId, type: tmdbType)
+        }
     }
 
     private var faceBody: some View {

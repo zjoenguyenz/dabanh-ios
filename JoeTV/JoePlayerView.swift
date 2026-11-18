@@ -642,7 +642,7 @@ struct JoePlayerView: View {
             }
             .frame(maxWidth: 1150)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        case .billboard:
+        case .billboard, .ultra:
             VStack(alignment: .leading, spacing: 18) {
                 slateTexts(centred: false)
                 // Design-A player slate: button row gap 18,

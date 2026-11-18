@@ -22,7 +22,7 @@ struct JoeSettingsView: View {
     /// keeps ONE structure across themes (only token values
     /// change), so focus stays on the tapped chip through the
     /// switch — never stranded.
-    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
     @State private var addonURL: String = TorrentSettings.addonURL
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken

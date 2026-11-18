@@ -539,6 +539,34 @@ struct JoeTorrentDetail: View {
     private var videoId: String { selectedVideo?.id ?? meta.id }
 
     var body: some View {
+        Group {
+            // v2.0.19 (Ultra): the Phim4K composition — full-bleed
+            // backdrop, title bottom-left, frosted Chọn Server
+            // panel on the right. Every other theme keeps the
+            // standard single-column body below; state, load logic
+            // and actions are shared, only the composition moves.
+            if theme.id == .ultra {
+                ultraBody
+            } else {
+                standardBody
+            }
+        }
+        .task { await load() }
+        .fullScreenCover(item: $playerHolder) { holder in
+            JoePlayerView(director: holder.director,
+                          filmTitle: holder.title,
+                          filmEpisode: holder.episode,
+                          sourceLine: holder.sourceLine)
+        }
+        // 1.9.2 (Team 9 items 4 + 9): Menu closes THIS detail
+        // from its OWN root (the wrapper-handler lesson, same
+        // as JoeMovieDetail), and the favourite button is the
+        // declared initial focus — see favButton.
+        .onExitCommand { nav.tor = nil }
+        .defaultFocus($focusedRow, "fav")
+    }
+
+    private var standardBody: some View {
         ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7d): LazyVStack — the eager VStack
             // built the hero, episode block and stream block
@@ -559,19 +587,113 @@ struct JoeTorrentDetail: View {
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
         }
-        .task { await load() }
-        .fullScreenCover(item: $playerHolder) { holder in
-            JoePlayerView(director: holder.director,
-                          filmTitle: holder.title,
-                          filmEpisode: holder.episode,
-                          sourceLine: holder.sourceLine)
+    }
+
+    // MARK: - Ultra composition (v2.0.19)
+
+    /// Full-bleed backdrop for the Ultra torrent detail: the
+    /// portrait poster as a blur field first, the Cinemeta
+    /// landscape background sliced over it when present, then
+    /// the same left + vertical scrims as the Ultra movie
+    /// detail, so the title block and the panel stay readable.
+    private var ultraTorBackdrop: some View {
+        ZStack {
+            if let url = meta.posterURL {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+            }
+            if !meta.background.isEmpty,
+               let u = URL(string: meta.background), u != meta.posterURL {
+                JoeBandImage(url: u, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+            }
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.85), location: 0),
+                .init(color: .black.opacity(0.40), location: 0.5),
+                .init(color: .black.opacity(0.05), location: 1)
+            ], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.30), location: 0),
+                .init(color: .clear, location: 0.35),
+                .init(color: theme.bg.opacity(0.88), location: 0.85),
+                .init(color: theme.bg, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
         }
-        // 1.9.2 (Team 9 items 4 + 9): Menu closes THIS detail
-        // from its OWN root (the wrapper-handler lesson, same
-        // as JoeMovieDetail), and the favourite button is the
-        // declared initial focus — see favButton.
-        .onExitCommand { nav.tor = nil }
-        .defaultFocus($focusedRow, "fav")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var ultraBody: some View {
+        ZStack {
+            ultraTorBackdrop
+            HStack(alignment: .bottom, spacing: 40) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(meta.name)
+                        .font(.system(size: 54, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(3)
+                    if !meta.year.isEmpty {
+                        Text(meta.year)
+                            .font(.system(size: 29, weight: .bold))
+                            .foregroundStyle(theme.heroMeta)
+                    }
+                    if !meta.desc.isEmpty {
+                        Text(meta.desc)
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.text.opacity(0.85))
+                            .lineSpacing(6)
+                            .lineLimit(4)
+                    }
+                }
+                .frame(maxWidth: 600, alignment: .leading)
+                Spacer(minLength: 0)
+                ultraPanel
+            }
+            .frame(maxHeight: .infinity)
+        }
+    }
+
+    /// The frosted Chọn Server panel: favourite row, the
+    /// episode block (series) and the stream block, inside a
+    /// translucent plate — the Sony 2.3.31 row-10 composition
+    /// carried to tvOS.
+    private var ultraPanel: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 22) {
+                Text("Chọn Server")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundStyle(theme.text)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                HStack(spacing: 16) {
+                    favButton
+                    if hasViSub {
+                        Text("Phụ đề Việt: có (OpenSubtitles)")
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.text.opacity(0.8))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(Color.white.opacity(0.10)))
+                    }
+                }
+                if let notice {
+                    Text(notice)
+                        .font(.system(size: 25))
+                        .foregroundStyle(.orange)
+                }
+                if meta.type == "series" {
+                    episodeSection
+                        .focusSection()
+                }
+                streamSection
+                    .focusSection()
+            }
+            .padding(36)
+        }
+        .frame(width: 1040)
+        .background(RoundedRectangle(cornerRadius: 24)
+            .fill(Color.white.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 24)
+            .strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 24))
     }
 
     // MARK: - Hero
@@ -824,6 +946,25 @@ struct JoeTorrentDetail: View {
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
+                    if theme.id == .ultra {
+                        // v2.0.19: the Sony panel's tech-spec +
+                        // language lines, parsed ONLY from
+                        // tokens the stream's own name/title
+                        // states — nothing inferred.
+                        let spec = Self.ultraSpec(stream)
+                        if !spec.line.isEmpty {
+                            Text(spec.line)
+                                .font(.system(size: 23))
+                                .foregroundStyle(theme.text.opacity(0.78))
+                                .lineLimit(1)
+                        }
+                        if !spec.lang.isEmpty {
+                            Text(spec.lang)
+                                .font(.system(size: 23, weight: .semibold))
+                                .foregroundStyle(theme.heroMeta)
+                                .lineLimit(1)
+                        }
+                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -842,7 +983,8 @@ struct JoeTorrentDetail: View {
             // app (the hand-rolled copy here keyed off the
             // parent's FocusState instead).
             .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(theme.surface2))
+                .fill(theme.id == .ultra
+                      ? Color.white.opacity(0.16) : theme.surface2))
             .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
         .joeCardButton()
@@ -856,6 +998,64 @@ struct JoeTorrentDetail: View {
         if s.playable { return s.awaitingDisplay ? "CHỜ DEBRID" : "PHÁT NGAY" }
         if !s.infoHash.isEmpty { return "RD · GIẢI LINK" }
         return "TORRENT"
+    }
+
+    /// v2.0.19 (Ultra): the server row's spec + language lines.
+    /// Every token is read from the stream's OWN name/title text
+    /// (the Torrentio grammar carries 💾 size and 👤 seeders in
+    /// the title) — a fact the text does not state is never
+    /// shown. Mirrors the Sony Feat tokenizer's honesty rule.
+    private static func ultraSpec(_ s: TorStream) -> (line: String, lang: String) {
+        let raw = s.name + " " + s.title
+        let up = raw.uppercased()
+        func has(_ tokens: [String]) -> Bool {
+            tokens.contains { up.contains($0) }
+        }
+        var parts: [String] = []
+        if has(["2160P", "2160", "4K"]) { parts.append("4K") }
+        else if has(["1080P", "1080"]) { parts.append("1080p") }
+        else if has(["720P", "720"]) { parts.append("720p") }
+        if up.contains("REMUX") { parts.append("REMUX") }
+        else if has(["BLURAY", "BLU-RAY", "BDRIP"]) { parts.append("BluRay") }
+        else if has(["WEB-DL", "WEBDL"]) { parts.append("WEB-DL") }
+        else if up.contains("WEBRIP") { parts.append("WEBRip") }
+        else if up.contains("HDTV") { parts.append("HDTV") }
+        if has(["DOLBY VISION", "DOVI", ".DV.", ".DV "]) {
+            parts.append("Dolby Vision")
+        }
+        else if up.contains("HDR10+") { parts.append("HDR10+") }
+        else if up.contains("HDR10") { parts.append("HDR10") }
+        else if up.contains("HDR") { parts.append("HDR") }
+        if has(["X265", "HEVC", "H.265", "H265"]) { parts.append("HEVC") }
+        else if has(["X264", "AVC", "H.264", "H264"]) { parts.append("AVC") }
+        else if up.contains("AV1") { parts.append("AV1") }
+        if up.contains("TRUEHD") { parts.append("TrueHD") }
+        if up.contains("ATMOS") { parts.append("Atmos") }
+        if has(["DTS-HD", "DTSHD"]) { parts.append("DTS-HD") }
+        else if up.contains("DTS") { parts.append("DTS") }
+        if has(["DDP", "EAC3", "E-AC-3", "DD+"]) { parts.append("DD+") }
+        else if up.contains("AAC") { parts.append("AAC") }
+        // 💾 size / 👤 seeders, copied verbatim from the title.
+        if let r = raw.range(of: "💾") {
+            let words = raw[r.upperBound...]
+                .split(whereSeparator: { $0 == " " || $0 == "\n" })
+                .prefix(2).map(String.init)
+            if !words.isEmpty { parts.append(words.joined(separator: " ")) }
+        }
+        if let r = raw.range(of: "👤") {
+            let words = raw[r.upperBound...]
+                .split(whereSeparator: { $0 == " " || $0 == "\n" })
+                .prefix(1).map(String.init)
+            if let n = words.first { parts.append("👤 " + n) }
+        }
+        var langs: [String] = []
+        if has(["VIETSUB", "VIET SUB", "VI.SUB"]) { langs.append("Vietsub") }
+        if has(["THUYET MINH", "THUYẾT MINH"]) { langs.append("Thuyết minh") }
+        if has(["LONG TIENG", "LỒNG TIẾNG"]) { langs.append("Lồng tiếng") }
+        if has(["ENGSUB", "ENG SUB"]) { langs.append("EngSub") }
+        if up.contains("MULTI") { langs.append("MultiSub") }
+        return (parts.joined(separator: " · "),
+                langs.joined(separator: " · "))
     }
 
     // MARK: - Loading + playing

@@ -97,6 +97,10 @@ struct JoePhimHome: View {
     /// first, provider art as fallback; the hero now mirrors
     /// it (see the stage stack in `hero`).
     @State private var heroBackdropURL: URL?
+    /// Ultra hero (v2.0.19): the featured film's TMDB logo
+    /// art and vote average, resolved by the same task.
+    @State private var heroLogoURL: URL?
+    @State private var heroRating: Double = 0
 
     var body: some View {
         Group {
@@ -116,6 +120,8 @@ struct JoePhimHome: View {
                 JoeWallHomeView()
             } else if nav.browseOpen {
                 JoeBrowseView()
+            } else if theme.id == .ultra {
+                ultraHome
             } else {
                 railHome
             }
@@ -281,6 +287,231 @@ struct JoePhimHome: View {
         // movement here — the deeper rails' long-standing shape
         // (see the focus-memory note at the @FocusState block),
         // now the whole home's shape.
+    }
+
+    // MARK: - Ultra home (v2.0.19 — the Sony Ultra port)
+
+    /// Ultra's home: a FIXED full-bleed backdrop of the
+    /// featured film behind the whole page (the Sony shape —
+    /// no band), the hero text column floating over its lower
+    /// left, and the rails scrolling over the backdrop's fade
+    /// to the page background.
+    private var ultraHome: some View {
+        ZStack(alignment: .topLeading) {
+            if let featured = heroMovie {
+                ZStack {
+                    if let url = featured.posterURL {
+                        JoeBandImage(url: url, targetPixels: 1920,
+                                     anchor: 0.20, portraitMode: .blurField)
+                    }
+                    if let url = featured.thumbURL, url != featured.posterURL {
+                        JoeBandImage(url: url, targetPixels: 1920,
+                                     anchor: 0.20, portraitMode: .blurField)
+                    }
+                    if let heroBackdropURL {
+                        JoeBandImage(url: heroBackdropURL, targetPixels: 1920,
+                                     anchor: 0.20, portraitMode: .slice)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.88), location: 0),
+                    .init(color: .black.opacity(0.45), location: 0.45),
+                    .init(color: .black.opacity(0.10), location: 0.75),
+                    .init(color: .black.opacity(0.05), location: 1)
+                ], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.42),
+                    .init(color: theme.bg.opacity(0.85), location: 0.62),
+                    .init(color: theme.bg, location: 0.78)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 40) {
+                    if heroMovie != nil {
+                        ultraHeroZone
+                    } else {
+                        slimHeader
+                    }
+                    cwRail
+                    favRail
+                    ForEach(railSpecs) { spec in
+                        if !spec.movies.isEmpty {
+                            if let band = spec.bandName {
+                                bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
+                            }
+                            movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        }
+                    }
+                    if catalogueEmpty && phim.loading && !phim.loadTimedOut {
+                        ProgressView("Đang tải thư viện phim…")
+                            .font(.system(size: 29))
+                            .foregroundStyle(theme.text)
+                            .tint(theme.text)
+                            .padding(.top, 30)
+                    }
+                    if showPhimError {
+                        errorSurface
+                    }
+                    if showPhimEmpty {
+                        Text("Thư viện chưa có dữ liệu.")
+                            .font(.system(size: 29))
+                            .foregroundStyle(theme.meta)
+                            .padding(.top, 30)
+                    }
+                    if phim.hasData && !failedProviders.isEmpty {
+                        Text("Chưa tải được: " + failedProviders.joined(separator: ", "))
+                            .font(.system(size: 25))
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Ultra hero text zone: a clear 600-tall stage over
+    /// the fixed backdrop — logo art first (the Sony rule: the
+    /// logo replaces the text title and hides the origin
+    /// line), gold meta with the IMDb pill appended, synopsis
+    /// up to 4 lines, then the action row.
+    @ViewBuilder
+    private var ultraHeroZone: some View {
+        if let featured = heroMovie {
+            VStack(alignment: .leading, spacing: 0) {
+                Spacer(minLength: 0)
+                if let heroLogoURL {
+                    JoeRemoteImage(url: heroLogoURL, targetPixels: 1000, fit: true) {
+                        Color.clear
+                    }
+                    .frame(maxWidth: 640, maxHeight: 120, alignment: .leading)
+                } else {
+                    Text(featured.name)
+                        .font(.system(size: 68, weight: .heavy))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(2)
+                }
+                if heroLogoURL == nil, !featured.originName.isEmpty,
+                   featured.originName != featured.name {
+                    Text(featured.originName.uppercased())
+                        .font(.system(size: 24, weight: .semibold))
+                        .tracking(4)
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                        .padding(.top, 10)
+                }
+                HStack(spacing: 16) {
+                    Text(heroMetaLine(featured))
+                        .font(.system(size: 27, weight: .medium))
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                    if heroRating > 0 {
+                        Text(String(format: "IMDb %.1f", heroRating))
+                            .font(.system(size: 23, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(red: 0.961, green: 0.773, blue: 0.094)))
+                    }
+                }
+                .padding(.top, 12)
+                if !heroGenres.isEmpty {
+                    Text(heroGenres.joined(separator: " · "))
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.text.opacity(0.85))
+                        .lineLimit(1)
+                        .padding(.top, 10)
+                }
+                if let synopsis = heroDetail?.content, !synopsis.isEmpty {
+                    Text(synopsis)
+                        .font(.system(size: 26))
+                        .foregroundStyle(theme.text.opacity(0.92))
+                        .lineSpacing(6)
+                        .lineLimit(4)
+                        .frame(maxWidth: 1000, alignment: .leading)
+                        .padding(.top, 16)
+                }
+                HStack(spacing: 18) {
+                    Button {
+                        nav.movie = MovieRoute(provider: featured.provider,
+                                               slug: featured.slug,
+                                               name: featured.name,
+                                               poster: featured.poster,
+                                               year: featured.year)
+                    } label: {
+                        JoePrimaryLabel(title: "Xem ngay", systemImage: "play.fill")
+                    }
+                    .joeCardButton()
+                    .focused($heroPlayFocused)
+                    Button {
+                        toggleHeroFavorite(featured)
+                    } label: {
+                        JoeSecondaryLabel(title: isHeroFavorite(featured)
+                                          ? "♥ Đã thích" : "♡ Yêu thích")
+                    }
+                    .joeCardButton()
+                    Button {
+                        browseReturnTarget = .heroBrowse
+                        nav.browseOpen = true
+                    } label: {
+                        JoeSecondaryLabel(title: "Tất cả phim",
+                                          systemImage: "square.grid.2x2")
+                    }
+                    .joeCardButton()
+                    .focused($heroBrowseFocused)
+                }
+                .padding(.top, 26)
+            }
+            .frame(height: 600, alignment: .bottomLeading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .defaultFocus($heroPlayFocused, true)
+            // The Billboard hero's resolve task, extended to
+            // publish the logo + rating (fetchInfo is cached
+            // in TMDBClient, so the second read is free).
+            .task(id: featured.id) {
+                heroDetail = nil
+                heroBackdropURL = nil
+                heroLogoURL = nil
+                heroRating = 0
+                async let detailFetch = Providers.detail(
+                    featured.provider, slug: featured.slug)
+                async let earlyInfo = TMDBClient.fetchInfo(
+                    tmdbId: featured.tmdbId, type: featured.tmdbType)
+                heroDetail = try? await detailFetch
+                guard !TMDBClient.apiKey.isEmpty else { return }
+                let m = heroDetail?.movie ?? featured
+                var backdrop = ""
+                if !m.tmdbId.isEmpty {
+                    if m.tmdbId == featured.tmdbId,
+                       m.tmdbType == featured.tmdbType {
+                        if let info = await earlyInfo {
+                            backdrop = info.backdropURL
+                        }
+                    } else {
+                        backdrop = await TMDBClient.fetchInfo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)?.backdropURL ?? ""
+                    }
+                }
+                if backdrop.isEmpty {
+                    backdrop = await TMDBClient.searchBackdrop(
+                        name: m.name, origin: m.originName,
+                        year: Providers.yearOf(m)) ?? ""
+                }
+                if !backdrop.isEmpty {
+                    heroBackdropURL = URL(string: backdrop)
+                }
+                if !m.tmdbId.isEmpty,
+                   let info = await TMDBClient.fetchInfo(
+                    tmdbId: m.tmdbId, type: m.tmdbType) {
+                    if !info.logoURL.isEmpty {
+                        heroLogoURL = URL(string: info.logoURL)
+                    }
+                    if info.voteAverage > 0 {
+                        heroRating = info.voteAverage
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Rail specs (single source of truth for order)
@@ -918,6 +1149,8 @@ struct JoePhimHome: View {
                         meta: movie.cardMeta,
                         badge: badges ? Providers.badge(movie.provider) : nil,
                         quality: movie.quality,
+                        timeBadge: movie.time,
+                        yearBadge: movie.year,
                         form: .rail)
                 }
                 .joeCardButton()

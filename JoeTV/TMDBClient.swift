@@ -16,6 +16,11 @@ struct TMDBInfo {
     var backdropURL: String = ""
     var overview: String = ""
     var cast: [TMDBCastMember] = []
+    /// v2.0.19 (Ultra port): the record's TMDB vote average
+    /// (the IMDb-style rating pill/badges) and its title-logo
+    /// art URL (w500, transparent PNG) — both fail-soft.
+    var voteAverage: Double = 0
+    var logoURL: String = ""
 }
 
 /// Minimal TMDB client for the optional enrichment on the movie
@@ -59,6 +64,10 @@ enum TMDBClient {
         let key = apiKey
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
+        let cacheKey = kind + "|" + tmdbId
+        cacheLock.lock()
+        if let hit = infoCache[cacheKey] { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
 
         guard let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)&language=vi-VN",
@@ -71,7 +80,82 @@ enum TMDBClient {
             info.backdropURL = "https://image.tmdb.org/t/p/w1280" + backdropPath
         }
         info.overview = JSON.str(root, "overview")
+        info.voteAverage = JSON.double(root, "vote_average")
+        info.logoURL = await fetchLogo(tmdbId: tmdbId, type: type)
+        cacheLock.lock(); infoCache[cacheKey] = info; cacheLock.unlock()
         return info
+    }
+
+    // MARK: - Ultra enrichment (v2.0.19): logo + rating caches
+
+    private static var infoCache: [String: TMDBInfo] = [:]
+    private static var logoCache: [String: String] = [:]
+    private static var ratingCache: [String: Double] = [:]
+    private static let cacheLock = NSLock()
+
+    /// The title's logo art (TMDB /images): Vietnamese first,
+    /// then English, then language-neutral — best vote inside
+    /// each language. Returns the w500 URL or "" (fail-soft,
+    /// cached either way).
+    static func fetchLogo(tmdbId: String, type: String) async -> String {
+        let key = apiKey
+        guard !key.isEmpty, !tmdbId.isEmpty else { return "" }
+        let kind = (type == "tv") ? "tv" : "movie"
+        let cacheKey = kind + "|" + tmdbId
+        cacheLock.lock()
+        if let hit = logoCache[cacheKey] { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
+        var result = ""
+        if let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/images?api_key=\(key)&include_image_language=vi,en,null",
+            timeout: callTimeout) {
+            let logos = JSON.arr(root, "logos") ?? []
+            func pick(_ lang: String?) -> String {
+                var best = ""
+                var bestVote = -1.0
+                for l in logos {
+                    let iso = JSON.str(l, "iso_639_1")
+                    let matches = lang == nil ? iso.isEmpty : iso == lang
+                    guard matches else { continue }
+                    let v = JSON.double(l, "vote_average")
+                    if v > bestVote { bestVote = v; best = JSON.str(l, "file_path") }
+                }
+                return best
+            }
+            result = pick("vi")
+            if result.isEmpty { result = pick("en") }
+            if result.isEmpty { result = pick(nil) }
+            if result.isEmpty, let first = logos.first {
+                result = JSON.str(first, "file_path")
+            }
+            if !result.isEmpty {
+                result = "https://image.tmdb.org/t/p/w500" + result
+            }
+        }
+        cacheLock.lock(); logoCache[cacheKey] = result; cacheLock.unlock()
+        return result
+    }
+
+    /// The record's vote average for card badges (nil when
+    /// unknown) — one detail call per identity, cached.
+    static func rating(tmdbId: String, type: String) async -> Double? {
+        let key = apiKey
+        guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
+        let kind = (type == "tv") ? "tv" : "movie"
+        let cacheKey = kind + "|" + tmdbId
+        cacheLock.lock()
+        if let hit = ratingCache[cacheKey] {
+            cacheLock.unlock()
+            return hit > 0 ? hit : nil
+        }
+        cacheLock.unlock()
+        if let info = await fetchInfo(tmdbId: tmdbId, type: type) {
+            cacheLock.lock()
+            ratingCache[cacheKey] = info.voteAverage
+            cacheLock.unlock()
+            return info.voteAverage > 0 ? info.voteAverage : nil
+        }
+        return nil
     }
 
     /// Stage 2 (v2.0.1): the credits call alone — top-billed

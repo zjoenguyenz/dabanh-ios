@@ -222,7 +222,13 @@ struct JoeRootView: View {
     @EnvironmentObject private var phim: PhimStore
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
-    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.sourceBoard.rawValue
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
+    /// v2.0.19: one-time landing on Ultra — the owner's Apple
+    /// TV already carries a stored picker choice from an older
+    /// build, which would otherwise win over the new default
+    /// and hide this release's design behind a Settings hunt.
+    /// The flag flips once; any later picker choice stands.
+    @AppStorage("joeThemeUltraV2019") private var ultraMigrated = false
     /// The pill row's focus identity — the six pills (five
     /// sections + Tìm phim) share this one @FocusState, written
     /// ONLY by the focus engine itself.
@@ -260,7 +266,7 @@ struct JoeRootView: View {
     @State private var lastFocusedPill: String?
 
     private var theme: ThemeTokens {
-        ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .sourceBoard)
+        ThemeTokens.tokens(for: JoeThemeID(rawValue: themeIDRaw) ?? .ultra)
     }
 
     /// The corner version label reads the REAL bundle version
@@ -332,6 +338,12 @@ struct JoeRootView: View {
                 // handler lives on JoeTorrentDetail's own root.
                 .transition(.opacity)
                 .zIndex(3)
+            }
+        }
+        .onAppear {
+            if !ultraMigrated {
+                themeIDRaw = JoeThemeID.ultra.rawValue
+                ultraMigrated = true
             }
         }
         .onChange(of: nav.section) { _, _ in
