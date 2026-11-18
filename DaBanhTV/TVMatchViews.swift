@@ -237,6 +237,57 @@ struct TVPillFace: View {
 
 // MARK: - Crest / logo pieces
 
+/// Session image cache for crests and channel logos (v1.3.5,
+/// tvOS 27 optimisation pass). The two image views below used to
+/// be bare AsyncImage: it keeps no decoded-image memory cache, so
+/// every hero swap — and the hero follows EVERY focus move — plus
+/// every rail re-render re-fetched and re-decoded the same
+/// TheSportsDB crests all session long, visible as placeholder
+/// flicker on the hero art. tvOS 26/27 changed nothing in
+/// AsyncImage to fix that, so the app now holds decoded images in
+/// an NSCache and fetches through a session with a real URLCache
+/// (32 MB memory / 128 MB disk): a crest is downloaded at most
+/// once per launch, and usually once ever. Rendering is
+/// unchanged — same placeholder while loading, same scaledToFit
+/// image when loaded.
+private enum TVImageCache {
+    static let cache = NSCache<NSURL, UIImage>()
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024,
+                                   diskCapacity: 128 * 1024 * 1024)
+        return URLSession(configuration: config)
+    }()
+
+    static func load(_ url: URL) async -> UIImage? {
+        if let hit = cache.object(forKey: url as NSURL) { return hit }
+        guard let (data, _) = try? await session.data(from: url),
+              let image = UIImage(data: data) else { return nil }
+        cache.setObject(image, forKey: url as NSURL)
+        return image
+    }
+}
+
+/// One cached image with the house placeholder while it loads.
+private struct TVCachedImage: View {
+    let url: URL
+    let placeholderSize: CGFloat
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                TVSoccerPlaceholder(size: placeholderSize)
+            }
+        }
+        .task(id: url) {
+            image = await TVImageCache.load(url)
+        }
+    }
+}
+
 struct TVCrestImage: View {
     let url: URL?
     let size: CGFloat
@@ -244,14 +295,7 @@ struct TVCrestImage: View {
     var body: some View {
         Group {
             if let url {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit()
-                    default:
-                        TVSoccerPlaceholder(size: size * 0.5)
-                    }
-                }
+                TVCachedImage(url: url, placeholderSize: size * 0.5)
             } else {
                 TVSoccerPlaceholder(size: size * 0.5)
             }
@@ -305,14 +349,7 @@ struct TVChannelLogo: View {
     var body: some View {
         Group {
             if let url = channel.logoURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit()
-                    default:
-                        TVSoccerPlaceholder(size: height * 0.6)
-                    }
-                }
+                TVCachedImage(url: url, placeholderSize: height * 0.6)
             } else {
                 TVSoccerPlaceholder(size: height * 0.6)
             }
