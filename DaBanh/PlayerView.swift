@@ -335,17 +335,23 @@ final class LivePlayerViewController: UIViewController {
 
     private func observe(item: AVPlayerItem, player: AVPlayer) {
         statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-            guard let self else { return }
-            switch item.status {
-            case .readyToPlay:
-                if !firedReady {
-                    firedReady = true
-                    DispatchQueue.main.async { self.onReady?() }
+            // Read the status VALUE here and hop: the KVO handler is a
+            // non-isolated context, the VC's state is main-actor
+            // state (Swift 6).
+            let status = item.status
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch status {
+                case .readyToPlay:
+                    if !firedReady {
+                        firedReady = true
+                        self.onReady?()
+                    }
+                case .failed:
+                    fireFailOnce()
+                default:
+                    break
                 }
-            case .failed:
-                fireFailOnce()
-            default:
-                break
             }
         }
         failToken = NotificationCenter.default.addObserver(

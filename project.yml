@@ -50,13 +50,17 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.dabanh
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Swift 6 language mode for THIS target only (owner order
+        # 2026-11-18): the base stays 5.9 so the tvOS targets in
+        # this shared project are untouched.
+        SWIFT_VERSION: "6.0"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.16"
-        CFBundleVersion: "17"
+        CFBundleShortVersionString: "1.17"
+        CFBundleVersion: "18"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio

@@ -38,7 +38,29 @@ enum Crests {
         return dict
     }
 
-    private(set) static var map: [String: String] = loadMap()
+    /// The live map, behind a lock box: refreshRemote swaps it from
+    /// the main actor while cards read it from wherever they render.
+    /// (Swift 6 language mode: a bare mutable static var is not
+    /// concurrency-safe; the box keeps every target's reads safe.)
+    private final class MapBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [String: String]
+        init(_ value: [String: String]) { self.value = value }
+        func get() -> [String: String] {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func set(_ newValue: [String: String]) {
+            lock.lock(); value = newValue; lock.unlock()
+        }
+    }
+
+    private static let mapBox = MapBox(loadMap())
+
+    private(set) static var map: [String: String] {
+        get { mapBox.get() }
+        set { mapBox.set(newValue) }
+    }
 
     /// Fetch the mirror's crests.json; when it differs from what the
     /// app is using, cache it for the next launch and swap it in for

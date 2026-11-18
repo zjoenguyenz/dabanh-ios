@@ -8,6 +8,9 @@ let accentGreen = Color(red: 0.13, green: 0.77, blue: 0.37)
 /// kickoffs are absolute instants parsed from ICT stamps, so the same
 /// match reads 21:00 in Vietnam and 08:00 in Oklahoma. Live minutes
 /// are computed from the absolute instant and never shift.
+/// MainActor-isolated (Swift 6): DateFormatter is not Sendable, and
+/// every caller is a SwiftUI view on the main actor anyway.
+@MainActor
 enum KickoffFormat {
     static let time: DateFormatter = {
         let f = DateFormatter()

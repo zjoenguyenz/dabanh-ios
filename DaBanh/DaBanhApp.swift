@@ -17,6 +17,9 @@ struct DaBanhApp: App {
 
 /// Holds the app-wide orientation lock. The player page narrows it to
 /// landscape while it is on screen; everything else leaves it open.
+/// MainActor-isolated (Swift 6): the lock is UI state, only ever
+/// touched from the main actor.
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     static var orientationLock: UIInterfaceOrientationMask = .all
 
@@ -29,6 +32,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 /// Sets the orientation lock and, when a rotation target is given, asks
 /// the active scene to rotate to it (iOS 16+ geometry update; the app
 /// targets iOS 17).
+@MainActor
 enum OrientationHelper {
     static func lock(_ mask: UIInterfaceOrientationMask,
                      rotateTo orientation: UIInterfaceOrientation? = nil) {
