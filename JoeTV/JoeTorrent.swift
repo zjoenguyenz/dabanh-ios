@@ -817,13 +817,24 @@ struct JoeTorrentDetail: View {
             e.ts = Int64(Date().timeIntervalSince1970 * 1000)
             watch.toggleFavorite(e)
         } label: {
+            // v2.0.29 (Cluster E, item 9 audit): the label now
+            // carries the drawings' .btn chrome exactly — 29
+            // semibold, padding 17/36, surface2 fill, resting
+            // inset stroke 1.5 theme.stroke, focused ring
+            // theme.focus at ringWidth (the JoeSecondaryLabel
+            // construction, spelt out here because the label
+            // text carries the favourite state colour). It was
+            // 29 medium / vertical 16 with a JoeFocusRing
+            // overlay, which paints no resting stroke.
             Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
-                .font(.system(size: 29, weight: .medium))
+                .font(.system(size: 29, weight: .semibold))
                 .foregroundStyle(isFav ? JoeTheme.accentRed : .white)
                 .padding(.horizontal, 36)
-                .padding(.vertical, 16)
+                .padding(.vertical, 17)
                 .background(Capsule().fill(theme.surface2))
-                .overlay(JoeFocusRing(shape: Capsule()))
+                .overlay(Capsule().strokeBorder(
+                    focusedRow == "fav" ? theme.focus : theme.stroke,
+                    lineWidth: focusedRow == "fav" ? theme.ringWidth : 1.5))
         }
         .joeCardButton()
         // 1.9.2 (Team 9 item 9): the button joins the detail's
@@ -890,21 +901,42 @@ struct JoeTorrentDetail: View {
                           alignment: .leading, spacing: 16) {
                     ForEach(videos) { video in
                         let selected = videoId == video.id
+                        let rowFocused = focusedRow == "ep|" + video.id
                         Button {
                             selectedVideo = video
                             Task { await loadStreams() }
                         } label: {
+                            // v2.0.29 (Cluster E, item 9 audit):
+                            // the selected episode now wears the
+                            // drawings' selected-chip treatment —
+                            // SOLID theme.accent fill with
+                            // onAccent text (the .chip.sel values
+                            // JoeMovieDetail's epChip already
+                            // carries) — not the 30% accent tint
+                            // with resting text colour it had.
+                            // The ring mirrors epChip's rule,
+                            // including the owner's D ruling:
+                            // selected + focused under posterWall
+                            // wears the opaque-white frame, since
+                            // D's accent and focus are one colour.
+                            // The row anatomy (25 pt, full-width
+                            // rounded rect) is unchanged.
                             Text(video.label)
-                                .font(.system(size: 25, weight: selected ? .bold : .medium))
-                                .foregroundStyle(theme.text)
+                                .font(.system(size: 25, weight: selected ? .semibold : .medium))
+                                .foregroundStyle(selected ? theme.onAccent : theme.text)
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 18)
                                 .padding(.vertical, 12)
                                 .background(RoundedRectangle(cornerRadius: theme.rField)
-                                    .fill(selected ? theme.accent.opacity(0.30)
+                                    .fill(selected ? theme.accent
                                           : theme.surface2))
-                                .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+                                .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                                    .strokeBorder(rowFocused
+                                                  ? (theme.id == .posterWall && selected
+                                                     ? Color.white : theme.focus)
+                                                  : (selected ? .clear : theme.stroke),
+                                                  lineWidth: rowFocused ? theme.ringWidth : 1.5))
                         }
                         .joeCardButton()
                         .focused($focusedRow, equals: "ep|" + video.id)
@@ -1160,43 +1192,7 @@ struct JoeTorrentDetail: View {
                                 name: member.name,
                                 photoURL: member.photoURL)
                         } label: {
-                            VStack(spacing: 8) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white.opacity(0.10))
-                                    if !member.photoURL.isEmpty,
-                                       let url = URL(string: member.photoURL) {
-                                        JoeRemoteImage(url: url,
-                                                       targetPixels: 240) {
-                                            Text(String(member.name.prefix(1)))
-                                                .font(.system(size: 38, weight: .bold))
-                                                .foregroundStyle(.white.opacity(0.8))
-                                        }
-                                    } else {
-                                        Text(String(member.name.prefix(1)))
-                                            .font(.system(size: 38, weight: .bold))
-                                            .foregroundStyle(.white.opacity(0.8))
-                                    }
-                                }
-                                .frame(width: 110, height: 110)
-                                .clipShape(Circle())
-                                .overlay(Circle().strokeBorder(
-                                    Color.white.opacity(0.14),
-                                    lineWidth: 1.2))
-                                Text(member.name)
-                                    .font(.system(size: 23, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.center)
-                                if !member.character.isEmpty {
-                                    Text(member.character)
-                                        .font(.system(size: 23))
-                                        .foregroundStyle(theme.meta)
-                                        .lineLimit(1)
-                                        .multilineTextAlignment(.center)
-                                }
-                            }
-                            .frame(width: 120)
+                            JoeTorCastCellLabel(member: member)
                         }
                         .joeCardButton()
                     }
@@ -1204,6 +1200,74 @@ struct JoeTorrentDetail: View {
             }
         }
     }
+
+/// v2.0.29 (item 1a, torrent half): one torrent cast
+/// cell's label — the JoeCastCellLabel treatment mirrored
+/// for this file (that label is private to
+/// JoeMovieDetail.swift). Until now this cell painted NO
+/// focus state: .joeCardButton() suppresses the system
+/// focus effect centrally, and the label never read its
+/// own focus, so a focused torrent cast cell was
+/// pixel-identical to an unfocused one — the owner's
+/// "diễn viên hiện, không focus" on torrent details. The
+/// label now reads \.isFocused exactly like the Phim cast
+/// cell: focused, the photo gains the theme's ring
+/// (ringWidth, theme.focus) and the name takes the focus
+/// title colour. Every resting value (110 pt circle,
+/// white .10 fill, white .14 / 1.2 resting stroke, 23 pt
+/// name/character, 120 width) is byte-identical to the
+/// pre-fix cell.
+private struct JoeTorCastCellLabel: View {
+    let member: TMDBCastMember
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+                if !member.photoURL.isEmpty,
+                   let url = URL(string: member.photoURL) {
+                    JoeRemoteImage(url: url, targetPixels: 240) {
+                        initial
+                    }
+                } else {
+                    initial
+                }
+            }
+            .frame(width: 110, height: 110)
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(
+                isFocused ? theme.focus : Color.white.opacity(0.14),
+                lineWidth: isFocused ? theme.ringWidth : 1.2))
+            Text(member.name)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            if !member.character.isEmpty {
+                // v2.0.29 (Cluster E, item 9 audit):
+                // lineLimit 2, exactly as the mirrored
+                // Phim cast cell (JoeMovieDetail.castCell)
+                // — the 2.0.28 mirror had it at 1, so a
+                // long character name truncated where the
+                // Phim row wraps.
+                Text(member.character)
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(width: 120)
+    }
+
+    private var initial: some View {
+        Text(String(member.name.prefix(1)))
+            .font(.system(size: 38, weight: .bold))
+            .foregroundStyle(.white.opacity(0.8))
+    }
+}
 
     private func loadStreams() async {
         let torBase = TorrentSettings.effectiveBase
@@ -1307,7 +1371,7 @@ struct JoeTorrentDetail: View {
         entry.metaBase = base
         entry.background = meta.background
         entry.desc = meta.desc
-        let resume = watch.progressFor(key: entry.key)?.pos ?? 0
+        let resume = watch.progressFor(matching: entry)?.pos ?? 0
         let originKey = entry.key
         let type = meta.type
         let firstCall = TorLadderFirstCallBox()

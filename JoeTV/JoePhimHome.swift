@@ -691,9 +691,10 @@ struct JoePhimHome: View {
     ///      genre/country lists included);
     ///   2. for titles still unmatched, a bounded provider
     ///      search — at most 8 unmatched titles, providers in
-    ///      Providers.priority order, accepting a tmdbId match
-    ///      first and a normalized-name match (name or origin
-    ///      name) behind it.
+    ///      Providers.priority order, accepting ONLY a
+    ///      tmdbId match (v2.0.29, item 7: the former
+    ///      normalized-name acceptance bound cards to
+    ///      lookalike films).
     /// Everything still unmatched is dropped silently.
     /// Fail-soft end to end: no TMDB key / no network simply
     /// leaves the rail absent.
@@ -720,7 +721,11 @@ struct JoePhimHome: View {
         var resolved: [Int: Movie] = [:]
         var unmatched: [(index: Int, title: JoeTopShelfWriter.TrendingTitle)] = []
         for (i, t) in trending.enumerated() {
-            if !t.tmdbId.isEmpty, let m = byTmdbId[t.tmdbId],
+            // v2.0.29 (item 7): typed key first, bare key
+            // behind it (see catalogueByTmdbId).
+            let hit = t.tmdbId.isEmpty ? nil
+                : (byTmdbId[t.type + "|" + t.tmdbId] ?? byTmdbId[t.tmdbId])
+            if let m = hit,
                m.tmdbType.isEmpty || m.tmdbType == t.type {
                 resolved[i] = m
             } else {
@@ -753,11 +758,23 @@ struct JoePhimHome: View {
     /// First carrier wins (lists are visited in rail/priority
     /// order, merged first); vietnamAll covers the store's
     /// derived vietnamSeries / vietnamSingle views.
+    /// v2.0.29 (item 7): TMDB's numeric ids are per-type
+    /// namespaces — a movie and a series can share the
+    /// number — so a record that states its type is keyed
+    /// "type|tmdbId" and only a typeless record rides the
+    /// bare key (the JoeActorPage discipline). The lookup
+    /// tries the trending title's typed key first, then the
+    /// bare key.
     private func catalogueByTmdbId() -> [String: Movie] {
         var map: [String: Movie] = [:]
         func add(_ movies: [Movie]) {
-            for m in movies where !m.tmdbId.isEmpty && map[m.tmdbId] == nil {
-                map[m.tmdbId] = m
+            for m in movies where !m.tmdbId.isEmpty {
+                if !m.tmdbType.isEmpty {
+                    let key = m.tmdbType + "|" + m.tmdbId
+                    if map[key] == nil { map[key] = m }
+                } else if map[m.tmdbId] == nil {
+                    map[m.tmdbId] = m
+                }
             }
         }
         add(phim.merged)
@@ -784,31 +801,30 @@ struct JoePhimHome: View {
     }
 
     /// One trending title's fallback search across the
-    /// providers (priority order): a result carrying the
-    /// trending title's tmdbId wins outright; otherwise the
+    /// providers (priority order): ONLY a result carrying
+    /// the trending title's own tmdbId (its type agreeing
+    /// when the result states one) is accepted.
+    /// v2.0.29 (item 7): the search used to also accept the
     /// first result whose normalized name (or origin name)
-    /// equals the trending title's normalized name.
+    /// equalled the trending title's — but a translated
+    /// title is not an identity: different films share one,
+    /// so the card bound a lookalike and tapping "Có máy
+    /// thời gian" opened "Step Into The Past". The house
+    /// discipline (the franchise strip, the actor page) is
+    /// ID-or-nothing: a title with no ID match drops off
+    /// the rail rather than opening the wrong film.
     private func trendingSearchMatch(
         for t: JoeTopShelfWriter.TrendingTitle
     ) async -> Movie? {
-        let target = Providers.normalizeTitle(t.title)
-        guard !target.isEmpty else { return nil }
+        guard !t.tmdbId.isEmpty else { return nil }
         for code in Providers.priority {
             guard let results = try? await Providers.search(code, keyword: t.title)
             else { continue }
-            if !t.tmdbId.isEmpty,
-               let byId = results.first(where: {
-                   $0.tmdbId == t.tmdbId
-                       && ($0.tmdbType.isEmpty || $0.tmdbType == t.type)
-               }) {
-                return byId
-            }
-            if let byName = results.first(where: {
-                Providers.normalizeTitle($0.name) == target
-                    || (!$0.originName.isEmpty
-                        && Providers.normalizeTitle($0.originName) == target)
+            if let byId = results.first(where: {
+                $0.tmdbId == t.tmdbId
+                    && ($0.tmdbType.isEmpty || $0.tmdbType == t.type)
             }) {
-                return byName
+                return byId
             }
         }
         return nil

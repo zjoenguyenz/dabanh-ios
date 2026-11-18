@@ -957,10 +957,25 @@ struct PosterCard: View {
         .padding(.top, theme.artInset)
         .padding(.bottom, 14)
         .frame(width: theme.cardWidth, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: theme.rCard).fill(theme.surfaceGradient))
-        .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-            .strokeBorder(isFocused ? theme.focus : theme.stroke,
-                          lineWidth: isFocused ? theme.ringWidth : 1.5))
+        // v2.0.29 (item 5): the ring used to be an .overlay
+        // — the TOP layer — so its 6 pt inset band painted
+        // OVER the first and last glyphs of the title/meta
+        // (flush with the card edge at artInset 0): the
+        // owner's "viền của poster nó cắt chữ". The
+        // drawing's inset box-shadow paints above the
+        // face's fill but UNDER its content, so the ring
+        // now rides the background's own shape: same
+        // stroke, same values (focus colour / resting
+        // stroke, ringWidth / 1.5), painted between the
+        // fill and the text instead of over it.
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: theme.rCard)
+                    .fill(theme.surfaceGradient)
+                RoundedRectangle(cornerRadius: theme.rCard)
+                    .strokeBorder(isFocused ? theme.focus : theme.stroke,
+                                  lineWidth: isFocused ? theme.ringWidth : 1.5)
+            })
     }
 }
 
