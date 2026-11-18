@@ -15,6 +15,15 @@ struct JoeMovieDetail: View {
     @State private var slug: String
     @State private var detail: Detail?
     @State private var tmdb: TMDBInfo?
+    /// Idea 3(c) (checkpoint 2.0.25): the title logo lives in
+    /// its OWN state now — TMDBClient.fetchInfo no longer
+    /// awaits the logo (its TMDBInfo.logoURL is always ""),
+    /// so the detail fetches the logo in parallel via
+    /// TMDBClient.fetchLogo and publishes it here the moment
+    /// it lands ("" until then). The backdrop/overview in
+    /// `tmdb` apply as soon as fetchInfo returns; nothing
+    /// serialises behind the logo.
+    @State private var tmdbLogoURL: String = ""
     @State private var alternatives: [(code: String, slug: String)] = []
     /// The film's resolved cross-service identity (v2.0.5,
     /// D3): the detail-time ladder's result (Providers
@@ -213,6 +222,25 @@ struct JoeMovieDetail: View {
             if info == nil, backdropURL == nil {
                 tmdb = nil
             }
+        }
+        .task(id: detail?.movie.id ?? "") {
+            // Idea 3(c) (checkpoint 2.0.25): the title logo is
+            // fetched in PARALLEL with the enrichment task
+            // above — its own .task, keyed on the same detail
+            // identity, so it starts when the detail loads its
+            // TMDB info, is cancelled/restarted with it, and
+            // publishes into tmdbLogoURL the moment it lands.
+            // fetchInfo's backdrop/overview never wait for it.
+            // Fail-soft exactly like the rest of the TMDB
+            // chain: no key / no TMDB id / a failed call
+            // leaves the logo empty and the text title stands.
+            tmdbLogoURL = ""
+            guard let detail, !TMDBClient.apiKey.isEmpty,
+                  !detail.movie.tmdbId.isEmpty else { return }
+            let logo = await TMDBClient.fetchLogo(
+                tmdbId: detail.movie.tmdbId, type: detail.movie.tmdbType)
+            guard !Task.isCancelled else { return }
+            tmdbLogoURL = logo
         }
         .task(id: provider + "|" + slug + "|" + (focusedEp ?? "")
               + "|" + (detail == nil ? "0" : "1")) {
@@ -460,8 +488,8 @@ struct JoeMovieDetail: View {
             .isEmpty
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                if let logo = tmdb?.logoURL, !logo.isEmpty,
-                   let u = URL(string: logo) {
+                if !tmdbLogoURL.isEmpty,
+                   let u = URL(string: tmdbLogoURL) {
                     JoeRemoteImage(url: u, targetPixels: 1000, fit: true) {
                         Color.clear
                     }
@@ -474,7 +502,7 @@ struct JoeMovieDetail: View {
                         .lineLimit(3)
                         .padding(.top, 30)
                 }
-                if (tmdb?.logoURL.isEmpty ?? true),
+                if tmdbLogoURL.isEmpty,
                    !d.movie.originName.isEmpty,
                    d.movie.originName != d.movie.name {
                     Text(d.movie.originName.uppercased())
@@ -1994,6 +2022,40 @@ struct JoeMovieDetail: View {
         return nil
     }
 
+    /// Idea 6 (checkpoint 2.0.25): the NEXT episode after
+    /// `epName` in the episode list this detail already
+    /// holds, or nil when there is none (a movie / single-
+    /// episode session, or the last episode). The successor
+    /// in the SAME server's list wins — that is the list the
+    /// owner tapped through; when that slot is missing or
+    /// unplayable, the episode numbered N+1 anywhere in the
+    /// detail (server order) is the fallback, mirroring the
+    /// ladder's own number matching. Playable-only: an
+    /// unplayable "next" is no next at all.
+    private func nextEpisodeName(in d: Detail, after epName: String) -> String? {
+        for server in d.servers {
+            if let idx = server.episodes.firstIndex(where: { $0.name == epName }) {
+                if idx + 1 < server.episodes.count {
+                    let candidate = server.episodes[idx + 1]
+                    if Providers.isPlayable(code: provider, episode: candidate) {
+                        return candidate.name
+                    }
+                }
+                break
+            }
+        }
+        let currentNum = Providers.episodeNumber(epName)
+        guard currentNum >= 1 else { return nil }
+        for server in d.servers {
+            for ep in server.episodes
+            where Providers.episodeNumber(ep.name) == currentNum + 1
+                && Providers.isPlayable(code: provider, episode: ep) {
+                return ep.name
+            }
+        }
+        return nil
+    }
+
     private func play(_ d: Detail, epName: String) {
         PerfLog.mark("play.tap")
         // Owner source-priority policy: in Tự động mode a US
@@ -2006,10 +2068,67 @@ struct JoeMovieDetail: View {
             ? (torrentFirst ? "Nguồn: Tự động · ưu tiên Torrent chất lượng cao"
                             : "Nguồn: Tự động")
             : "Nguồn: \(Providers.displayName(provider)) · đã ghim"
+        let director = Self.makeDirector(
+            provider: provider, detail: d, epName: epName,
+            watch: watch, torrentFirst: torrentFirst)
+        // Idea 6 (checkpoint 2.0.25) — Up Next wiring,
+        // EPISODE sessions only. Every play in this file is
+        // built from the detail's CURRENT provider state
+        // (episode chips and the big Play button alike; an
+        // alternative-source tap switches + pins the detail
+        // itself before any play, it never starts a one-off
+        // cross-provider session), so the guard is exactly:
+        // a next episode exists in this same detail. Movie
+        // (single-episode) sessions find no next and wire
+        // nothing. The factory and the warm below capture
+        // the session's OWN provider code and torrentFirst
+        // flag as plain values — no new source decision is
+        // ever taken for the next episode, so a user-pinned
+        // source (autoSource off, torrentFirst false) stays
+        // the lead source there too, and the director's own
+        // failover machinery is unchanged.
+        if let nextName = nextEpisodeName(in: d, after: epName) {
+            let sessionProvider = provider
+            let sessionDetail = d
+            let sessionWatch = watch
+            let nextNum = Providers.episodeNumber(nextName)
+            director.nextEpisodeTitle = nextName
+            director.nextEpisodeFactory = {
+                Self.makeDirector(
+                    provider: sessionProvider, detail: sessionDetail,
+                    epName: nextName, watch: sessionWatch,
+                    torrentFirst: torrentFirst)
+            }
+            director.onPlayingStarted = {
+                // Playback has started: prepare episode N+1
+                // off the critical path. Every provider gets
+                // the resolver-memo pre-resolve; KK alone
+                // additionally warms the media itself, via
+                // the same ladder + first-entry pattern (and
+                // the same proxy guard) as the dwell warm in
+                // dwellPreResolve() — KK entries are direct
+                // m3u8, the other providers' URLs are minted
+                // by a live resolve and keep the URL-level
+                // preparation only. Fail-soft throughout.
+                Task.detached {
+                    await Providers.preResolve(
+                        code: sessionProvider, detail: sessionDetail,
+                        epName: nextName, epNum: nextNum)
+                    guard sessionProvider == Providers.KK else { return }
+                    let ladder = await Providers.ladderFor(
+                        code: sessionProvider, detail: sessionDetail,
+                        filmTitle: sessionDetail.movie.name,
+                        epName: nextName, epNum: nextNum)
+                    if let first = ladder.entries.first, !first.proxy,
+                       let url = URL(string: first.url) {
+                        StreamWarmer.shared.warmUpcoming(
+                            url: url, headers: first.headers)
+                    }
+                }
+            }
+        }
         playerHolder = DirectorHolder(
-            director: Self.makeDirector(
-                provider: provider, detail: d, epName: epName,
-                watch: watch, torrentFirst: torrentFirst),
+            director: director,
             title: d.movie.name, episode: epName, sourceLine: sourceLine)
     }
 

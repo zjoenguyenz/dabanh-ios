@@ -1135,26 +1135,71 @@ struct JoeTorrentDetail: View {
     }
 
     private func play(_ stream: TorStream) {
-        let sid = videoId
+        let director = Self.makePlayDirector(
+            meta: meta, base: route.base, watch: watch,
+            video: selectedVideo, preferred: stream,
+            seedStreams: streams, seedSubtitleURL: viSubtitleURL)
+        Self.wireUpNext(on: director, after: selectedVideo,
+                        meta: meta, base: route.base, watch: watch,
+                        videos: videos)
+        playerHolder = JoeMovieDetail.DirectorHolder(
+            director: director,
+            title: meta.name,
+            episode: selectedVideo?.label ?? "",
+            sourceLine: "Nguồn: Torrent")
+    }
+
+    /// Builds the PlayDirector for ONE video of a torrent
+    /// title — the tapped episode here, or the NEXT episode
+    /// through the Up Next factory below. One builder for
+    /// both, so a next-episode session is the current session
+    /// in every respect: same pooled source family and
+    /// settings (TorrentSettings read at ladder time, exactly
+    /// as before), same candidate conversion, same subtitle
+    /// attach, same resume rule. Static and value-capturing
+    /// only, so the factory closure can hold it without a
+    /// retain cycle through the view's @State.
+    ///
+    /// v2.0.25 (Idea 3b): `seedStreams` is the stream list
+    /// ALREADY loaded for this video in this view session
+    /// (the displayed rows for the tapped episode; the
+    /// pre-resolved list for a next episode). The ladder's
+    /// FIRST invocation for the ORIGIN identity serves it
+    /// instead of re-fetching the same pooled list from
+    /// scratch; every later invocation (failover refresh,
+    /// retry) fetches fresh exactly as before. The guard is
+    /// progressKey equality with the origin entry's key, and
+    /// an empty seed never consumes the first call — it falls
+    /// through to the fresh fetch. The pool itself is
+    /// untouched: the seed IS fetchPooledStreams' own ranked
+    /// output, served once, so the pooled top-30 /
+    /// cached-first / 2160 REMUX > BluRay > WEB /
+    /// TorBox > RD > Premiumize behaviour cannot change.
+    private static func makePlayDirector(
+        meta: TorMeta, base: String, watch: WatchStore,
+        video: TorVideo?, preferred: TorStream?,
+        seedStreams: [TorStream], seedSubtitleURL: URL?
+    ) -> PlayDirector {
+        let sid = video?.id ?? meta.id
         var entry = WatchStore.Entry()
         entry.kind = WatchStore.kindTor
         entry.key = WatchStore.torProgressKey(streamId: sid)
-        entry.ep = selectedVideo?.label ?? ""
-        entry.epLabel = selectedVideo.map { "Đang xem: \($0.label)" } ?? ""
+        entry.ep = video?.label ?? ""
+        entry.epLabel = video.map { "Đang xem: \($0.label)" } ?? ""
         entry.title = meta.name
         entry.poster = meta.poster
         entry.year = meta.year
         entry.metaId = meta.id
         entry.metaType = meta.type
         entry.streamId = sid
-        entry.metaBase = route.base
+        entry.metaBase = base
         entry.background = meta.background
         entry.desc = meta.desc
         let resume = watch.progressFor(key: entry.key)?.pos ?? 0
-        let tapped = stream
+        let originKey = entry.key
         let type = meta.type
-        let viURL = viSubtitleURL
-        let director = PlayDirector(
+        let firstCall = TorLadderFirstCallBox()
+        return PlayDirector(
             store: watch,
             identity: PlayIdentity(entry: entry),
             resumeMs: resume,
@@ -1168,25 +1213,160 @@ struct JoeTorrentDetail: View {
                 // stream leads — a hash entry earns its ONE
                 // Real-Debrid resolution there — then any
                 // direct-URL streams in list order.
-                let pooled = await TorrentClient.fetchPooledStreams(
-                    torrentioBase: TorrentSettings.effectiveBase,
-                    mfBase: TorrentSettings.mfBase,
-                    type: type, id: identity.entry.streamId)
+                // v2.0.25: the FIRST origin-identity call
+                // serves the already-loaded list instead
+                // (see the builder note above) — the identical
+                // fetch is not paid for a second time.
+                let list: [TorStream]
+                if !firstCall.consumed,
+                   identity.progressKey == originKey,
+                   !seedStreams.isEmpty {
+                    firstCall.consumed = true
+                    list = seedStreams
+                } else {
+                    let pooled = await TorrentClient.fetchPooledStreams(
+                        torrentioBase: TorrentSettings.effectiveBase,
+                        mfBase: TorrentSettings.mfBase,
+                        type: type, id: identity.entry.streamId)
+                    list = pooled.streams
+                }
                 var cands = await TorrentClient.playCandidates(
-                    streams: pooled.streams, preferred: tapped)
+                    streams: list, preferred: preferred)
                 // The session's Vietnamese subtitle rides
                 // every candidate, so failover keeps it.
-                if let viURL {
-                    for i in cands.indices { cands[i].subtitleURL = viURL }
+                if let seedSubtitleURL {
+                    for i in cands.indices { cands[i].subtitleURL = seedSubtitleURL }
                 }
                 return cands
             },
             hopIdentity: nil)
-        playerHolder = JoeMovieDetail.DirectorHolder(
-            director: director,
-            title: meta.name,
-            episode: selectedVideo?.label ?? "",
-            sourceLine: "Nguồn: Torrent")
+    }
+
+    /// Idea 6, torrent-series half (v2.0.25): the PlayDirector
+    /// Up Next contract for a series episode — the next
+    /// episode in THIS detail's loaded episode sequence
+    /// (`videos`, in fetch order). Movies, the last episode,
+    /// and a current episode outside the loaded list get
+    /// nothing: no title, no factory, no preparation. All
+    /// three members are set here, before the director is
+    /// handed to JoePlayerView (and, for a factory-built
+    /// director, before it is returned).
+    private static func wireUpNext(
+        on director: PlayDirector, after video: TorVideo?,
+        meta: TorMeta, base: String, watch: WatchStore,
+        videos: [TorVideo]
+    ) {
+        guard meta.type == "series",
+              let video,
+              let idx = videos.firstIndex(where: { $0.id == video.id }),
+              idx + 1 < videos.count else { return }
+        let nextVideo = videos[idx + 1]
+        director.nextEpisodeTitle = nextVideo.label
+        // Preparation state shared by onPlayingStarted (which
+        // launches it) and the factory (which consumes it):
+        // the next episode's pooled streams + Vietnamese
+        // subtitle, resolved once in the background while the
+        // current episode plays.
+        let prep = TorNextEpisodePrep(videoId: nextVideo.id,
+                                      type: meta.type)
+        director.onPlayingStarted = {
+            prep.start()
+        }
+        director.nextEpisodeFactory = {
+            // If preparation is still in flight (a quick skip
+            // to the end), wait for it rather than duplicating
+            // its fetch; if it never launched, result()
+            // launches it now. The factory director is seeded
+            // with the prepared list, so ITS first ladder call
+            // reuses it under the same Idea 3b guard — no
+            // source decision is re-made: the builder, the
+            // pooled family/settings and the candidate
+            // conversion are the session's own, and with no
+            // tapped row for a next episode the pool's own
+            // top-ranked stream leads (preferred: nil), never
+            // a re-rank across families. Its own Up Next is
+            // wired for the episode after, so the chain
+            // continues episode to episode.
+            let prepared = await prep.result()
+            let next = Self.makePlayDirector(
+                meta: meta, base: base, watch: watch,
+                video: nextVideo, preferred: nil,
+                seedStreams: prepared.streams,
+                seedSubtitleURL: prepared.viSubtitleURL)
+            Self.wireUpNext(on: next, after: nextVideo,
+                            meta: meta, base: base, watch: watch,
+                            videos: videos)
+            return next
+        }
+    }
+}
+
+/// First-call flag for a torrent ladder's resolveLadder
+/// closure (v2.0.25, Idea 3b — JoeMovieDetail's
+/// LadderFirstCallBox pattern): reference type because the
+/// escaping closure must mutate it across invocations.
+/// `consumed` flips on the first origin-identity invocation
+/// that serves the already-loaded stream list; every later
+/// invocation fetches its pooled list fresh.
+private final class TorLadderFirstCallBox {
+    var consumed = false
+}
+
+/// Idea 6 preparation box (v2.0.25): the next episode's
+/// pooled streams + best Vietnamese subtitle, resolved ONCE
+/// in the background while the current episode plays
+/// (launched by the director's onPlayingStarted) and consumed
+/// by the next-episode factory as its director's seed list —
+/// the factory director's first ladder call then reuses it
+/// under the same first-call guard as the tapped session's,
+/// so no fetch is duplicated. Main-actor isolated: both
+/// contract closures that touch it are @MainActor.
+@MainActor
+private final class TorNextEpisodePrep {
+    let videoId: String
+    let type: String
+    private(set) var streams: [TorStream] = []
+    private(set) var viSubtitleURL: URL?
+    private var task: Task<Void, Never>?
+
+    init(videoId: String, type: String) {
+        self.videoId = videoId
+        self.type = type
+    }
+
+    /// Launch preparation if it has not launched yet.
+    func start() {
+        guard task == nil else { return }
+        task = Task { await self.run() }
+    }
+
+    /// The prepared payload: waits for an in-flight launch,
+    /// or launches now if onPlayingStarted never fired.
+    func result() async -> (streams: [TorStream], viSubtitleURL: URL?) {
+        start()
+        await task?.value
+        return (streams, viSubtitleURL)
+    }
+
+    private func run() async {
+        // The same concurrent pair loadStreams runs for the
+        // tapped episode: the pooled fetch and the subtitle
+        // fetch depend only on the episode id, so they race
+        // instead of stacking (max, not sum).
+        async let pooledFetch = TorrentClient.fetchPooledStreams(
+            torrentioBase: TorrentSettings.effectiveBase,
+            mfBase: TorrentSettings.mfBase,
+            type: type, id: videoId)
+        async let subsFetch = TorrentClient.fetchSubtitles(
+            base: TorrentSettings.subtitleBase(
+                addonBase: TorrentSettings.effectiveBase
+                    ?? TorrentSettings.mfBase ?? ""),
+            type: type, id: videoId)
+        let pooled = await pooledFetch
+        streams = pooled.streams
+        let subs = await subsFetch
+        viSubtitleURL = TorrentClient.bestVietnamese(subs)
+            .flatMap { URL(string: $0.url) }
     }
 }
 

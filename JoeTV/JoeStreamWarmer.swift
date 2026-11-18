@@ -105,6 +105,18 @@ final class StreamWarmer {
         Task { _ = try? await asset.load(.isPlayable) }
     }
 
+    /// The named entry point of the shared warming system
+    /// (v2.0.25): callers that know an upcoming item (the
+    /// Up Next path warms the next episode while the
+    /// current one plays) warm through here rather than
+    /// reaching for warm(url:headers:) directly. Later
+    /// warming layers build onto this same warmer — the
+    /// single-entry discipline is unchanged: one entry,
+    /// replaced on a new warm, consumed on take.
+    func warmUpcoming(url: URL, headers: [String: String]) {
+        warm(url: url, headers: headers)
+    }
+
     /// Hand the warmed player to the tap, or nil when the
     /// tap's candidate is not the warmed one (different
     /// URL/headers, or the warm aged out). A taken entry is
@@ -115,8 +127,12 @@ final class StreamWarmer {
         defer { lock.unlock() }
         guard let e = entry, e.url == url, e.headers == headers,
               Date().timeIntervalSince(e.at) <= Self.maxAge
-        else { return nil }
+        else {
+            PerfLog.mark("warm.miss")
+            return nil
+        }
         entry = nil
+        PerfLog.mark("warm.hit")
         return e.player
     }
 

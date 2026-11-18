@@ -81,7 +81,13 @@ enum TMDBClient {
         }
         info.overview = JSON.str(root, "overview")
         info.voteAverage = JSON.double(root, "vote_average")
-        info.logoURL = await fetchLogo(tmdbId: tmdbId, type: type)
+        // 2.0.25 (3c): the logo is SPLIT from this call —
+        // fetchInfo returns without awaiting fetchLogo, so
+        // the backdrop/overview/rating no longer wait a full
+        // extra TMDB round-trip. logoURL stays "" here (and
+        // in the cached payload); consumers that need the
+        // logo fetch it in parallel via fetchLogo, which has
+        // its own cache.
         cacheLock.lock(); infoCache[cacheKey] = info; cacheLock.unlock()
         return info
     }

@@ -408,8 +408,14 @@ struct JoePhimHome: View {
                        value: ultraBackdropSource?.url)
             .defaultFocus($heroPlayFocused, true)
             // The Billboard hero's resolve task, extended to
-            // publish the logo + rating (fetchInfo is cached
-            // in TMDBClient, so the second read is free).
+            // publish the logo + rating. 2.0.25 (3c): the logo
+            // no longer rides fetchInfo (which now returns
+            // without it) — it is fetched IN PARALLEL via
+            // fetchLogo from the start, alongside the detail
+            // and info fetches, and is only awaited AFTER the
+            // backdrop and rating have been applied, so it
+            // never delays the hero backdrop/info application;
+            // heroLogoURL is set when it lands.
             .task(id: featured.id) {
                 heroDetail = nil
                 heroBackdropURL = nil
@@ -419,19 +425,24 @@ struct JoePhimHome: View {
                     featured.provider, slug: featured.slug)
                 async let earlyInfo = TMDBClient.fetchInfo(
                     tmdbId: featured.tmdbId, type: featured.tmdbType)
+                async let earlyLogo = TMDBClient.fetchLogo(
+                    tmdbId: featured.tmdbId, type: featured.tmdbType)
                 heroDetail = try? await detailFetch
                 guard !TMDBClient.apiKey.isEmpty else { return }
                 let m = heroDetail?.movie ?? featured
                 var backdrop = ""
+                var heroInfo: TMDBInfo?
                 if !m.tmdbId.isEmpty {
                     if m.tmdbId == featured.tmdbId,
                        m.tmdbType == featured.tmdbType {
-                        if let info = await earlyInfo {
+                        heroInfo = await earlyInfo
+                        if let info = heroInfo {
                             backdrop = info.backdropURL
                         }
                     } else {
-                        backdrop = await TMDBClient.fetchInfo(
-                            tmdbId: m.tmdbId, type: m.tmdbType)?.backdropURL ?? ""
+                        heroInfo = await TMDBClient.fetchInfo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)
+                        backdrop = heroInfo?.backdropURL ?? ""
                     }
                 }
                 if backdrop.isEmpty {
@@ -442,14 +453,20 @@ struct JoePhimHome: View {
                 if !backdrop.isEmpty {
                     heroBackdropURL = URL(string: backdrop)
                 }
-                if !m.tmdbId.isEmpty,
-                   let info = await TMDBClient.fetchInfo(
-                    tmdbId: m.tmdbId, type: m.tmdbType) {
-                    if !info.logoURL.isEmpty {
-                        heroLogoURL = URL(string: info.logoURL)
+                if let info = heroInfo, info.voteAverage > 0 {
+                    heroRating = info.voteAverage
+                }
+                if !m.tmdbId.isEmpty {
+                    let logo: String
+                    if m.tmdbId == featured.tmdbId,
+                       m.tmdbType == featured.tmdbType {
+                        logo = await earlyLogo
+                    } else {
+                        logo = await TMDBClient.fetchLogo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)
                     }
-                    if info.voteAverage > 0 {
-                        heroRating = info.voteAverage
+                    if !logo.isEmpty {
+                        heroLogoURL = URL(string: logo)
                     }
                 }
             }

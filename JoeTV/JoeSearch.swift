@@ -56,6 +56,16 @@ struct JoeSearchView: View {
     /// The TextField that used to own this landing is gone.
     @FocusState private var keyFocus: JoeSearchKeyFocus?
 
+    // v2.0.25 (Idea 2 — voice search): the voice side door's
+    // state. `voiceOpen` presents JoeVoiceSearchSheet (below);
+    // `voiceDraft` is the sheet's LOCAL text — it touches
+    // nothing until the sheet's submit copies it into `query`
+    // (submitVoiceSearch below), and a cancel/Menu dismiss
+    // discards it. The letter strip stays the primary surface;
+    // this is an entry point only, not a second search engine.
+    @State private var voiceOpen = false
+    @State private var voiceDraft = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             // v2.0.0 (UI-5): the field is light by design in
@@ -167,6 +177,17 @@ struct JoeSearchView: View {
         // the detail's own handler is the nearer ancestor and
         // wins, preserving exactly-one-layer-per-press.
         .onExitCommand { nav.searchOpen = false }
+        // v2.0.25: the voice sheet rides this layer. Its own
+        // .onExitCommand (inside the sheet) is the nearer
+        // handler while it is presented, so Menu cancels the
+        // sheet first and only a later Menu closes search —
+        // the same exactly-one-layer-per-press rule the movie
+        // detail follows above this layer.
+        .fullScreenCover(isPresented: $voiceOpen) {
+            JoeVoiceSearchSheet(draft: $voiceDraft,
+                                onSubmit: submitVoiceSearch,
+                                onCancel: { voiceOpen = false })
+        }
         // 1.9.2 (Team 9 item 8): the query field is the
         // layer's declared initial focus — a static,
         // appearance-time .defaultFocus, the same construction
@@ -186,11 +207,12 @@ struct JoeSearchView: View {
 
     /// The query row (v2.0.17): the query as a light display
     /// (the field's chrome, never focused — there is no
-    /// system field any more) + Quay lại. Typing happens on
-    /// the letter strip directly below; the Tìm button is
-    /// gone because typing IS the search (v2.0.13's rule,
-    /// now visible while it happens). In A/F the row is
-    /// centred by the body; D runs it full width.
+    /// system field any more) + Nói (v2.0.25, the voice side
+    /// door) + Quay lại. Typing happens on the letter strip
+    /// directly below; the Tìm button is gone because typing
+    /// IS the search (v2.0.13's rule, now visible while it
+    /// happens). In A/F the row is centred by the body; D
+    /// runs it full width.
     private var fieldRow: some View {
         HStack(spacing: 18) {
             HStack(spacing: 14) {
@@ -206,6 +228,17 @@ struct JoeSearchView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .joeFieldChrome(focused: false)
             .frame(maxWidth: theme.id == .posterWall ? .infinity : 700)
+            // v2.0.25 (Idea 2): the voice side door — the same
+            // secondary-label construction as Quay lại beside
+            // it, mic glyph, OS-rendered focus (.joeCardButton
+            // paints nothing; no hand-drawn ring here either).
+            Button {
+                openVoiceSearch()
+            } label: {
+                JoeSecondaryLabel(title: "Nói", systemImage: "mic.fill")
+            }
+            .joeCardButton()
+            .focused($keyFocus, equals: .voice)
             Button {
                 nav.searchOpen = false
             } label: {
@@ -367,6 +400,43 @@ struct JoeSearchView: View {
     // settles, same snapshot rule. A new round supersedes
     // the in-flight one by roundID, so a stale term's
     // branches can never land over a newer term's grid.
+
+    // MARK: - Voice side door (v2.0.25, Idea 2)
+
+    /// Open the voice sheet, seeding its draft with the
+    /// current query so the owner can extend what the strip
+    /// already holds instead of starting over. The draft is
+    /// the sheet's alone until submit.
+    private func openVoiceSearch() {
+        voiceDraft = query
+        voiceOpen = true
+    }
+
+    /// The sheet's submit (its return key AND its Tìm button
+    /// both land here): dismiss, then hand the text to the
+    /// search through the EXACT path a letter-strip edit
+    /// takes — assigning `query` fires the body's
+    /// .onChange(of: query), which runs scheduleTypeAhead()
+    /// and, after the same ~300 ms debounce, runSearch()
+    /// (or resetSearch() for an emptied text). No second
+    /// search path exists for voice. Two edges:
+    ///  - An empty/whitespace draft submits as a cancel:
+    ///    the query is left untouched rather than cleared.
+    ///  - A draft equal to the current query fires no
+    ///    onChange, so the round is run directly —
+    ///    runSearch() is the same function the type-ahead
+    ///    firing calls, and it cancels any pending debounce
+    ///    itself, so this cannot double-run a round.
+    private func submitVoiceSearch() {
+        let text = voiceDraft.trimmingCharacters(in: .whitespaces)
+        voiceOpen = false
+        guard !text.isEmpty else { return }
+        if text != query {
+            query = text
+        } else {
+            runSearch()
+        }
+    }
 
     /// The debounced type-ahead driver (v2.0.13). Every
     /// field edit cancels the pending firing and re-arms
@@ -668,11 +738,14 @@ private final class JoeSearchSession: @unchecked Sendable {
 /// Focus identity for the search screens' top area
 /// (v2.0.17): a letter-strip key (its id IS its label —
 /// "a"…"z", "1"…"0", "space", "del", "mode") or the Quay
-/// lại button. Shared by JoeSearchView and JoeTVBSearchView,
-/// whose top areas are twins.
+/// lại button. v2.0.25 adds `.voice` for JoeSearchView's
+/// Nói button; JoeTVBSearchView simply never uses it.
+/// Shared by JoeSearchView and JoeTVBSearchView, whose top
+/// areas are twins.
 enum JoeSearchKeyFocus: Hashable {
     case key(String)
     case back
+    case voice
 }
 
 /// The Netflix-anatomy letter strip (v2.0.17 — the owner's
@@ -751,6 +824,89 @@ private struct JoeKeyCap: View {
             .frame(width: width, height: 58)
             .background(RoundedRectangle(cornerRadius: 12)
                 .fill(focused ? theme.focus : Color.white.opacity(0.08)))
+    }
+}
+
+/// The voice-search sheet (v2.0.25, Idea 2): ONE genuine
+/// system TextField — the only system field on the search
+/// layer, and deliberately so. On tvOS a FOCUSED system text
+/// field is what enables Siri Remote dictation (hold the
+/// remote's mic button and speak; the dictated text lands in
+/// the field) — that system behaviour is the entire voice
+/// mechanism. There is NO speech-framework code here and none
+/// is needed: the sheet is a side door that produces text;
+/// submit hands that text to JoeSearchView's `query`, and
+/// the ordinary type-ahead path does the searching.
+///
+/// Focus is the known hard part on tvOS: the field must hold
+/// focus the moment the sheet lands or dictation has nowhere
+/// to go. Two constructions stack: the static .defaultFocus
+/// (the house construction — JoeMovieDetail's play button
+/// device-proves it) AND a delayed .task assignment that
+/// re-asserts the field if the cover's focus landing did not
+/// take. The task is guarded on nothing being focused yet,
+/// so it can never steal focus back from the buttons.
+private struct JoeVoiceSearchSheet: View {
+    @Binding var draft: String
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    @Environment(\.joeTheme) private var theme
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable {
+        case field, submit, cancel
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            Text("Tìm bằng giọng nói")
+                .font(.system(size: 44, weight: .heavy))
+                .foregroundStyle(theme.text)
+            Text("Giữ nút micro trên remote rồi đọc tên phim — chữ hiện trong ô, bấm Tìm để tìm như gõ thường.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+            // The field construction is JoeTorrent's search
+            // field verbatim (plain style, shared font token,
+            // shared light chrome) — no new visual style.
+            TextField("", text: $draft,
+                      prompt: Text("Nói tên phim…")
+                        .foregroundColor(ThemeTokens.fieldPlaceholder))
+                .textFieldStyle(.plain)
+                .font(.system(size: ThemeTokens.fieldTextSize))
+                .joeFieldChrome(focused: focus == .field)
+                .frame(width: 820)
+                .focused($focus, equals: .field)
+                .onSubmit { onSubmit() }
+            HStack(spacing: 18) {
+                Button { onSubmit() } label: {
+                    JoePrimaryLabel(title: "Tìm")
+                }
+                .joeCardButton()
+                .focused($focus, equals: .submit)
+                Button { onCancel() } label: {
+                    JoeSecondaryLabel(title: "Huỷ")
+                }
+                .joeCardButton()
+                .focused($focus, equals: .cancel)
+            }
+            .focusSection()
+        }
+        .padding(90)
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: .topLeading)
+        .background(theme.bg)
+        // Menu cancels the sheet: the draft is discarded and
+        // the parent's own exit handler only sees Menu once
+        // this sheet is gone (nearer handler wins).
+        .onExitCommand { onCancel() }
+        .defaultFocus($focus, .field)
+        .task {
+            // Belt and braces beside .defaultFocus: if the
+            // cover's landing did not take, claim the field
+            // shortly after appearance.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if focus == nil { focus = .field }
+        }
     }
 }
 

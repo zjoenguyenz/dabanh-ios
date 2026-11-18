@@ -384,19 +384,47 @@ enum Providers {
     /// Resolve `servers` (already in pass order) into the
     /// ladder, one entry per server, through the memoised
     /// wrapper. Entry order is the servers' order.
+    ///
+    /// 2.0.25 (3a): all servers of a pass now resolve
+    /// CONCURRENTLY in a task group (previously sequential —
+    /// each server waited for the previous server's resolve).
+    /// Picks are made up front in server order; results are
+    /// collected as (serverIndex, entry) pairs and sorted by
+    /// index before appending, so the assembled order remains
+    /// EXACTLY the servers' order regardless of which resolve
+    /// finishes first.
     private static func appendResolved(code: String, servers: [Server],
                                        target: Episode, epNum: Int,
                                        filmTitle: String, multiServer: Bool,
                                        lad: inout Ladder) async {
-        for s in servers {
-            guard let pick = pickEpisode(in: s, target: target, epNum: epNum),
-                  let resolved = await playableURLMemoised(code: code, episode: pick),
-                  !resolved.url.isEmpty else { continue }
-            lad.entries.append(LadderEntry(
-                url: resolved.url,
-                title: filmTitle + " · " + pick.name
-                    + (multiServer ? " · " + s.name : ""),
-                proxy: resolved.proxy, headers: resolved.headers))
+        var picks: [(index: Int, server: Server, pick: Episode)] = []
+        for (idx, s) in servers.enumerated() {
+            guard let pick = pickEpisode(in: s, target: target, epNum: epNum)
+            else { continue }
+            picks.append((index: idx, server: s, pick: pick))
+        }
+        guard !picks.isEmpty else { return }
+        var collected: [(index: Int, entry: LadderEntry)] = []
+        await withTaskGroup(of: (Int, LadderEntry?).self) { group in
+            for item in picks {
+                group.addTask {
+                    guard let resolved = await playableURLMemoised(
+                        code: code, episode: item.pick),
+                        !resolved.url.isEmpty else { return (item.index, nil) }
+                    return (item.index, LadderEntry(
+                        url: resolved.url,
+                        title: filmTitle + " · " + item.pick.name
+                            + (multiServer ? " · " + item.server.name : ""),
+                        proxy: resolved.proxy, headers: resolved.headers))
+                }
+            }
+            for await (idx, entry) in group {
+                if let entry { collected.append((index: idx, entry: entry)) }
+            }
+        }
+        collected.sort { $0.index < $1.index }
+        for pair in collected {
+            lad.entries.append(pair.entry)
         }
     }
 
@@ -417,6 +445,7 @@ enum Providers {
     /// each pass is orderServers' order.
     static func ladderFor(code: String, detail d: Detail, filmTitle: String,
                           epName: String?, epNum: Int) async -> Ladder {
+        PerfLog.mark("ladder.begin")
         var lad = Ladder()
         guard let target = ladderTarget(code: code, detail: d,
                                         epName: epName, epNum: epNum)
@@ -433,6 +462,7 @@ enum Providers {
                                  epNum: epNum, filmTitle: filmTitle,
                                  multiServer: d.servers.count > 1, lad: &lad)
         }
+        PerfLog.mark("ladder.done")
         return lad
     }
 

@@ -120,6 +120,22 @@ struct TVBTitle: Codable, Sendable, Identifiable {
 
     var yearString: String { year.map(String.init) ?? "" }
 
+    /// Best (highest) completeness across this title's
+    /// provider records; 0 when it has no records. Backs the
+    /// "✅ Trọn bộ" rich shelf (Idea 1, 2.0.25).
+    var bestCompleteness: Double {
+        providers.values.map(\.completeness).max() ?? 0
+    }
+
+    /// Vote score for the "🏆 Hay nhất" rich shelf (Idea 1,
+    /// 2.0.25): the raw average discounted by how few votes
+    /// back it, so a 9.0 from a handful of votes cannot
+    /// outrank a well-attested title. Callers must still
+    /// gate on voteCount ≥ 5 before ranking with it.
+    var weightedVoteScore: Double {
+        voteAverage * (Double(min(voteCount, 50)) / 50.0)
+    }
+
     // MARK: Provider resolution
 
     /// Catalogue key → the app's provider code. Only "vs"
@@ -434,9 +450,12 @@ struct JoeTVBView: View {
         var id: String { scope }
     }
 
-    /// The five pipeline rails in build order, then the seven
-    /// genre shelves in audit order. A rail renders only when
-    /// it resolves to at least one displayed title.
+    /// The five pipeline rails in build order, then the
+    /// Idea 1 rich shelves (2.0.25: decade shelves, Trọn bộ,
+    /// Hay nhất, Nhiều phần — computed below from the
+    /// displayed titles), then the seven genre shelves in
+    /// audit order. A rail renders only when it resolves to
+    /// at least one displayed title.
     private func railSpecs(_ catalog: TVBCatalog) -> [RailSpec] {
         var specs = [
             RailSpec(scope: "dangHot", title: "🔥 Đang hot",
@@ -450,6 +469,80 @@ struct JoeTVBView: View {
             RailSpec(scope: "kinhDien", title: "🏛️ Kinh điển",
                      ids: catalog.rails.kinhDien),
         ]
+        // Idea 1 (2.0.25) rich shelves, computed from the
+        // displayed titles only. No actor/cast shelf here —
+        // that arrives with its own page in a later package;
+        // a dead tap is forbidden.
+        let displayedTitles = catalog.titles.filter { $0.isDisplayed }
+
+        // 1. Decade shelves: one rail per decade holding at
+        // least six displayed titles, decades in chronological
+        // order, titles inside a rail by popularity desc.
+        // Titles with no year belong to no decade rail.
+        var decadeGroups: [Int: [TVBTitle]] = [:]
+        for title in displayedTitles {
+            guard let year = title.year else { continue }
+            let decade = (year / 10) * 10
+            decadeGroups[decade, default: []].append(title)
+        }
+        for decade in decadeGroups.keys.sorted() {
+            guard let group = decadeGroups[decade], group.count >= 6
+            else { continue }
+            let ids = group
+                .sorted { $0.popularity > $1.popularity }
+                .map(\.tmdbId)
+            let label: String
+            switch decade {
+            case 1980: label = "📺 Thập niên 80"
+            case 1990: label = "📺 Thập niên 90"
+            default: label = "📺 Thập niên \(decade)"
+            }
+            specs.append(RailSpec(scope: "decade:\(decade)",
+                                  title: label, ids: ids))
+        }
+
+        // 2. Trọn bộ: ended series whose best provider
+        // completeness is at least 0.95, popularity desc,
+        // capped at 40.
+        let tronBo = displayedTitles
+            .filter { $0.status == "Ended" && $0.bestCompleteness >= 0.95 }
+            .sorted { $0.popularity > $1.popularity }
+        if !tronBo.isEmpty {
+            specs.append(RailSpec(scope: "tronBo", title: "✅ Trọn bộ",
+                                  ids: tronBo.prefix(40).map(\.tmdbId)))
+        }
+
+        // 3. Hay nhất: only titles with at least 5 votes are
+        // ranked (most of the catalogue carries no votes, so
+        // a raw average would be noise), by the weighted
+        // score, tie-broken by vote count then popularity,
+        // capped at 30.
+        let hayNhat = displayedTitles
+            .filter { $0.voteCount >= 5 }
+            .sorted {
+                if $0.weightedVoteScore != $1.weightedVoteScore {
+                    return $0.weightedVoteScore > $1.weightedVoteScore
+                }
+                if $0.voteCount != $1.voteCount {
+                    return $0.voteCount > $1.voteCount
+                }
+                return $0.popularity > $1.popularity
+            }
+        if !hayNhat.isEmpty {
+            specs.append(RailSpec(scope: "hayNhat", title: "🏆 Hay nhất",
+                                  ids: hayNhat.prefix(30).map(\.tmdbId)))
+        }
+
+        // 4. Nhiều phần: multi-season titles, popularity
+        // desc, capped at 30.
+        let nhieuPhan = displayedTitles
+            .filter { $0.seasons.count > 1 }
+            .sorted { $0.popularity > $1.popularity }
+        if !nhieuPhan.isEmpty {
+            specs.append(RailSpec(scope: "nhieuPhan", title: "🎞️ Nhiều phần",
+                                  ids: nhieuPhan.prefix(30).map(\.tmdbId)))
+        }
+
         for name in Self.genreOrder {
             if let ids = catalog.shelves[name] {
                 specs.append(RailSpec(scope: "shelf:" + name, title: name,

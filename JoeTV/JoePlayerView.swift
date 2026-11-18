@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import Combine
 import OSLog
 import SwiftUI
 
@@ -99,6 +100,49 @@ final class PlayDirector: ObservableObject {
     /// on a manual retry.
     @Published private(set) var lastFailure: String?
 
+    // MARK: Up Next contract (v2.0.25, Idea 6 core)
+    //
+    // The factories that build the NEXT episode's session
+    // (detail views / episode lists) wire these three
+    // members on the CURRENT director before playback; the
+    // player view itself only renders the countdown and
+    // performs the handover (see JoePlayerView below).
+    // Sessions that never set a factory keep the exact
+    // pre-Up-Next end behaviour: itemEnded() just drops
+    // the progress entry and nothing else happens.
+
+    /// Builds the next episode's director, or nil when no
+    /// next episode could be resolved. Called at most once
+    /// per countdown (at zero, or from advanceNow()).
+    var nextEpisodeFactory: (@MainActor () async -> PlayDirector?)?
+    /// The next episode's display title, shown on the
+    /// countdown card.
+    var nextEpisodeTitle: String = ""
+    /// Fired exactly once per session, from the shared
+    /// itemReady core, on the FIRST ready item — the hook
+    /// the shared warming system uses to warm the upcoming
+    /// episode while this one plays.
+    var onPlayingStarted: (@MainActor () -> Void)?
+
+    /// Seconds left on the Up Next countdown (10 → 1);
+    /// nil = no countdown is active.
+    @Published private(set) var upNextSecondsLeft: Int?
+    /// The next episode's director, published when the
+    /// countdown's factory resolves one. The view observes
+    /// this and swaps its session director in place.
+    @Published private(set) var advanceTarget: PlayDirector?
+
+    /// The countdown / advance task (one at a time) and a
+    /// generation counter that invalidates a superseded
+    /// run: cancelAdvance() and advanceNow() both bump the
+    /// generation, so a factory result that lands after a
+    /// cancel can never publish an advanceTarget.
+    private var upNextTask: Task<Void, Never>?
+    private var upNextGeneration = 0
+    /// Once-per-session guard for onPlayingStarted (the
+    /// firstFrameMarked guard below is its model).
+    private var playingStartedNotified = false
+
     /// What the view should render right now.
     private(set) var candidate: PlayCandidate?
 
@@ -180,6 +224,13 @@ final class PlayDirector: ObservableObject {
         self.resolveLadder = resolveLadder
         self.hopIdentity = hopIdentity
         self.fallbackCandidates = fallbackCandidates
+    }
+
+    deinit {
+        // The Up Next countdown must never outlive its
+        // session (its factory would swap a director into
+        // a player that no longer exists).
+        upNextTask?.cancel()
     }
 
     func start() {
@@ -476,6 +527,16 @@ final class PlayDirector: ObservableObject {
             firstFrameMarked = true
             PerfLog.mark("play.firstFrame")
         }
+        // Up Next (v2.0.25): the playing-started hook fires
+        // from this same shared core, exactly once per
+        // session, on the first ready — both engines funnel
+        // through here (itemReady(player:) delegates to this
+        // method), so neither engine can fire it twice or
+        // skip it.
+        if !playingStartedNotified {
+            playingStartedNotified = true
+            onPlayingStarted?()
+        }
         guard !seekApplied else { return }
         seekApplied = true
         // The Android rule, checked with the real duration in
@@ -518,8 +579,94 @@ final class PlayDirector: ObservableObject {
 
     /// Playback reached the end cleanly: the title is finished —
     /// drop the progress entry (the Android STATE_ENDED rule).
+    /// Up Next (v2.0.25): when the session carries a next-
+    /// episode factory, the clean end ALSO starts the
+    /// 10-second countdown; errors never reach here (they
+    /// go through itemFailed), so the countdown only ever
+    /// follows a genuine finish. With no factory set this
+    /// is byte-for-byte the pre-Up-Next behaviour.
     func itemEnded() {
         store.removeProgress(key: identity.progressKey)
+        guard nextEpisodeFactory != nil else { return }
+        startUpNextCountdown()
+    }
+
+    /// Start (or restart) the 10-second Up Next countdown:
+    /// publishes 10 immediately, then one tick per second
+    /// down to 1; at zero the factory runs (see
+    /// runAdvanceFactory). Cancellable at every tick via
+    /// cancelAdvance() / advanceNow() / deinit.
+    private func startUpNextCountdown() {
+        upNextGeneration += 1
+        let generation = upNextGeneration
+        upNextTask?.cancel()
+        upNextSecondsLeft = 10
+        upNextTask = Task { [weak self] in
+            guard let self else { return }
+            var remaining = 10
+            while remaining > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    return
+                }
+                if Task.isCancelled { return }
+                guard generation == self.upNextGeneration else { return }
+                remaining -= 1
+                if remaining > 0 {
+                    self.upNextSecondsLeft = remaining
+                } else {
+                    self.upNextSecondsLeft = nil
+                    await self.runAdvanceFactory(generation: generation)
+                    return
+                }
+            }
+        }
+    }
+
+    /// Run the next-episode factory for `generation` and
+    /// publish its director as advanceTarget. A nil result
+    /// (or a generation superseded while the factory was
+    /// in flight — a cancel, a manual advance) simply
+    /// clears the countdown and publishes nothing, so a
+    /// cancelled countdown can never fire late.
+    private func runAdvanceFactory(generation: Int) async {
+        guard generation == upNextGeneration,
+              let factory = nextEpisodeFactory else { return }
+        let next = await factory()
+        guard generation == upNextGeneration, !Task.isCancelled else { return }
+        upNextSecondsLeft = nil
+        if let next {
+            advanceTarget = next
+        }
+    }
+
+    /// "Phát ngay": skip the rest of the countdown and run
+    /// the factory immediately. A no-op when no countdown
+    /// is active.
+    func advanceNow() {
+        guard upNextSecondsLeft != nil, nextEpisodeFactory != nil else { return }
+        upNextGeneration += 1
+        let generation = upNextGeneration
+        upNextTask?.cancel()
+        upNextSecondsLeft = nil
+        upNextTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runAdvanceFactory(generation: generation)
+        }
+    }
+
+    /// Cancel the countdown: the finished item simply stays
+    /// ended (the view's normal end behaviour resumes —
+    /// Menu dismisses again once no countdown is active).
+    /// Deliberately does NOT clear advanceTarget: a cancel
+    /// that lands after the factory already published its
+    /// director must not undo the handover.
+    func cancelAdvance() {
+        upNextGeneration += 1
+        upNextTask?.cancel()
+        upNextTask = nil
+        upNextSecondsLeft = nil
     }
 
     /// Leaving the player: one last save under the same rule.
@@ -528,16 +675,52 @@ final class PlayDirector: ObservableObject {
     }
 }
 
+/// Handover box for Up Next (v2.0.25): holds the session's
+/// CURRENT director and swaps it when that director
+/// publishes an advanceTarget. The swap is deferred to the
+/// next main-runloop tick — @Published fires in willSet, so
+/// publishing the box's own director inside the sink would
+/// nest one publish inside another. After the swap the box
+/// re-subscribes to the NEW director, so a chain of
+/// episodes (each factory-built director carrying its own
+/// factory) advances repeatedly through the same box.
+private final class JoeDirectorBox: ObservableObject {
+    @Published private(set) var director: PlayDirector
+    private var advanceSubscription: AnyCancellable?
+
+    init(director: PlayDirector) {
+        self.director = director
+        observe(director)
+    }
+
+    private func observe(_ director: PlayDirector) {
+        advanceSubscription = director.$advanceTarget
+            .sink { [weak self] target in
+                guard let target else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.director !== target,
+                          self.director.advanceTarget === target else { return }
+                    self.director = target
+                    self.observe(target)
+                }
+            }
+    }
+}
+
 /// Full-screen player shell: AVPlayerViewController + a status
 /// capsule (candidate label / failover notices), driven by
 /// PlayDirector. Menu exits, like the house player.
+///
+/// v2.0.25 (Up Next handover): JoePlayerView itself is now a
+/// thin identity shell over JoePlayerSessionView. The
+/// session view is keyed by the current director's identity
+/// (ObjectIdentifier), so when the box swaps in the next
+/// episode's director the old session view is torn down and
+/// a fresh one appears for the new director — whose start()
+/// therefore fires through the exact same .onAppear path as
+/// the first episode's did. The public init is unchanged.
 struct JoePlayerView: View {
-    @StateObject private var director: PlayDirector
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.joeTheme) private var theme
-    @FocusState private var slateFocus: SlateButton?
-
-    private enum SlateButton: Hashable { case retry, back }
+    @StateObject private var box: JoeDirectorBox
 
     /// v2.0.0 (UI-5): design F's exhausted slate lists the tried
     /// source families as rows (the render's shape). The Phim
@@ -558,7 +741,45 @@ struct JoePlayerView: View {
     init(director: PlayDirector, attemptRows: [String]? = nil,
          filmTitle: String = "", filmEpisode: String = "",
          sourceLine: String = "") {
-        _director = StateObject(wrappedValue: director)
+        _box = StateObject(wrappedValue: JoeDirectorBox(director: director))
+        self.attemptRows = attemptRows
+        self.filmTitle = filmTitle
+        self.filmEpisode = filmEpisode
+        self.sourceLine = sourceLine
+    }
+
+    var body: some View {
+        JoePlayerSessionView(director: box.director,
+                             attemptRows: attemptRows,
+                             filmTitle: filmTitle,
+                             filmEpisode: filmEpisode,
+                             sourceLine: sourceLine)
+            .id(ObjectIdentifier(box.director))
+    }
+}
+
+/// One episode's player session (the pre-v2.0.25 JoePlayerView
+/// body, verbatim in behaviour): the engine dispatch, the
+/// status capsule, the exhausted slate, plus the Up Next
+/// countdown card overlay. A fresh instance is created per
+/// director by the identity shell above.
+private struct JoePlayerSessionView: View {
+    @ObservedObject var director: PlayDirector
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.joeTheme) private var theme
+    @FocusState private var slateFocus: SlateButton?
+
+    private enum SlateButton: Hashable { case retry, back, playNext }
+
+    private let attemptRows: [String]?
+    private let filmTitle: String
+    private let filmEpisode: String
+    private let sourceLine: String
+
+    init(director: PlayDirector, attemptRows: [String]? = nil,
+         filmTitle: String = "", filmEpisode: String = "",
+         sourceLine: String = "") {
+        self.director = director
         self.attemptRows = attemptRows
         self.filmTitle = filmTitle
         self.filmEpisode = filmEpisode
@@ -630,10 +851,87 @@ struct JoePlayerView: View {
                 exhaustedSlate
                     .defaultFocus($slateFocus, .retry)
             }
+            // Up Next countdown card (v2.0.25): overlays the
+            // finished item's last frame while the director
+            // counts down. The card's focus landing is a
+            // standing .defaultFocus declaration, the slate's
+            // own construction (see the error-8b note above).
+            if director.upNextSecondsLeft != nil {
+                upNextCard
+                    .defaultFocus($slateFocus, .playNext)
+            }
         }
         .onAppear { director.start() }
-        .onDisappear { director.flush() }
-        .onExitCommand { dismiss() }
+        .onDisappear {
+            director.flush()
+            // Teardown: a countdown must not outlive its
+            // session view. cancelAdvance() deliberately
+            // leaves advanceTarget untouched, so the
+            // handover teardown (this view disappearing
+            // BECAUSE the box swapped directors) is safe.
+            director.cancelAdvance()
+        }
+        .onExitCommand {
+            // Menu during an active countdown cancels the
+            // advance instead of leaving the player; with
+            // no countdown active Menu exits as always.
+            if director.upNextSecondsLeft != nil {
+                director.cancelAdvance()
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    /// The Up Next countdown card: next episode title, the
+    /// remaining seconds, a focusable "Phát ngay" button and
+    /// the Menu-cancels hint. Theme tokens and the file's
+    /// existing button construction (slateButton →
+    /// JoePrimaryLabel / .joeCardButton(), the custom style)
+    /// only — no .card platter, no hand-drawn focus rings.
+    private var upNextCard: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("TẬP TIẾP THEO")
+                        .font(.system(size: 22, weight: .bold))
+                        .tracking(4)
+                        .foregroundStyle(theme.focusTitle)
+                    if !director.nextEpisodeTitle.isEmpty {
+                        Text(director.nextEpisodeTitle)
+                            .font(.system(size: 30, weight: .bold))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(2)
+                    }
+                    if let seconds = director.upNextSecondsLeft {
+                        Text("Tập tiếp theo sau \(seconds)s")
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.meta)
+                    }
+                    HStack(spacing: 18) {
+                        slateButton("Phát ngay", tag: .playNext, primary: true) {
+                            director.advanceNow()
+                        }
+                    }
+                    .padding(.top, 8)
+                    Text("Nhấn Menu để hủy")
+                        .font(.system(size: 22))
+                        .foregroundStyle(theme.meta)
+                }
+                .padding(.horizontal, 30)
+                .padding(.vertical, 24)
+                .frame(maxWidth: 560, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: theme.rField)
+                    .fill(theme.surfaceGradient))
+                .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                    .strokeBorder(theme.stroke, lineWidth: 1.5))
+            }
+            .padding(.trailing, 48)
+            .padding(.bottom, 36)
+        }
+        .ignoresSafeArea()
     }
 
     @ViewBuilder
