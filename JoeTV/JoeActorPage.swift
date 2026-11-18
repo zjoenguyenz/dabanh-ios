@@ -125,6 +125,14 @@ struct JoeActorPage: View {
             .joeCardButton()
             .focused($backFocused)
         }
+        // v2.0.29 (cluster A, item 1c): the header is its own
+        // declared focus region — it stood in no section
+        // while the film grid below declares one, so the
+        // page's focus graph had an unsectioned head over a
+        // sectioned body (every other page in the app
+        // sections its header: the detail heads, the TVB
+        // header, the shell's top bar).
+        .focusSection()
     }
 
     private var subtitle: String {
@@ -268,10 +276,36 @@ struct JoeActorPage: View {
     }
 
     /// An unmatched credit: poster + title + year (+ the
-    /// character, when TMDB carries one) as a PLAIN row —
-    /// deliberately not a Button and carrying no focus
-    /// handling, so it can never read as a playable card.
+    /// character, when TMDB carries one). v2.0.29 (cluster
+    /// A, item 1c): this row is a BUTTON now. It used to be
+    /// a plain, non-focusable row — deliberately, so it
+    /// could never read as a playable card — but on device
+    /// the owner's actor page showed its film list as
+    /// exactly these rows with no way to focus or open any
+    /// of them ("không có nút bấm vào"): a credit lands
+    /// here whenever the at-load catalogue match missed it,
+    /// even when a provider does carry the title. The press
+    /// now runs the franchise strip's resolution discipline
+    /// (JoeMovieDetail.loadFranchise): search the providers
+    /// by the credit's title and accept ONLY a result whose
+    /// TMDB id equals the credit's own id (type must agree
+    /// when both records state one) — a title lookalike is
+    /// never opened. No ID match: the press does nothing
+    /// and the row keeps its honest "Chưa có nguồn phát"
+    /// place. Focus paints the house JoeFocusRing around
+    /// the row (clear at rest — the resting row is
+    /// pixel-identical to the pre-fix plain row).
     private func unmatchedRow(_ credit: TMDBCreditTitle) -> some View {
+        Button {
+            Task { await resolveAndOpen(credit) }
+        } label: {
+            unmatchedRowLabel(credit)
+        }
+        .joeCardButton()
+        .focused($cardFocus, equals: "unmatched|" + credit.id)
+    }
+
+    private func unmatchedRowLabel(_ credit: TMDBCreditTitle) -> some View {
         HStack(alignment: .center, spacing: 22) {
             ZStack {
                 Color.white.opacity(0.08)
@@ -307,6 +341,29 @@ struct JoeActorPage: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+        .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
+    }
+
+    /// The unmatched row's press resolution (item 1c):
+    /// the credit's OWN (type, tmdbId) identity is the only
+    /// acceptance key — see unmatchedRow. Bounded exactly
+    /// like loadFranchise: one search pass per provider, in
+    /// Providers.priority order, first ID match wins.
+    private func resolveAndOpen(_ credit: TMDBCreditTitle) async {
+        guard !credit.tmdbId.isEmpty, credit.tmdbId != "0" else { return }
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(
+                code, keyword: credit.title)
+            else { continue }
+            if let hit = results.first(where: {
+                $0.tmdbId == credit.tmdbId && !$0.slug.isEmpty
+                    && ($0.tmdbType.isEmpty || credit.type.isEmpty
+                        || $0.tmdbType == credit.type)
+            }) {
+                openMovie(hit)
+                return
+            }
         }
     }
 
@@ -361,6 +418,7 @@ struct JoeActorPage: View {
             }.value
             tvbTitles = titles
             loaded = true
+            landInitialFocus()
         case .tmdb(let personId, _, _):
             async let creditsFetch =
                 TMDBClient.fetchPersonCredits(personId: personId)
@@ -386,12 +444,19 @@ struct JoeActorPage: View {
                 // The credit's tmdbId is matched in its
                 // string form (the Movie map's key form);
                 // the same text reads back as the TVB map's
-                // Int key.
+                // Int key. v2.0.29 (cluster A, item 7 half):
+                // the Movie map is keyed by the (type, id)
+                // pair for typed records — TMDB's numeric
+                // ids are per-type namespaces, so a bare-id
+                // map could bind a credit to a same-numbered
+                // title of the OTHER kind (and a typed
+                // record could shadow the untyped one under
+                // the bare key). The typed key is tried
+                // first; the bare key behind it holds ONLY
+                // records whose payload stated no type.
                 let key = String(describing: credit.tmdbId)
                 let type = credit.type
-                if let movie = byTmdbId[key],
-                   movie.tmdbType.isEmpty || type.isEmpty
-                    || movie.tmdbType == type {
+                if let movie = byTmdbId[type + "|" + key] ?? byTmdbId[key] {
                     movies.append(MovieMatch(credit: credit, movie: movie))
                 } else if type.isEmpty || type == "tv",
                           let tvbKey = Int(key), let title = tvbById[tvbKey] {
@@ -404,19 +469,60 @@ struct JoeActorPage: View {
             matchedTVB = tvbs
             unmatched = rest
             loaded = true
+            landInitialFocus()
         }
     }
 
-    /// tmdbId → Movie over every list the PhimStore holds.
-    /// First carrier wins (lists are visited in rail/priority
-    /// order, merged first); vietnamAll covers the store's
-    /// derived vietnamSeries / vietnamSingle views. Mirrors
-    /// JoePhimHome.catalogueByTmdbId.
+    /// v2.0.29 (cluster A, item 1c): write the page's
+    /// initial focus once the filmography lands. The page
+    /// declared NO landing at all (no .defaultFocus, no
+    /// write): while `loaded` was false the only focusable
+    /// element was the header's Quay lại button, and when
+    /// the grid inserted beneath it nothing ever steered
+    /// focus to a film — the owner found the list present
+    /// but unreachable. The write lands on the first
+    /// playable card (the .tmdb sections' order: PhimStore
+    /// matches, then TVB matches; .tvb mode: the first
+    /// snapshot card), falling back to the first unmatched
+    /// row, and to Quay lại only when the page carries no
+    /// film row at all. Same mechanism as the detail's
+    /// focusedRetry write in JoeMovieDetail.load().
+    private func landInitialFocus() {
+        if let first = matchedMovies.first {
+            cardFocus = "movie|" + first.movie.id
+        } else if let first = matchedTVB.first {
+            cardFocus = "tvb|" + "\(first.title.tmdbId)"
+        } else if let first = tvbTitles.first {
+            cardFocus = "tvb|" + "\(first.tmdbId)"
+        } else if let first = unmatched.first {
+            cardFocus = "unmatched|" + first.id
+        } else {
+            backFocused = true
+        }
+    }
+
+    /// (type, tmdbId) → Movie over every list the
+    /// PhimStore holds. First carrier wins per key (lists
+    /// are visited in rail/priority order, merged first);
+    /// vietnamAll covers the store's derived
+    /// vietnamSeries / vietnamSingle views. v2.0.29
+    /// (cluster A, item 7 half): a record whose payload
+    /// states a TMDB type is keyed "type|tmdbId"; only a
+    /// record with NO stated type rides the bare tmdbId
+    /// key — TMDB's numeric ids are per-type namespaces,
+    /// so keying every record by the bare id (the pre-fix
+    /// form, mirrored from JoePhimHome) let one kind's
+    /// record answer for the other kind's credit whenever
+    /// the numbers collided.
     private func catalogueByTmdbId() -> [String: Movie] {
         var map: [String: Movie] = [:]
         func add(_ movies: [Movie]) {
-            for m in movies where !m.tmdbId.isEmpty && map[m.tmdbId] == nil {
-                map[m.tmdbId] = m
+            for m in movies where !m.tmdbId.isEmpty {
+                let key = m.tmdbType.isEmpty
+                    ? m.tmdbId : m.tmdbType + "|" + m.tmdbId
+                if map[key] == nil {
+                    map[key] = m
+                }
             }
         }
         add(phim.merged)

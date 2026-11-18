@@ -49,6 +49,14 @@ struct JoeMovieDetail: View {
     /// honest state, not a loading state.
     @State private var filmIdentity: Providers.FilmIdentity?
     @State private var loadFailed = false
+    /// v2.0.29 (cluster A, items 1b + 4): the first-open
+    /// initial-focus landing has been WRITTEN (see
+    /// landInitialFocus(on:)) — the write happens once per
+    /// detail, at its first paint, never on a provider
+    /// switch (the switch path of load() does not call it,
+    /// so a switch never yanks focus off the chip the owner
+    /// tapped).
+    @State private var didLandInitialFocus = false
     @State private var playerHolder: DirectorHolder?
     @State private var switching = false
     /// C-9: the last provider/slug whose detail actually loaded.
@@ -719,7 +727,17 @@ struct JoeMovieDetail: View {
             }
             .focusSection()
             if let tmdb, !tmdb.cast.isEmpty {
+                // v2.0.29 (cluster A, item 1b): the cast row
+                // is its own declared focus region here — in
+                // D it stood between the header section and
+                // the source section in NO section at all,
+                // while every other block on the page (header,
+                // sources, episodes) declares one. (Ultra's
+                // cast row rides inside its header section and
+                // A's actors line inside its header section;
+                // neither needs this.)
                 castRow(tmdb.cast)
+                    .focusSection()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 26)
             }
@@ -816,7 +834,12 @@ struct JoeMovieDetail: View {
             // drawing gains this one row; nothing else in
             // the board changes.
             if let tmdb, !tmdb.cast.isEmpty {
+                // v2.0.29 (cluster A, item 1b): its own
+                // declared focus region, as in D — the row
+                // stood in no section between the source rows'
+                // section and the episode block's section.
                 castRow(tmdb.cast)
+                    .focusSection()
                     .padding(.top, 26)
             }
             if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
@@ -1569,45 +1592,75 @@ private struct JoeActorNameLabel: View {
             actorRoute = .tmdb(personId: member.id, name: member.name,
                                 photoURL: member.photoURL)
         } label: {
-            VStack(spacing: 8) {
-                ZStack {
-                    Circle().fill(Color.white.opacity(0.10))
-                    if !member.photoURL.isEmpty, let url = URL(string: member.photoURL) {
-                        JoeRemoteImage(url: url, targetPixels: 240) {
-                            castInitial(member)
-                        }
-                    } else {
-                        castInitial(member)
-                    }
-                }
-                .frame(width: 110, height: 110)
-                .clipShape(Circle())
-                .overlay(Circle()
-                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1.2))
-                Text(member.name)
-                    .font(.system(size: 23, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                if !member.character.isEmpty {
-                    Text(member.character)
-                        .font(.system(size: 23))
-                        .foregroundStyle(theme.meta)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                }
-            }
-            .frame(width: 120)
+            JoeCastCellLabel(member: member)
         }
         .joeCardButton()
         .focused($focusedCast, equals: member.id)
     }
 
-    private func castInitial(_ member: TMDBCastMember) -> some View {
+/// v2.0.29 (cluster A, item 1a): one cast cell's label.
+/// Until now this label painted NO focus state at all —
+/// .joeCardButton() suppresses the system focus effect
+/// centrally, and every other focusable surface in the app
+/// survives that by reading its own focus from the
+/// environment and painting a value-only ring (PosterCard,
+/// JoeChipLabel, JoePrimaryLabel). The cast cell never did,
+/// so a focused cast cell was pixel-identical to an
+/// unfocused one and the owner could not tell which actor
+/// held focus ("không có focus"). The label now reads
+/// \.isFocused exactly like PosterCard does: focused, the
+/// photo gains the theme's ring (ringWidth, theme.focus —
+/// the cell carries no selected fill, so the posterWall
+/// white-ring exception for yellow-filled items does not
+/// apply) and the name takes the focus title colour.
+/// Every resting value (110 pt circle, white .10 fill,
+/// white .14 / 1.2 resting stroke, 23 pt name/character,
+/// 120 width) is byte-identical to the pre-fix label.
+private struct JoeCastCellLabel: View {
+    let member: TMDBCastMember
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+                if !member.photoURL.isEmpty, let url = URL(string: member.photoURL) {
+                    JoeRemoteImage(url: url, targetPixels: 240) {
+                        initial
+                    }
+                } else {
+                    initial
+                }
+            }
+            .frame(width: 110, height: 110)
+            .clipShape(Circle())
+            .overlay(Circle()
+                .strokeBorder(isFocused ? theme.focus
+                                        : Color.white.opacity(0.14),
+                              lineWidth: isFocused ? theme.ringWidth : 1.2))
+            Text(member.name)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            if !member.character.isEmpty {
+                Text(member.character)
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(width: 120)
+    }
+
+    private var initial: some View {
         Text(String(member.name.prefix(1)))
             .font(.system(size: 38, weight: .bold))
             .foregroundStyle(.white.opacity(0.8))
     }
+}
 
     // MARK: - Franchise strip (Idea 21)
 
@@ -1702,8 +1755,9 @@ private struct JoeActorNameLabel: View {
         if !route.preselectEp.isEmpty, exists(route.preselectEp) {
             return route.preselectEp
         }
-        if let e = watch.progress().first(where: {
-            $0.slug == slug && $0.source == provider }), exists(e.ep) {
+        if let e = watch.progressForTitle(slug: slug, provider: provider,
+                                          title: d.movie.name,
+                                          year: d.movie.year), exists(e.ep) {
             return e.ep
         }
         return all.first { Providers.isPlayable(code: provider, episode: $0) }?.name
@@ -1711,7 +1765,9 @@ private struct JoeActorNameLabel: View {
 
     private func playButton(_ d: Detail) -> some View {
         let isResume = !route.preselectEp.isEmpty
-            || watch.progress().contains { $0.slug == slug && $0.source == provider }
+            || watch.progressForTitle(slug: slug, provider: provider,
+                                      title: d.movie.name,
+                                      year: d.movie.year) != nil
         return Button {
             if let ep = startEpisode(d) { play(d, epName: ep) }
         } label: {
@@ -1919,8 +1975,9 @@ private struct JoeActorNameLabel: View {
                         episodeIndex: Int) -> some View {
         let focusKey = "\(serverIndex)|\(ep.name)"
         let playable = Providers.isPlayable(code: provider, episode: ep)
-        let storedEp = watch.progress().first(where: {
-            $0.slug == slug && $0.source == provider })?.ep
+        let storedEp = watch.progressForTitle(slug: slug, provider: provider,
+                                              title: d.movie.name,
+                                              year: d.movie.year)?.ep
         let preselected = ep.name == (!route.preselectEp.isEmpty
                                       ? route.preselectEp : storedEp)
         // F4: focus identity is "<serverIndex>|<episodeName>" —
@@ -1972,6 +2029,43 @@ private struct JoeActorNameLabel: View {
     }
 
     // MARK: - Loading + playing
+
+    /// v2.0.29 (cluster A, items 1b + 4): write the detail's
+    /// initial focus ONCE, at its first paint. The page's
+    /// only other landing declaration is the appearance-time
+    /// .defaultFocus($focusedPlay, true) on detailScroll —
+    /// but the play button does not exist while the
+    /// placeholder stands, and when the loaded detail has NO
+    /// playable episode (a movie whose provider detail
+    /// carries no playable server/episode — TpClient and
+    /// KkClient both append a server only when its episodes
+    /// are non-empty, so such a detail's servers list is
+    /// empty and startEpisode is nil) the play button is
+    /// DISABLED, i.e. not focusable at all. The declared
+    /// landing then resolves to nothing the owner can see
+    /// or move: the page sits on its header block with no
+    /// focus anywhere, no remote press can move, and the
+    /// ScrollView — which scrolls by following focus — can
+    /// never scroll (the owner's poster-wall photo: a movie
+    /// detail showing poster/title/meta/genres/synopsis and
+    /// nothing reachable below; series, whose play button is
+    /// enabled, land and scroll normally on the same code).
+    /// Writing the landing at first paint — the same
+    /// mechanism the error branch already uses
+    /// (focusedRetry = true) — makes it deterministic:
+    /// Xem ngay when it can take focus, Yêu thích when it
+    /// cannot (the favourite button is never disabled, so
+    /// the page always has a live focus and can scroll to
+    /// its source chips, cast and episode blocks).
+    private func landInitialFocus(on d: Detail) {
+        guard !didLandInitialFocus else { return }
+        didLandInitialFocus = true
+        if startEpisode(d) != nil {
+            focusedPlay = true
+        } else {
+            focusedFav = true
+        }
+    }
 
     private func load() async {
         // First open: the placeholder header carries the page.
@@ -2062,6 +2156,7 @@ private struct JoeActorNameLabel: View {
                 provider: attemptedProvider, slug: attemptedSlug),
                !race.networkPainted {
                 detail = cached
+                landInitialFocus(on: cached)
                 race.cachedPaint = cached
                 PerfLog.mark("detail.cachePaint")
                 launchTPProbe(painted: cached,
@@ -2078,6 +2173,7 @@ private struct JoeActorNameLabel: View {
                 if JoeDetailCache.fingerprint(d)
                     != JoeDetailCache.fingerprint(cachedPaint) {
                     detail = d
+                    landInitialFocus(on: d)
                     PerfLog.mark("detail.networkPaint")
                     launchTPProbe(painted: d,
                                   paintedProvider: attemptedProvider,
@@ -2092,6 +2188,7 @@ private struct JoeActorNameLabel: View {
                 // either copy.
             } else {
                 detail = d
+                landInitialFocus(on: d)
                 PerfLog.mark("detail.networkPaint")
                 launchTPProbe(painted: d,
                               paintedProvider: attemptedProvider,
@@ -2476,7 +2573,13 @@ private struct JoeActorNameLabel: View {
         entry.year = m.year
         entry.slug = m.slug
         entry.source = provider
-        let resume = watch.progressFor(key: entry.key)?.pos ?? 0
+        // v2.0.29 (cluster C, §4.3 O1): stamp the stable
+        // ids so a later torrent-side save of the same
+        // title can canonical-match this entry by id even
+        // when the two catalogues title it differently.
+        entry.imdbId = m.imdbId
+        entry.tmdbId = m.tmdbId
+        let resume = watch.progressFor(matching: entry)?.pos ?? 0
         // v2.0.8 (Phase 3): the resolveLadder closure's FIRST
         // invocation for the origin identity builds its ladder
         // from the detail already on screen (the `detail`
@@ -2589,6 +2692,10 @@ private struct JoeActorNameLabel: View {
                     e2.year = d.movie.year
                     e2.slug = alt.slug
                     e2.source = alt.code
+                    // v2.0.29 (cluster C, §4.3 O2): the hop
+                    // identity carries the same stable ids.
+                    e2.imdbId = d.movie.imdbId
+                    e2.tmdbId = d.movie.tmdbId
                     return PlayIdentity(entry: e2)
                 }
                 return nil
