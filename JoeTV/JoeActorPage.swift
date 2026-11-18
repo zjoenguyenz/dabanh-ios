@@ -58,6 +58,9 @@ struct JoeActorPage: View {
     @State private var matchedMovies: [MovieMatch] = []
     @State private var matchedTVB: [TVBMatch] = []
     @State private var unmatched: [TMDBCreditTitle] = []
+    /// v2.0.31 (L8): the route a film tap chose, held until
+    /// this page's cover has actually lifted (see open()).
+    @State private var pendingRoute: MovieRoute?
     @FocusState private var cardFocus: String?
     @FocusState private var backFocused: Bool
 
@@ -86,6 +89,9 @@ struct JoeActorPage: View {
         // Menu closes THIS page (the detail's own-root
         // handler placement): one press, one layer.
         .onExitCommand { dismiss() }
+        // v2.0.31 (L8): a film tap's route swap runs HERE,
+        // once the cover is gone (see open()).
+        .onDisappear { performPendingOpen() }
         .task { await load() }
     }
 
@@ -385,15 +391,39 @@ struct JoeActorPage: View {
                         year: title.yearString))
     }
 
-    /// Present the route through the navigator. This page
-    /// is a cover: it dismisses itself first. When a detail
-    /// is already open underneath (the .tmdb entry point),
-    /// that detail's @State was built from ITS route, so
-    /// the route is cleared and re-minted on the next turn
-    /// — the fresh detail then builds from the new route
-    /// exactly as a home/rail tap does.
+    /// Present the route through the navigator — SEQUENCED
+    /// (v2.0.31, L8). This page is a fullScreenCover: over
+    /// a movie detail in .tmdb mode, over the TVB tab in
+    /// .tvb mode. The pre-fix open() dismissed the cover
+    /// and rewrote nav.movie in the SAME turn — clearing
+    /// the detail that PRESENTS this cover while its
+    /// dismissal was still in flight, and (in .tvb mode)
+    /// inserting the new detail layer under a cover that
+    /// had not finished lifting. On device the swap was
+    /// swallowed whole: the tap visibly did nothing, on
+    /// every film, in both modes — the owner's 2.0.29
+    /// retest, after FIX5 had only repaired the page's
+    /// focus landing and row buttons, never this sequence.
+    /// The tap now only records the route and dismisses;
+    /// the swap itself runs from the page's onDisappear,
+    /// when the cover is gone and the tree is stable.
+    /// A plain Menu / Quay lại dismissal carries no
+    /// pending route and stays a plain dismissal.
     private func open(_ movieRoute: MovieRoute) {
+        pendingRoute = movieRoute
         dismiss()
+    }
+
+    /// The deferred half of open(): swap the navigator's
+    /// movie route now that this page is off screen. When
+    /// a detail is already open underneath (the .tmdb
+    /// entry point), that detail's @State was built from
+    /// ITS route, so the route is cleared and re-minted on
+    /// the next turn — the fresh detail then builds from
+    /// the new route exactly as a home/rail tap does.
+    private func performPendingOpen() {
+        guard let movieRoute = pendingRoute else { return }
+        pendingRoute = nil
         if nav.movie != nil {
             nav.movie = nil
             Task { @MainActor in nav.movie = movieRoute }
