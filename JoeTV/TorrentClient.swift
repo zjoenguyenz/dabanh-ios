@@ -131,6 +131,64 @@ enum TorrentSettings {
         !mfURL.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// v2.0.24: the Thể Thao Torrent tab's OWN sources (the
+    /// Sony 2.3.37 port). Two stored slots beside — never
+    /// instead of — the MediaFusion base above: the MF base
+    /// also feeds the pooled MOVIE path, so it is never
+    /// repointed; the sports chain reads these slots first
+    /// and falls back to MF. The primary slot defaults to
+    /// the Nuvio Live Sports public instance (the
+    /// sports-provider hunt's winner, probed live
+    /// 2026-11-17); the second defaults to StremVerse, whose
+    /// live-events catalog is the standing third source. A
+    /// stored value wins over the default (e.g. a
+    /// self-hosted Nuvio on the owner's PC); a stored value
+    /// that does not validate as an http/https URL makes the
+    /// slot nil — the mfBase honesty rule, so a stray word
+    /// in the field can never become a base.
+    static let keySportsURL = "sports_url"
+    static let keySports2URL = "sports2_url"
+    static let sportsDefault = "https://nuviosports.xyz"
+    static let sports2Default = "https://stremverse1.alwaysdata.net"
+
+    static var sportsURL: String {
+        get { UserDefaults.standard.string(forKey: keySportsURL) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: keySportsURL) }
+    }
+    static var sports2URL: String {
+        get { UserDefaults.standard.string(forKey: keySports2URL) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: keySports2URL) }
+    }
+
+    /// A sports slot's effective base: the stored value when
+    /// set (stremio:// links and a /manifest.json tail are
+    /// normalised exactly as for mfBase), else the slot's
+    /// public default; nil only when a stored value is set
+    /// but does not validate.
+    private static func sportsSlotBase(stored: String, fallback: String) -> String? {
+        var raw = stored.trimmingCharacters(in: .whitespaces)
+        if raw.isEmpty { return fallback }
+        if raw.hasPrefix("stremio://") {
+            raw = "https://" + String(raw.dropFirst("stremio://".count))
+        }
+        let base = stripSlash(raw)
+        return isValidAddonBase(base) ? base : nil
+    }
+
+    static var sportsBase: String? {
+        sportsSlotBase(stored: sportsURL, fallback: sportsDefault)
+    }
+    static var sports2Base: String? {
+        sportsSlotBase(stored: sports2URL, fallback: sports2Default)
+    }
+
+    /// The sports tab is offered when any sports source is
+    /// in play (the Sony sportsAvailable rule): a sports
+    /// slot resolves, or MediaFusion is configured.
+    static var sportsAvailable: Bool {
+        sportsBase != nil || mfBase != nil
+    }
+
     static let torrentio = "https://torrentio.strem.fun"
     static let cinemeta = "https://v3-cinemeta.strem.io"
 
@@ -227,6 +285,13 @@ struct TorMeta: Identifiable, Hashable {
     var background = ""
     var year = ""
     var desc = ""
+    /// v2.0.24: the addon base that SERVED this meta, stamped
+    /// by the sports fetch (the Sony servingBase rule) so the
+    /// Thể Thao Torrent play path resolves the meta's streams
+    /// from the same addon that listed it. Empty for movie /
+    /// series metas, whose streams come from the configured
+    /// gateways as before.
+    var servingBase = ""
     var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
 }
 
@@ -498,10 +563,12 @@ enum TorrentClient {
     private static let streamsCap: TimeInterval = 15
 
     static func fetchStreams(addonBase: String, type: String, id: String,
-                             gateway: String = "TOR") async throws -> [TorStream] {
+                             gateway: String = "TOR",
+                             provider: String = SourceHealth.torrentProvider)
+        async throws -> [TorStream] {
         let url = addonBase + "/stream/\(type)/\(id).json"
         let root = try await SourceHealth.run(
-            provider: SourceHealth.torrentProvider, stage: .resolve,
+            provider: provider, stage: .resolve,
             url: url, cap: streamsCap
         ) { budget in
             try await JoeHTTP.getJSON(url, timeout: budget)
@@ -778,7 +845,10 @@ enum TorrentClient {
                     if let root = try? await JoeHTTP.getJSON(url, timeout: 12) {
                         let metas = parseMetas(JSON.arr(root, "metas"))
                         if !metas.isEmpty {
-                            for m in metas where seen.insert(m.id).inserted {
+                            for var m in metas where seen.insert(m.id).inserted {
+                                // v2.0.24: stamp the serving
+                                // base (see TorMeta.servingBase).
+                                m.servingBase = base
                                 merged.append(m)
                             }
                             break
@@ -798,12 +868,210 @@ enum TorrentClient {
             if let root = try? await JoeHTTP.getJSON(plainURL, timeout: 12) {
                 let metas = parseMetas(JSON.arr(root, "metas"))
                 if !metas.isEmpty {
-                    return MfSportEventsResult(metas: metas,
-                                               manifestLiveCatalogs: nil)
+                    return MfSportEventsResult(
+                        metas: metas.map { var m = $0; m.servingBase = base; return m },
+                        manifestLiveCatalogs: nil)
                 }
             }
         }
         return MfSportEventsResult(metas: [], manifestLiveCatalogs: nil)
+    }
+
+    // MARK: - Nuvio / StremVerse live sports (v2.0.24, Sony 2.3.37 port)
+
+    /// The Nuvio live-catalog allowlist, in tab order (the
+    /// Sony list, verified against the live manifest
+    /// 2026-11-17/18): Live Now first, the per-sport live
+    /// catalogs, the 24/7 Networks shelf, Upcoming last.
+    /// Every other id the instance declares is a replay
+    /// shelf (`nuvio_sports_replays*`) and stays out of the
+    /// tab. Networks rides ahead of Upcoming so the
+    /// always-on channels are never crowded out by
+    /// not-yet-live fixtures at the merge cap.
+    private static let nuvioLiveIDs = [
+        "nuvio_sports_live",
+        "nuvio_sports_football", "nuvio_sports_basketball",
+        "nuvio_sports_hockey", "nuvio_sports_motorsport",
+        "nuvio_sports_mma", "nuvio_sports_baseball",
+        "nuvio_sports_tennis", "nuvio_sports_rugby",
+        "nuvio_sports_american_football", "nuvio_sports_cricket",
+        "nuvio_sports_golf", "nuvio_sports_darts",
+        "nuvio_sports_college", "nuvio_sports_other",
+        "nuvio_sports_networks",
+        "nuvio_sports_upcoming",
+    ]
+
+    /// StremVerse's one in-app-playable catalog — its Xtra /
+    /// IPTV catalogs answer externalUrl-only, which this app
+    /// never reads (hunt report 2026-11-17).
+    private static let stremverseLiveIDs = ["stremverse_live_events"]
+
+    /// The two catalogs whose page 2 carries content the tab
+    /// exists for: the Premier League fixture tiles sit at
+    /// idx 175+ of football and idx 141+ of upcoming
+    /// (PL-CHECK, 2026-11-18), so these two are fetched
+    /// through every page (Stremio `skip=` paging, 100 metas
+    /// per page) while every other catalog stays at page 1,
+    /// exactly as on Sony. Measured on the live instance
+    /// 2026-11-18: football 265 metas (3 pages), upcoming
+    /// 397 (4 pages), both fully paged here.
+    private static let sportsPagedIDs: Set<String> = [
+        "nuvio_sports_football", "nuvio_sports_upcoming",
+    ]
+
+    /// The sports merge cap. Sony's 260 was calibrated to
+    /// its page-1-only fetches; with football and upcoming
+    /// paged in full (above), the measured merge on the live
+    /// instance (2026-11-18) puts the Live Now + football
+    /// core at 351 unique metas and the PL fixtures at
+    /// merged idx 279/291 — a 260 cap would cut exactly the
+    /// fixtures the paging exists to surface. 400 is the
+    /// smallest round cap that carries the measured core
+    /// with headroom; the grid is lazy, and the cap still
+    /// bounds the tab on a catalogue-growth day.
+    private static let sportsMergeCap = 400
+
+    /// The Thể Thao Torrent tab's fetch, v2.0.24: Nuvio
+    /// FIRST (its own stored base — the MF base is never
+    /// repointed, it also feeds the movie paths),
+    /// MediaFusion as the fallback when Nuvio settles empty,
+    /// StremVerse's live-events catalog third. Only ONE
+    /// source's list is used — the first that settles
+    /// non-empty — and every returned meta carries its
+    /// serving base (TorMeta.servingBase) so the play path
+    /// resolves streams from the same addon. Fail-soft: an
+    /// empty list when every source is empty or down.
+    /// `manifestLiveCatalogs` combines the legs for the
+    /// tab's empty state: true when any leg's manifest read
+    /// clean and declared live catalogs, false when a
+    /// manifest read clean and NONE did, nil when no
+    /// manifest could be read at all.
+    static func fetchSportsEvents() async -> MfSportEventsResult {
+        var combined: Bool? = nil
+        func note(_ leg: Bool?) {
+            if leg == true { combined = true }
+            else if leg == false && combined == nil { combined = false }
+        }
+        if let base = TorrentSettings.sportsBase {
+            let r = await fetchLiveScoped(base: base, allowlist: nuvioLiveIDs)
+            if !r.metas.isEmpty { return r }
+            note(r.manifestLiveCatalogs)
+        }
+        if let mf = TorrentSettings.mfBase {
+            let r = await fetchMfSportEvents(base: mf)
+            if !r.metas.isEmpty { return r }
+            note(r.manifestLiveCatalogs)
+        }
+        if let base = TorrentSettings.sports2Base {
+            let r = await fetchLiveScoped(base: base, allowlist: stremverseLiveIDs)
+            if !r.metas.isEmpty { return r }
+            note(r.manifestLiveCatalogs)
+        }
+        return MfSportEventsResult(metas: [], manifestLiveCatalogs: combined)
+    }
+
+    /// One manifest-driven live fetch scoped to an allowlist
+    /// of catalog ids, merged in allowlist order: read the
+    /// manifest, keep the declared live catalogs (type
+    /// "events" / "tv") whose id is allowlisted, fetch each
+    /// (the paged set through all its pages, the rest page 1
+    /// only), and merge deduped by id — the earliest
+    /// allowlist catalog to carry an id wins it. Catalogs
+    /// fetch concurrently; each page carries the house 12 s
+    /// discovery budget and a failed page simply ends that
+    /// catalog with what landed. Every meta is stamped with
+    /// the serving base, and a meta not already carrying a
+    /// live type inherits its catalog's type (the Sony
+    /// stampLiveType rule — a live meta must resolve its
+    /// streams under its own live type). A manifest that
+    /// reads clean but declares none of the allowlisted
+    /// catalogs reports manifestLiveCatalogs = false.
+    private static func fetchLiveScoped(base: String, allowlist: [String])
+        async -> MfSportEventsResult {
+        guard let manifest = try? await JoeHTTP.getJSON(
+                base + "/manifest.json", timeout: 12),
+              let catalogs = JSON.arr(manifest, "catalogs") else {
+            return MfSportEventsResult(metas: [], manifestLiveCatalogs: nil)
+        }
+        var declared: [String: String] = [:]   // id → type
+        for c in catalogs {
+            let t = JSON.str(c, "type")
+            let i = JSON.str(c, "id")
+            guard t == "events" || t == "tv", !i.isEmpty,
+                  allowlist.contains(i) else { continue }
+            declared[i] = t
+        }
+        let ordered: [(type: String, id: String)] = allowlist.compactMap { id in
+            declared[id].map { (type: $0, id: id) }
+        }
+        guard !ordered.isEmpty else {
+            return MfSportEventsResult(metas: [], manifestLiveCatalogs: false)
+        }
+        // Fetch concurrently, collect per catalog, merge in
+        // allowlist order below (never in completion order).
+        let perCatalog: [[TorMeta]] = await withTaskGroup(
+            of: (Int, [TorMeta]).self
+        ) { group in
+            for (idx, cat) in ordered.enumerated() {
+                group.addTask {
+                    (idx, await fetchSportsCatalog(
+                        base: base, type: cat.type, id: cat.id,
+                        paged: sportsPagedIDs.contains(cat.id)))
+                }
+            }
+            var slots = [[TorMeta]](repeating: [], count: ordered.count)
+            for await (idx, metas) in group { slots[idx] = metas }
+            return slots
+        }
+        var merged: [TorMeta] = []
+        var seen = Set<String>()
+        for (idx, cat) in ordered.enumerated() {
+            for var m in perCatalog[idx] {
+                if m.type != "events" && m.type != "tv" { m.type = cat.type }
+                m.servingBase = base
+                if seen.insert(m.id).inserted { merged.append(m) }
+            }
+        }
+        return MfSportEventsResult(metas: Array(merged.prefix(sportsMergeCap)),
+                                   manifestLiveCatalogs: true)
+    }
+
+    /// One sports catalog, page by page when `paged`: page 1
+    /// plainly, then `skip=` pages of 100 until a short page
+    /// answers or the 5-page bound is hit. Fail-soft per
+    /// page — an error ends the catalog with what landed.
+    private static func fetchSportsCatalog(base: String, type: String,
+                                           id: String, paged: Bool)
+        async -> [TorMeta] {
+        var out: [TorMeta] = []
+        var skip = 0
+        while true {
+            let url = skip == 0
+                ? base + "/catalog/\(type)/\(id).json"
+                : base + "/catalog/\(type)/\(id)/skip=\(skip).json"
+            guard let root = try? await JoeHTTP.getJSON(url, timeout: 12)
+            else { break }
+            let page = parseMetas(JSON.arr(root, "metas"))
+            out += page
+            if !paged || page.count < 100 { break }
+            skip += 100
+            if skip > 400 { break }
+        }
+        return out
+    }
+
+    /// Stream fetch for the sports tab's live sources
+    /// (Nuvio / StremVerse / MF-served sports metas). Same
+    /// Stremio envelope and budget as fetchStreams, but its
+    /// own SourceHealth provider tag ("live") and gateway
+    /// tag ("LIVE"), so the MF rows' ⚡️ cache grammar
+    /// (TorStream.awaitingDisplay) never mislabels a direct
+    /// live row as awaiting debrid (the Sony rule). Live
+    /// streams play direct, no tunnel — unchanged.
+    static func fetchStreamsLive(base: String, type: String, id: String)
+        async throws -> [TorStream] {
+        try await fetchStreams(addonBase: base, type: type, id: id,
+                               gateway: "LIVE", provider: "live")
     }
 
     // MARK: - Play candidates (shared conversion)

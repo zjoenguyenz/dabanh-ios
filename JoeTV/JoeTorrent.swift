@@ -1109,14 +1109,26 @@ struct JoeTorrentDetail: View {
         // owner approved). The error surface stays honest:
         // it shows only when the Torrentio leg failed AND
         // nothing came back from either gateway.
-        let pooled = await TorrentClient.fetchPooledStreams(
+        // v2.0.24 (Sony D1's tvOS shape): the subtitle fetch
+        // no longer queues BEHIND the pooled stream fetch.
+        // It depends only on the stream id, known before
+        // either starts, so the two run concurrently and the
+        // section waits for the slower of the two — max, not
+        // sum. The subtitle CHOICE (bestVietnamese over the
+        // same fetch) is unchanged; the pre-fix serial order
+        // taxed every torrent detail open with the subtitle
+        // leg's full latency (an 18 s budget) stacked on top
+        // of the stream fetch's.
+        async let pooledFetch = TorrentClient.fetchPooledStreams(
             torrentioBase: torBase, mfBase: mfBase,
             type: meta.type, id: videoId)
-        streams = pooled.streams
-        streamsFailed = pooled.primaryFailed && pooled.streams.isEmpty
-        let subs = await TorrentClient.fetchSubtitles(
+        async let subsFetch = TorrentClient.fetchSubtitles(
             base: TorrentSettings.subtitleBase(addonBase: torBase ?? mfBase ?? ""),
             type: meta.type, id: videoId)
+        let pooled = await pooledFetch
+        streams = pooled.streams
+        streamsFailed = pooled.primaryFailed && pooled.streams.isEmpty
+        let subs = await subsFetch
         let bestVi = TorrentClient.bestVietnamese(subs)
         hasViSub = bestVi != nil
         viSubtitleURL = bestVi.flatMap { URL(string: $0.url) }

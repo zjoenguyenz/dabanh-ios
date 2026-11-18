@@ -46,6 +46,22 @@ struct PlayCandidate {
     /// it, the Android player's auto-attach mirrored. Nil
     /// for provider candidates and titles without one.
     var subtitleURL: URL? = nil
+
+    /// The AVURLAsset the AVPlayer path opens for this
+    /// candidate: exactly the candidate's headers, plus the
+    /// house user agent when none was set. Shared by the
+    /// cold path (PlayerController) and the dwell warmer
+    /// (StreamWarmer) so both open the stream identically —
+    /// the warmer's whole value is that the tap re-opens
+    /// nothing it already loaded.
+    func makeAsset() -> AVURLAsset {
+        var headers = self.headers
+        if headers["User-Agent"] == nil {
+            headers["User-Agent"] = JoeHTTP.userAgent
+        }
+        return AVURLAsset(url: url,
+                          options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+    }
 }
 
 /// Everything the player needs to keep WatchStore honest: the
@@ -833,22 +849,28 @@ private struct PlayerController: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
-        let item = AVPlayerItem(asset: Self.asset(for: candidate))
-        let player = AVPlayer(playerItem: item)
+        // v2.0.24: adopt the dwell-warmed player when this
+        // candidate is the one the detail screen warmed
+        // (StreamWarmer) — its item has been loading since
+        // the dwell, so playback starts from warm playlists
+        // and buffered initial segments instead of a cold
+        // build. Any other candidate takes the cold build
+        // below, byte-identical to before.
+        let player: AVPlayer
+        let item: AVPlayerItem
+        if let warm = StreamWarmer.shared.take(url: candidate.url,
+                                               headers: candidate.headers),
+           let warmItem = warm.currentItem {
+            player = warm
+            item = warmItem
+        } else {
+            item = AVPlayerItem(asset: candidate.makeAsset())
+            player = AVPlayer(playerItem: item)
+        }
         controller.player = player
         context.coordinator.observe(item, player: player)
         player.play()
         return controller
-    }
-
-    /// Plain AVURLAsset with exactly the headers the candidate
-    /// carries (plus the house user agent when none was set).
-    static func asset(for candidate: PlayCandidate) -> AVURLAsset {
-        var headers = candidate.headers
-        if headers["User-Agent"] == nil {
-            headers["User-Agent"] = JoeHTTP.userAgent
-        }
-        return AVURLAsset(url: candidate.url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
@@ -932,22 +954,23 @@ private struct PlayerController: UIViewControllerRepresentable {
                 guard let self else { return }
                 switch item.status {
                 case .readyToPlay:
-                    self.watchdog?.cancel()
-                    self.freezeReady = true
-                    self.lastAdvanceAt = Date()
-                    if let p = self.player {
-                        let now = p.currentTime().seconds
-                        self.lastPositionSec = now.isFinite ? now : -1
-                    }
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, let player = self.player else { return }
-                        self.director.itemReady(player: player)
-                    }
+                    self.handleReady()
                 case .failed:
                     fireFail()
                 default:
                     break
                 }
+            }
+            // v2.0.24: a dwell-warmed item (StreamWarmer) may
+            // ALREADY be .readyToPlay when the observation is
+            // installed — KVO with .new reports only changes
+            // after registration, so without this check the
+            // ready transition would never fire for it: no
+            // resume seek, and the U-1 watchdog would kill a
+            // healthy item at 20 s. For a cold item the status
+            // is .unknown here and the check is a no-op.
+            if item.status == .readyToPlay {
+                handleReady()
             }
             failToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
@@ -975,6 +998,25 @@ private struct PlayerController: UIViewControllerRepresentable {
                 let pos = Int64(time.seconds * 1000)
                 let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
                 self.director.tick(positionMs: pos, durationMs: dur)
+            }
+        }
+
+        /// The .readyToPlay transition, shared by the KVO
+        /// above and observe()'s already-ready check: stand
+        /// the pre-ready watchdog down, arm the freeze
+        /// watchdog's judgement from a fresh clock, and hand
+        /// the resume seek to the director.
+        private func handleReady() {
+            watchdog?.cancel()
+            freezeReady = true
+            lastAdvanceAt = Date()
+            if let p = player {
+                let now = p.currentTime().seconds
+                lastPositionSec = now.isFinite ? now : -1
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let player = self.player else { return }
+                self.director.itemReady(player: player)
             }
         }
 

@@ -246,7 +246,7 @@ struct JoeTVSection: View {
                 .overlay(RoundedRectangle(cornerRadius: theme.rCard)
                     .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("THỂ THAO TORRENT · MEDIAFUSION")
+                    Text("THỂ THAO TORRENT")
                         .font(.system(size: 25, weight: .semibold))
                         .tracking(4)
                         .foregroundStyle(theme.meta)
@@ -295,16 +295,19 @@ struct JoeTVSection: View {
                     // v2.0.16: the Thể Thao Torrent chip sits
                     // immediately beside Live Events (owner:
                     // "Để kế bên live event luôn"). It exists
-                    // only while MediaFusion is in play — the
-                    // Android kill-switch rule: off or
-                    // unconfigured ⇒ fully absent.
+                    // only while a sports source is in play —
+                    // the Android kill-switch rule: none
+                    // configured ⇒ fully absent.
+                    // v2.0.24: the gate is sportsAvailable
+                    // (Nuvio / StremVerse slots or
+                    // MediaFusion), the Sony 2.3.37 rule.
                     if group == sportsChipAnchor,
-                       TorrentSettings.mfBase != nil {
+                       TorrentSettings.sportsAvailable {
                         sportsChip
                     }
                 }
                 if store.visibleGroups.isEmpty,
-                   TorrentSettings.mfBase != nil {
+                   TorrentSettings.sportsAvailable {
                     sportsChip
                 }
                 actionChip(id: "refresh", title: "↻ Làm mới") {
@@ -511,12 +514,12 @@ struct JoeTVSection: View {
                 Spacer()
             } else if mfEvents.isEmpty {
                 if mfNoLiveCatalogs {
-                    Text("Hồ sơ MediaFusion của anh chưa bật danh mục trực tiếp nào (Live Sport Events hoặc các kênh TV trực tiếp), nên mục này trống. Bật các danh mục đó ở trang cấu hình MediaFusion rồi bấm Làm mới.")
+                    Text("Các nguồn thể thao (Nuvio, MediaFusion, StremVerse) đều không có danh mục trực tiếp nào, nên mục này trống. Nếu anh dùng MediaFusion, kiểm tra trang cấu hình đã bật danh mục trực tiếp (Live Sport Events / kênh TV) chưa, rồi bấm Làm mới.")
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                         .frame(maxWidth: 1200, alignment: .leading)
                 } else {
-                    Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
+                    Text("Chưa có sự kiện trực tiếp nào. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                         .frame(maxWidth: 1200, alignment: .leading)
@@ -693,18 +696,21 @@ struct JoeTVSection: View {
 
     private func loadSportsEvents() async {
         guard !mfLoading, !mfEventsLoaded,
-              let mf = TorrentSettings.mfBase else { return }
+              TorrentSettings.sportsAvailable else { return }
         mfLoading = true
         defer { mfLoading = false }
-        let result = await TorrentClient.fetchMfSportEvents(base: mf)
-        mfEvents = Array(result.metas.prefix(60))
+        // v2.0.24: the chain fetch (Nuvio → MediaFusion →
+        // StremVerse, first non-empty wins) — the merge cap
+        // lives in the fetch itself now.
+        let result = await TorrentClient.fetchSportsEvents()
+        mfEvents = result.metas
         mfNoLiveCatalogs = (result.manifestLiveCatalogs == false)
         mfEventsLoaded = true
     }
 
     /// Tap an event → play it through the torrent player:
-    /// the ladder is the event's own MediaFusion streams,
-    /// pooled + ranked like a film's, and the director
+    /// the ladder is the event's own streams from its
+    /// serving base, ranked like a film's, and the director
     /// fails over inside it — the TV section's
     /// click-and-play rule, no intermediate list.
     private func playEvent(_ event: TorMeta) {
@@ -720,10 +726,14 @@ struct JoeTVSection: View {
         // "events" route exactly as before.
         entry.metaType = event.type == "tv" ? "tv" : "events"
         entry.streamId = event.id
-        entry.metaBase = TorrentSettings.mfBase ?? ""
+        // v2.0.24: streams resolve from the base that SERVED
+        // the meta (its servingBase stamp — Nuvio,
+        // StremVerse, or MediaFusion), never a fixed MF base.
+        let servingBase = event.servingBase.isEmpty
+            ? (TorrentSettings.mfBase ?? "") : event.servingBase
+        entry.metaBase = servingBase
         entry.background = event.background
         entry.desc = event.desc
-        let mf = TorrentSettings.mfBase
         let eventId = event.id
         let eventType = event.type == "tv" ? "tv" : "events"
         let director = PlayDirector(
@@ -731,19 +741,32 @@ struct JoeTVSection: View {
             identity: PlayIdentity(entry: entry),
             resumeMs: 0,
             resolveLadder: { _ in
-                guard let mf else { return [] }
-                let pooled = await TorrentClient.fetchPooledStreams(
-                    torrentioBase: nil, mfBase: mf,
-                    type: eventType, id: eventId)
+                guard !servingBase.isEmpty else { return [] }
+                // The live fetch (own health + gateway tags),
+                // ranked best-first by the shared pool
+                // ranking, then the shared candidate
+                // conversion — the tab's click-and-play rule
+                // with the film path's ordering discipline.
+                let streams = (try? await TorrentClient.fetchStreamsLive(
+                    base: servingBase, type: eventType, id: eventId)) ?? []
                 return await TorrentClient.playCandidates(
-                    streams: pooled.streams, preferred: nil)
+                    streams: TorrentClient.rankPool(streams), preferred: nil)
             },
             hopIdentity: nil)
         sportsHolder = JoeMovieDetail.DirectorHolder(
             director: director,
             title: event.name,
             episode: "",
-            sourceLine: "Nguồn: Thể Thao Torrent (MediaFusion)")
+            sourceLine: "Nguồn: Thể Thao Torrent · \(Self.sportsSourceName(servingBase))")
+    }
+
+    /// The serving source's display name for the player's
+    /// source line, read from the serving base's host.
+    private static func sportsSourceName(_ base: String) -> String {
+        let host = URL(string: base)?.host?.lowercased() ?? ""
+        if host.contains("nuvio") { return "Nuvio" }
+        if host.contains("stremverse") { return "StremVerse" }
+        return "MediaFusion"
     }
 
     /// Same-name entries are the player's fallback ladder; proven

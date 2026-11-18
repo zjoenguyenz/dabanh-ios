@@ -30,6 +30,9 @@ struct JoeSettingsView: View {
     /// v2.0.16: the MediaFusion gateway's field + kill-switch.
     @State private var mfURL: String = TorrentSettings.mfURL
     @State private var mfEnabled: Bool = TorrentSettings.mfEnabled
+    /// v2.0.24: the Thể Thao Torrent primary source's field
+    /// (Nuvio — the Sony 2.3.37 Settings parity).
+    @State private var sportsURL: String = TorrentSettings.sportsURL
     @State private var subAddonURL: String = TorrentSettings.subAddonURL.isEmpty
         ? TorrentSettings.opensubtitlesDefault : TorrentSettings.subAddonURL
     @State private var tmdbKey: String = UserDefaults.standard.string(forKey: "tmdb_api_key") ?? ""
@@ -121,6 +124,15 @@ struct JoeSettingsView: View {
                 }
                 .joeCardButton()
                 .focused($mfToggleFocused)
+                // v2.0.24: the Thể Thao Torrent tab's primary
+                // source (Sony 2.3.37 parity). Empty = the
+                // Nuvio public instance; the owner can paste
+                // a self-hosted instance's base instead. This
+                // slot never touches the MediaFusion link
+                // above — that one also feeds the movie path.
+                field(title: "Thể Thao Torrent — nguồn chính (Nuvio)",
+                      hint: "Để trống thì dùng Nuvio công cộng. Dán link khác khi anh tự dựng Nuvio (ví dụ trên PC của anh). Mục Thể Thao Torrent lấy nguồn này trước, MediaFusion dự phòng sau.",
+                      text: $sportsURL, id: "sports", secure: false, allowsPaste: true)
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false)
@@ -221,6 +233,7 @@ struct JoeSettingsView: View {
         .onChange(of: premiumizeToken) { save() }
         .onChange(of: mfURL) { save() }
         .onChange(of: mfEnabled) { save() }
+        .onChange(of: sportsURL) { save() }
         .onChange(of: subAddonURL) { save() }
         .onChange(of: tmdbKey) { save() }
     }
@@ -561,6 +574,7 @@ struct JoeSettingsView: View {
         TorrentSettings.premiumizeToken = premiumizeToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.mfURL = mfURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.mfEnabled = mfEnabled
+        TorrentSettings.sportsURL = sportsURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.subAddonURL = subAddonURL.trimmingCharacters(in: .whitespaces)
         UserDefaults.standard.set(tmdbKey.trimmingCharacters(in: .whitespaces),
                                   forKey: "tmdb_api_key")

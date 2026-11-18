@@ -1942,6 +1942,33 @@ struct JoeMovieDetail: View {
         await Providers.preResolve(code: provider, detail: d,
                                    epName: target.name,
                                    epNum: target.num)
+        // v2.0.24 (Sony D2's tvOS shape): for KK only, the
+        // dwell warm now extends from the resolved URL to
+        // the media itself. Build this episode's ladder —
+        // cheap on the memo hit preResolve just landed —
+        // and hand its first entry to the StreamWarmer,
+        // which loads that stream's playlists and initial
+        // segments into a paused AVPlayer while the owner
+        // keeps browsing; the Play tap then starts from
+        // warm bytes (see JoeStreamWarmer.swift for the
+        // mechanism and its honest bounds). KK only: its
+        // entries are direct m3u8 from this session's fresh
+        // detail payload. VS/F4K/TP are excluded, as on
+        // Sony — their URLs are minted by a live resolve,
+        // and they keep the URL-level pre-resolve above.
+        // A proxy entry is skipped too (KK never proxies;
+        // the guard keeps the warm honest if that ever
+        // changes). Fail-soft throughout: a missed or stale
+        // warm leaves the tap's cold path exactly as it was.
+        guard !Task.isCancelled, provider == Providers.KK
+        else { return }
+        let ladder = await Providers.ladderFor(
+            code: provider, detail: d, filmTitle: d.movie.name,
+            epName: target.name, epNum: target.num)
+        if let first = ladder.entries.first, !first.proxy,
+           let url = URL(string: first.url) {
+            StreamWarmer.shared.warm(url: url, headers: first.headers)
+        }
     }
 
     /// The dwell target: the focused episode when focus rests
