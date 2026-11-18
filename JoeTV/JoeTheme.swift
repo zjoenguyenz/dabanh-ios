@@ -581,8 +581,8 @@ struct PosterCard: View {
     var badge: String? = nil        // provider code (KK / F4K / VS / TP)
     var quality: String = ""        // quality tag (FHD / HD / CAM …)
     /// Ultra's corner badges (v2.0.19): runtime top-left and
-    /// year bottom-left; the IMDb badge (bottom-right) is
-    /// resolved from the TMDB identity in ultraBody's task.
+    /// year bottom-left; the IMDb badge (bottom-right) reads
+    /// the TMDB cache synchronously (v2.0.21 — see imdbRating).
     var timeBadge: String = ""
     var yearBadge: String = ""
     var progress: Double? = nil
@@ -611,8 +611,22 @@ struct PosterCard: View {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.joeTheme) private var theme
     /// Ultra only: the TMDB vote average for the art's
-    /// bottom-right badge (nil until resolved / when unknown).
-    @State private var imdbRating: Double?
+    /// bottom-right badge, read SYNCHRONOUSLY from the
+    /// TMDBClient cache (v2.0.21) — a value a previous
+    /// fetchInfo already resolved, or nil. The v2.0.19 card
+    /// fetched it per card in a .task: one 2-call TMDB chain
+    /// (detail + images) per card across every rail, all
+    /// riding the same JoeHTTP session the poster fallback
+    /// ladder's posterPath lookup needs — the storm starved
+    /// exactly the cards whose posters depended on that
+    /// lookup, and they fossilised on the placeholder
+    /// (owner report, 2026-11-17). A card now never touches
+    /// the network for its badge; the badge simply appears
+    /// on cards whose rating is already known (the hero's
+    /// film, anything opened in detail).
+    private var imdbRating: Double? {
+        TMDBClient.cachedRating(tmdbId: tmdbId, type: tmdbType)
+    }
 
     // Design .card .art border-radius: A 2px, D 18px, F 10px.
     // rCard − artInset reproduces D (18−0) and F (22−12) exactly,
@@ -813,10 +827,6 @@ struct PosterCard: View {
             }
         }
         .frame(width: theme.cardWidth, alignment: .leading)
-        .task(id: tmdbId) {
-            guard theme.id == .ultra, !tmdbId.isEmpty else { return }
-            imdbRating = await TMDBClient.rating(tmdbId: tmdbId, type: tmdbType)
-        }
     }
 
     private var faceBody: some View {

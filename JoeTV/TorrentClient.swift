@@ -230,6 +230,20 @@ struct TorMeta: Identifiable, Hashable {
     var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
 }
 
+/// The Thể Thao Torrent fetch outcome (v2.0.21).
+struct MfSportEventsResult {
+    var metas: [TorMeta] = []
+    /// Whether the profile's manifest was READ and exposes
+    /// at least one live catalog (type "events" or "tv"):
+    /// true = live catalogs exist (their metas are merged
+    /// above); false = the manifest was read and carries NO
+    /// live catalogs, so the profile itself is the cause of
+    /// an empty tab; nil = the manifest could not be read
+    /// and the fetch fell back to the plain events catalog,
+    /// leaving the profile question open.
+    var manifestLiveCatalogs: Bool? = nil
+}
+
 struct TorStream: Identifiable {
     var id = UUID()
     var name = ""
@@ -696,23 +710,69 @@ enum TorrentClient {
 
     // MARK: - MediaFusion live sport events (Thể Thao Torrent tab)
 
-    /// The live sport events from the owner's MediaFusion
+    /// The live content of the owner's MediaFusion profile
+    /// for the Thể Thao Torrent tab. Fail-soft throughout.
+    ///
+    /// v2.0.16 shape (superseded): the tab queried ONLY the
     /// manifest-template catalog `live_sport_events` (type
-    /// "events", verified against the MediaFusion source
-    /// 2026-11-17). Fail-soft: any error returns an empty
-    /// list. If the owner's configure-page selection does
-    /// not include the sports catalog, the endpoint answers
-    /// empty and the tab says so honestly.
-    /// v2.0.16 (post-test fix, mirroring Android 2.3.19/
-    /// 2.3.20): PLAIN catalog only — the genre=Football
-    /// first hop is dropped (on Android it could stall the
-    /// whole fetch; the plain catalog returns the full
-    /// list, football included) — and TWO attempts, because
-    /// the endpoint answers in waves: measured on the Sony
-    /// the same evening, the full list in under 10 s on one
-    /// fetch and an empty answer on the next. Each attempt
-    /// is hard-bounded by JoeHTTP's resource timeout.
-    static func fetchMfSportEvents(base: String) async -> [TorMeta] {
+    /// "events"). On the owner's TV the tab then stood empty
+    /// all day (2026-11-17) even though his profile also
+    /// carries NEWS / live-TV channels — standing channels,
+    /// populated 24/7, which live in MediaFusion's type "tv"
+    /// catalogs and could never appear through the events
+    /// endpoint.
+    ///
+    /// v2.0.21 (manifest-driven): read the profile's own
+    /// manifest, enumerate the catalogs it actually exposes,
+    /// and fetch every LIVE one — type "events" and type
+    /// "tv" (movie/series catalogs are skipped; the pooled
+    /// film path is a separate, working route). Each catalog
+    /// keeps the wave discipline measured in v2.0.16 (the
+    /// endpoints answer in waves: two attempts, 2 s apart,
+    /// 12 s timeout each). Metas merge across catalogs,
+    /// deduped by id, capped at the tab's limit of 60.
+    ///
+    /// Fallback: if the manifest cannot be fetched or
+    /// parsed, the fetch degrades to the v2.0.16 plain
+    /// `live_sport_events` query, unchanged — never worse
+    /// than the pre-fix behaviour.
+    static func fetchMfSportEvents(base: String) async -> MfSportEventsResult {
+        if let manifest = try? await JoeHTTP.getJSON(
+                base + "/manifest.json", timeout: 12),
+           let catalogs = JSON.arr(manifest, "catalogs") {
+            let live: [(type: String, id: String)] = catalogs.compactMap { c in
+                let t = JSON.str(c, "type")
+                let i = JSON.str(c, "id")
+                guard t == "events" || t == "tv", !i.isEmpty else { return nil }
+                return (type: t, id: i)
+            }
+            guard !live.isEmpty else {
+                return MfSportEventsResult(metas: [],
+                                           manifestLiveCatalogs: false)
+            }
+            var merged: [TorMeta] = []
+            var seen = Set<String>()
+            for cat in live {
+                let url = base + "/catalog/\(cat.type)/\(cat.id).json"
+                for attempt in 0..<2 {
+                    if attempt > 0 {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    }
+                    if let root = try? await JoeHTTP.getJSON(url, timeout: 12) {
+                        let metas = parseMetas(JSON.arr(root, "metas"))
+                        if !metas.isEmpty {
+                            for m in metas where seen.insert(m.id).inserted {
+                                merged.append(m)
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+            return MfSportEventsResult(metas: Array(merged.prefix(60)),
+                                       manifestLiveCatalogs: true)
+        }
+        // Fallback — the v2.0.16 plain events fetch, verbatim.
         let plainURL = base + "/catalog/events/live_sport_events.json"
         for attempt in 0..<2 {
             if attempt > 0 {
@@ -720,10 +780,13 @@ enum TorrentClient {
             }
             if let root = try? await JoeHTTP.getJSON(plainURL, timeout: 12) {
                 let metas = parseMetas(JSON.arr(root, "metas"))
-                if !metas.isEmpty { return metas }
+                if !metas.isEmpty {
+                    return MfSportEventsResult(metas: metas,
+                                               manifestLiveCatalogs: nil)
+                }
             }
         }
-        return []
+        return MfSportEventsResult(metas: [], manifestLiveCatalogs: nil)
     }
 
     // MARK: - Play candidates (shared conversion)

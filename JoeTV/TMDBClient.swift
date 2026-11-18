@@ -136,6 +136,27 @@ enum TMDBClient {
         return result
     }
 
+    /// Synchronous cache-only rating read (v2.0.21): the
+    /// vote average a previous fetchInfo/rating already
+    /// resolved for this identity, or nil. NEVER touches the
+    /// network — PosterCard's Ultra IMDb badge reads this, so
+    /// a card can never stall its poster (or flood the shared
+    /// JoeHTTP session) behind a per-card TMDB fetch.
+    static func cachedRating(tmdbId: String, type: String) -> Double? {
+        guard !tmdbId.isEmpty else { return nil }
+        let kind = (type == "tv") ? "tv" : "movie"
+        let cacheKey = kind + "|" + tmdbId
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let hit = ratingCache[cacheKey] {
+            return hit > 0 ? hit : nil
+        }
+        if let info = infoCache[cacheKey], info.voteAverage > 0 {
+            return info.voteAverage
+        }
+        return nil
+    }
+
     /// The record's vote average for card badges (nil when
     /// unknown) — one detail call per identity, cached.
     static func rating(tmdbId: String, type: String) async -> Double? {

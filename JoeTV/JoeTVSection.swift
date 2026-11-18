@@ -30,6 +30,10 @@ struct JoeTVSection: View {
     @State private var mfEvents: [TorMeta] = []
     @State private var mfEventsLoaded = false
     @State private var mfLoading = false
+    /// v2.0.21: the manifest WAS read and exposes no live
+    /// catalogs at all — the one case where the profile is
+    /// truly the cause of an empty tab (see the empty state).
+    @State private var mfNoLiveCatalogs = false
     @State private var sportsHolder: JoeMovieDetail.DirectorHolder?
     @FocusState private var focusedEvent: String?
 
@@ -506,10 +510,17 @@ struct JoeTVSection: View {
                     .tint(.white)
                 Spacer()
             } else if mfEvents.isEmpty {
-                Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
-                    .font(.system(size: 25))
-                    .foregroundStyle(theme.meta)
-                    .frame(maxWidth: 1200, alignment: .leading)
+                if mfNoLiveCatalogs {
+                    Text("Hồ sơ MediaFusion của anh chưa bật danh mục trực tiếp nào (Live Sport Events hoặc các kênh TV trực tiếp), nên mục này trống. Bật các danh mục đó ở trang cấu hình MediaFusion rồi bấm Làm mới.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                        .frame(maxWidth: 1200, alignment: .leading)
+                } else {
+                    Text("Chưa có sự kiện trực tiếp nào. Nếu trang cấu hình MediaFusion của anh chưa bật danh mục Live Sport Events thì mục này sẽ trống. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                        .frame(maxWidth: 1200, alignment: .leading)
+                }
                 Spacer()
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
@@ -685,7 +696,9 @@ struct JoeTVSection: View {
               let mf = TorrentSettings.mfBase else { return }
         mfLoading = true
         defer { mfLoading = false }
-        mfEvents = Array(await TorrentClient.fetchMfSportEvents(base: mf).prefix(60))
+        let result = await TorrentClient.fetchMfSportEvents(base: mf)
+        mfEvents = Array(result.metas.prefix(60))
+        mfNoLiveCatalogs = (result.manifestLiveCatalogs == false)
         mfEventsLoaded = true
     }
 
@@ -701,13 +714,18 @@ struct JoeTVSection: View {
         entry.title = event.name
         entry.poster = event.poster
         entry.metaId = event.id
-        entry.metaType = "events"
+        // v2.0.21: metas harvested from the profile's type
+        // "tv" catalogs (standing live channels) resolve
+        // their streams under "tv"; events metas keep the
+        // "events" route exactly as before.
+        entry.metaType = event.type == "tv" ? "tv" : "events"
         entry.streamId = event.id
         entry.metaBase = TorrentSettings.mfBase ?? ""
         entry.background = event.background
         entry.desc = event.desc
         let mf = TorrentSettings.mfBase
         let eventId = event.id
+        let eventType = event.type == "tv" ? "tv" : "events"
         let director = PlayDirector(
             store: watch,
             identity: PlayIdentity(entry: entry),
@@ -716,7 +734,7 @@ struct JoeTVSection: View {
                 guard let mf else { return [] }
                 let pooled = await TorrentClient.fetchPooledStreams(
                     torrentioBase: nil, mfBase: mf,
-                    type: "events", id: eventId)
+                    type: eventType, id: eventId)
                 return await TorrentClient.playCandidates(
                     streams: pooled.streams, preferred: nil)
             },
