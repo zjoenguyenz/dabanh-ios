@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Movie detail: header (poster, meta, synopsis), the favourite
 /// toggle, "Nguồn khác:" chips for the other provider carrying
@@ -1140,6 +1141,17 @@ struct JoeMovieDetail: View {
     /// plain text, and focus paints the name alone (see
     /// JoeActorNameLabel) — at rest the line renders as the
     /// drawing's line.
+    ///
+    /// v2.0.30 (FIX6): the drawing's separators are " · "
+    /// (design-A/detail.html), and its names are WHOLE —
+    /// the pre-fix line fed six names into the 1050-pt
+    /// column and SwiftUI compressed every label, so the
+    /// owner's photo shows each name cut mid-word ("Paul
+    /// Betta...", "James Spa..."). The line now admits
+    /// whole names only, while they fit (fittedActors);
+    /// the names left off stay reachable through the
+    /// shown names' actor pages and the other themes'
+    /// photo rows.
     @ViewBuilder
     private var actorsLine: some View {
         if let tmdb, !tmdb.cast.isEmpty {
@@ -1150,10 +1162,10 @@ struct JoeMovieDetail: View {
                 Text("Diễn viên: ")
                     .font(.system(size: 24))
                     .foregroundStyle(theme.meta)
-                ForEach(Array(tmdb.cast.prefix(6).enumerated()),
+                ForEach(Array(Self.fittedActors(tmdb.cast).enumerated()),
                         id: \.offset) { index, member in
                     if index > 0 {
-                        Text(", ")
+                        Text(" · ")
                             .font(.system(size: 24))
                             .foregroundStyle(theme.meta)
                     }
@@ -1171,6 +1183,43 @@ struct JoeMovieDetail: View {
             .frame(maxWidth: 1050, alignment: .leading)
             .padding(.top, 14)
         }
+    }
+
+    /// v2.0.30 (FIX6): which of the cast the design-A line
+    /// shows — whole names, in order, while they fit the
+    /// line's 1050-pt column at the drawing's own values:
+    /// the "Diễn viên: " prefix and each name at 24 pt,
+    /// " · " separators, plus each name button's 16 pt of
+    /// horizontal plate inset (JoeActorNameLabel's 8 + 8)
+    /// and the HStack's 2-pt inter-element gaps.
+    /// Measured with the real font (NSString/UIFont), not
+    /// estimated. The walk stops at the first name that
+    /// would not fit whole — a later, shorter name never
+    /// jumps the queue — and the first name always rides,
+    /// even if it alone overflows (it then truncates as a
+    /// single label, the least-bad state). The standing
+    /// six-name presentation cap is kept.
+    private static func fittedActors(_ cast: [TMDBCastMember]) -> [TMDBCastMember] {
+        let font = UIFont.systemFont(ofSize: 24)
+        func width(_ string: String) -> CGFloat {
+            (string as NSString).size(withAttributes: [.font: font]).width
+        }
+        var used = width("Diễn viên: ")
+        var fitted: [TMDBCastMember] = []
+        for member in cast.prefix(6) {
+            // Each name also pays the HStack's 2-pt gaps:
+            // one before its button, plus one before its
+            // separator when it has one.
+            let extra = (fitted.isEmpty ? 2 : 4 + width(" · "))
+                + width(member.name) + 16
+            guard used + extra <= 1050 else { break }
+            used += extra
+            fitted.append(member)
+        }
+        if fitted.isEmpty, let first = cast.first {
+            fitted = [first]
+        }
+        return fitted
     }
 
 /// FIX4 (fix 3): one actor name inside design A's cast

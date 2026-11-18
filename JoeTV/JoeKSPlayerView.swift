@@ -610,10 +610,21 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         transportBar.layer.cornerRadius = 24
         controlsView.addSubview(transportBar)
 
+        // v2.0.30 (FIX6, the owner's close-ups): the plate
+        // lives in the button's CONFIGURATION, not in a
+        // hand-set backgroundColor + layer radius. A .system
+        // button draws its OWN focus platter over a hand
+        // plate, at the system's size, radius and offset —
+        // the two rounded rects rendered doubled and
+        // ghosted on every bar control in the owner's
+        // photos. With the plate inside the configuration,
+        // the system renders ONE plate in both states. See
+        // transportButtonConfiguration.
+        playPauseButton.configuration = Self.transportButtonConfiguration(
+            font: nil, backgroundAlpha: 0.14, cornerRadius: 14,
+            contentInsets: .zero)
+        playPauseButton.configurationUpdateHandler = Self.transportFocusHandler
         playPauseButton.setImage(Self.transportSymbol("play.fill"), for: .normal)
-        playPauseButton.tintColor = .white
-        playPauseButton.backgroundColor = UIColor.white.withAlphaComponent(0.14)
-        playPauseButton.layer.cornerRadius = 14
         playPauseButton.addTarget(self, action: #selector(playPauseButtonTapped),
                                   for: .primaryActionTriggered)
         transportBar.addSubview(playPauseButton)
@@ -669,19 +680,110 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         layoutControls()
     }
 
-    /// Standard tvOS button dress: white text on a quiet
-    /// plate; the OS renders the focus lift itself (the house
-    /// doctrine — never hand-draw focus geometry against the
-    /// kit). Focused title goes dark, for legibility on the
-    /// system's light focused face.
+    /// Standard tvOS button dress (v2.0.30, FIX6 — the
+    /// house doctrine applied literally): white text on a
+    /// quiet plate, and the plate lives INSIDE the button's
+    /// configuration so the system renders exactly one
+    /// plate in both states. Pre-fix this painted a hand
+    /// plate (backgroundColor + layer.cornerRadius) on a
+    /// .system button, and tvOS drew its own focus platter
+    /// over it at the system's geometry — the doubled,
+    /// offset ghost outlines in the owner's close-ups of
+    /// the Phụ đề / Âm thanh pills. Resting values are
+    /// unchanged (white 0.14 plate, radius 14, white 25
+    /// semibold, insets 10×22); the focused title still
+    /// goes dark, via the configuration update handler —
+    /// a state title colour would be overridden by the
+    /// configuration the system actually renders.
     private func styleTransportButton(_ button: UIButton, title: String) {
-        button.setTitle(title, for: .normal)
-        button.setTitleColor(.white, for: .normal)
-        button.setTitleColor(.black, for: .focused)
-        button.titleLabel?.font = .systemFont(ofSize: 25, weight: .semibold)
-        button.contentEdgeInsets = UIEdgeInsets(top: 10, left: 22, bottom: 10, right: 22)
-        button.backgroundColor = UIColor.white.withAlphaComponent(0.14)
-        button.layer.cornerRadius = 14
+        button.configuration = Self.transportButtonConfiguration(
+            title: title,
+            font: .systemFont(ofSize: 25, weight: .semibold),
+            backgroundAlpha: 0.14, cornerRadius: 14,
+            contentInsets: NSDirectionalEdgeInsets(top: 10, leading: 22,
+                                                   bottom: 10, trailing: 22))
+        button.configurationUpdateHandler = Self.transportFocusHandler
+    }
+
+    /// v2.0.30 (FIX6): the one-plate configuration shared
+    /// by every bar and picker button — the resting dress
+    /// (translucent plate at the standing radius, white
+    /// foreground, the title's font carried by the text
+    /// attributes transformer so later setTitle-shaped
+    /// updates keep it). The system renders its focused
+    /// face from THIS background, so no second plate can
+    /// appear.
+    private static func transportButtonConfiguration(
+        title: String? = nil,
+        font: UIFont?,
+        backgroundAlpha: CGFloat,
+        cornerRadius: CGFloat,
+        contentInsets: NSDirectionalEdgeInsets
+    ) -> UIButton.Configuration {
+        var config = UIButton.Configuration.filled()
+        config.title = title
+        config.baseForegroundColor = .white
+        config.background.backgroundColor =
+            UIColor.white.withAlphaComponent(backgroundAlpha)
+        config.background.cornerRadius = cornerRadius
+        config.contentInsets = contentInsets
+        if let font {
+            config.titleTextAttributesTransformer =
+                UIConfigurationTextAttributesTransformer { incoming in
+                    var outgoing = incoming
+                    outgoing.font = font
+                    return outgoing
+                }
+        }
+        return config
+    }
+
+    /// The focused-foreground flip shared by every bar and
+    /// picker button (v2.0.30): the system's focused face
+    /// is light, so the title/glyph goes dark on it — the
+    /// intent the pre-fix setTitleColor(.black, for:
+    /// .focused) expressed, moved into the configuration.
+    private static let transportFocusHandler:
+        UIButton.ConfigurationUpdateHandler = { button in
+            guard var config = button.configuration else { return }
+            config.baseForegroundColor =
+                button.state.contains(.focused) ? .black : .white
+            button.configuration = config
+        }
+
+    /// Title writes for the configured buttons (v2.0.30):
+    /// the title lives in the configuration now, so the
+    /// live re-titles (the selected track's name after
+    /// readyToPlay, after every picker selection) write
+    /// through it directly instead of relying on the
+    /// legacy setter's bridging.
+    private func setConfiguredTitle(_ button: UIButton, _ title: String) {
+        if var config = button.configuration {
+            config.title = title
+            button.configuration = config
+        } else {
+            button.setTitle(title, for: .normal)
+        }
+    }
+
+    /// v2.0.30 (FIX6): a subtitle whose name is a bare ISO
+    /// language code ("spa" in the owner's close-up) reads
+    /// as the language's own Vietnamese name instead — the
+    /// code alone told him nothing. Only a whole-string
+    /// 2–3 letter code that Locale recognises is mapped
+    /// ("sdh" excluded: it is a real code — Southern
+    /// Kurdish — but on subtitle tracks it overwhelmingly
+    /// means SDH captions); any real name ("Vietsub", a
+    /// file's own label) passes through untouched.
+    private static func friendlyTrackName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard (2...3).contains(trimmed.count),
+              trimmed.allSatisfy({ $0.isLetter }),
+              trimmed.lowercased() != "sdh",
+              let name = Locale(identifier: "vi_VN")
+                .localizedString(forLanguageCode: trimmed.lowercased())
+        else { return raw }
+        return name
     }
 
     /// Frame layout, in the file's frame-based contract (the
@@ -918,16 +1020,19 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         let audioTracks = layer.player.tracks(mediaType: .audio)
         audioButton.isHidden = audioTracks.count < 2
         if let current = audioTracks.first(where: { $0.isEnabled }) {
-            audioButton.setTitle("Âm thanh: \(Self.trackLabel(current))", for: .normal)
+            setConfiguredTitle(audioButton, "Âm thanh: \(Self.trackLabel(current))")
         } else {
-            audioButton.setTitle("Âm thanh", for: .normal)
+            setConfiguredTitle(audioButton, "Âm thanh")
         }
         prepareSubtitleModel(layer: layer)
         subtitleButton.isHidden = subtitleModel.subtitleInfos.isEmpty
         if let selected = subtitleModel.selectedSubtitleInfo {
-            subtitleButton.setTitle("Phụ đề: \(selected.name)", for: .normal)
+            // v2.0.30 (FIX6): a bare language code reads as
+            // the language's name (see friendlyTrackName).
+            setConfiguredTitle(subtitleButton,
+                               "Phụ đề: \(Self.friendlyTrackName(selected.name))")
         } else {
-            subtitleButton.setTitle("Phụ đề: Tắt", for: .normal)
+            setConfiguredTitle(subtitleButton, "Phụ đề: Tắt")
         }
         layoutControls()
     }
@@ -1208,7 +1313,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             addPickerButton(title: "Tắt", checked: subtitleModel.selectedSubtitleInfo == nil, tag: -1)
             for (index, info) in pickerSubtitleInfos.enumerated() {
                 let checked = subtitleModel.selectedSubtitleInfo?.subtitleID == info.subtitleID
-                addPickerButton(title: info.name.isEmpty ? "Phụ đề \(index + 1)" : info.name,
+                addPickerButton(title: info.name.isEmpty ? "Phụ đề \(index + 1)" : Self.friendlyTrackName(info.name),
                                 checked: checked, tag: index)
             }
         case .audio:
@@ -1282,14 +1387,19 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private func addPickerButton(title: String, checked: Bool, tag: Int) {
         let button = UIButton(type: .system)
         button.tag = tag
-        button.setTitle((checked ? "✓   " : "      ") + title, for: .normal)
-        button.setTitleColor(.white, for: .normal)
-        button.setTitleColor(.black, for: .focused)
-        button.titleLabel?.font = .systemFont(ofSize: 27, weight: .medium)
+        // v2.0.30 (FIX6): same one-plate configuration as
+        // the bar buttons — the pre-fix hand plate (white
+        // 0.10 + layer radius 12) doubled with the system's
+        // focus platter here too. Resting values unchanged
+        // (27 medium, insets 8×20, left-aligned).
+        button.configuration = Self.transportButtonConfiguration(
+            title: (checked ? "✓   " : "      ") + title,
+            font: .systemFont(ofSize: 27, weight: .medium),
+            backgroundAlpha: 0.10, cornerRadius: 12,
+            contentInsets: NSDirectionalEdgeInsets(top: 8, leading: 20,
+                                                   bottom: 8, trailing: 20))
+        button.configurationUpdateHandler = Self.transportFocusHandler
         button.contentHorizontalAlignment = .left
-        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
-        button.backgroundColor = UIColor.white.withAlphaComponent(0.10)
-        button.layer.cornerRadius = 12
         button.addTarget(self, action: #selector(pickerButtonTapped(_:)),
                          for: .primaryActionTriggered)
         pickerView.addSubview(button)
