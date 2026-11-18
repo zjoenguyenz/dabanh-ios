@@ -149,6 +149,8 @@ targets:
       - JoeTV/JoeProxy.swift
       - JoeTV/Providers.swift
       - JoeTV/WatchStore.swift
+      - JoeTV/JoeFollowStore.swift
+      - JoeTV/JoeChannelFavourites.swift
       - JoeTV/TorrentClient.swift
       - JoeTV/JoePlayerView.swift
       - JoeTV/JoeStreamWarmer.swift
@@ -182,15 +184,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "2.0.25"
-        CURRENT_PROJECT_VERSION: "38"
+        MARKETING_VERSION: "2.0.26"
+        CURRENT_PROJECT_VERSION: "39"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.25"
-        CFBundleVersion: "38"
+        CFBundleShortVersionString: "2.0.26"
+        CFBundleVersion: "39"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

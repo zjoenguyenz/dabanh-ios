@@ -269,6 +269,26 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         self.director = director
         externalSubtitleURL = candidate.subtitleURL
         pendingCandidate = candidate
+        // v2.0.26 (idea 10): display-mode matching for the
+        // torrent path. The AVPlayer path is matched by the
+        // system automatically; KSPlayer/FFmpeg is not, so
+        // the host states the candidate's display features
+        // (stamped by TorrentClient.playCandidates from the
+        // stream's own parse) through the view controller's
+        // preferredDisplayCriteria — Apple's prescribed
+        // mechanism for non-AVPlayer playback. This is a
+        // PREFERENCE the system honours subject to the
+        // user's Match Content settings (Settings > Video
+        // and Audio > Match Content) — that is Apple's
+        // intended behaviour; do not try to force or
+        // override system settings. With no rate in the
+        // release name the torrent path is film/series
+        // content, so the rate defaults to 23.976.
+        let dynamicRange: AVVideoDynamicRange =
+            candidate.dv ? .dolbyVision : (candidate.hdr ? .hdr10 : .sdr)
+        preferredDisplayCriteria = AVDisplayCriteria(
+            refreshRate: candidate.fps ?? 23.976,
+            videoDynamicRange: dynamicRange)
         view.backgroundColor = .black
         // makeUIViewController calls this BEFORE the view has
         // been laid out — creating the layer there froze the
@@ -353,6 +373,10 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     }
 
     func teardown() {
+        // v2.0.26 (idea 10): clear the display criteria set
+        // in start() so no preference lingers after the
+        // session — the system returns to its default mode.
+        preferredDisplayCriteria = nil
         // A dismantled host must never begin playback late:
         // drop the deferred candidate first.
         pendingCandidate = nil

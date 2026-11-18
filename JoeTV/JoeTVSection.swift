@@ -39,6 +39,18 @@ struct JoeTVSection: View {
 
     private static let sportsChipID = "mf|thethao-torrent"
 
+    // Idea 4: favourite TV channels — a synthetic chip +
+    // a grid fed by ChannelFavouritesStore's stored order.
+    // Idea 7b/7c (Thể Thao Torrent fixtures only): match
+    // reminders + pinned teams, observed so a long-press
+    // change re-renders the sports grid in place.
+    @ObservedObject private var channelFavourites = ChannelFavouritesStore.shared
+    @ObservedObject private var matchReminders = MatchReminderStore.shared
+    @ObservedObject private var pinnedTeams = PinnedTeamsStore.shared
+    @State private var favouritesOn = false
+
+    private static let favouritesChipID = "fav|yeu-thich"
+
     private struct PlayRequest: Identifiable {
         let id = UUID()
         let sources: [Channel]
@@ -50,6 +62,13 @@ struct JoeTVSection: View {
     }
 
     private var heroChannel: Channel? {
+        if favouritesOn {
+            if let id = focusedChannel,
+               let ch = favouriteChannels.first(where: { $0.id == id }) {
+                return ch
+            }
+            return favouriteChannels.first
+        }
         if let id = focusedChannel,
            let ch = store.channels.first(where: { $0.id == id }),
            !store.invalidURLs.contains(ch.url) {
@@ -290,6 +309,7 @@ struct JoeTVSection: View {
     private var chipRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 16) {
+                favouritesChip
                 ForEach(store.visibleGroups, id: \.self) { group in
                     chip(group)
                     // v2.0.16: the Thể Thao Torrent chip sits
@@ -350,9 +370,25 @@ struct JoeTVSection: View {
         return store.visibleGroups.first
     }
 
+    /// Idea 4: the synthetic "⭐ Yêu thích" chip, built on
+    /// the Thể Thao Torrent chip's pattern (a mode flag, not
+    /// a playlist group; selecting it notes no group).
+    private var favouritesChip: some View {
+        Button {
+            favouritesOn = true
+            sportsOn = false
+            store.noteSelectedGroup(nil)
+        } label: {
+            JoeChipLabel(title: "⭐ Yêu thích", selected: favouritesOn)
+        }
+        .joeCardButton()
+        .focused($focusedChip, equals: Self.favouritesChipID)
+    }
+
     private var sportsChip: some View {
         Button {
             sportsOn = true
+            favouritesOn = false
             store.noteSelectedGroup(nil)
             // v2.0.16 (post-test fix, mirroring Android
             // 2.3.20): a settled-but-EMPTY result is not
@@ -374,10 +410,11 @@ struct JoeTVSection: View {
     }
 
     private func chip(_ group: String) -> some View {
-        let selected = !sportsOn && group == effectiveGroup
+        let selected = !sportsOn && !favouritesOn && group == effectiveGroup
         return Button {
             selectedGroup = group
             sportsOn = false
+            favouritesOn = false
             store.noteSelectedGroup(group)
         } label: {
             // v2.0.0 (UI-5): the shared chip leaf — selection
@@ -483,16 +520,81 @@ struct JoeTVSection: View {
         }
     }
 
+    // MARK: - Favourite channels (Idea 4)
+
+    /// The favourited channels in the store's stored order,
+    /// looked up by key from the playlist's channels. A key
+    /// with no matching channel is hidden, never deleted —
+    /// it reappears if the channel returns to the playlist.
+    private var favouriteChannels: [Channel] {
+        channelFavourites.keys.compactMap { key in
+            store.channels.first { ChannelFavouritesStore.key(for: $0) == key }
+        }
+    }
+
+    @ViewBuilder
+    private var favouritesSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text("⭐ Yêu thích")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                Text("\(favouriteChannels.count) kênh")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+            }
+            if favouriteChannels.isEmpty {
+                // Honest empty state: no favourites yet, or
+                // none of them is in the current playlist.
+                Text(channelFavourites.keys.isEmpty
+                     ? "Chưa có kênh yêu thích — bấm giữ một kênh để ghim"
+                     : "Kênh yêu thích hiện không có trong danh sách kênh.")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                    .frame(maxWidth: 1200, alignment: .leading)
+                Spacer()
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
+                        ForEach(favouriteChannels) { channel in
+                            tile(channel)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
+                }
+                // Same clipping + focus-region rule as the
+                // group grid beside it (see gridSection).
+                .focusSection()
+            }
+        }
+    }
+
     @ViewBuilder
     private var contentSection: some View {
         if sportsOn {
             sportsSection
+        } else if favouritesOn {
+            favouritesSection
         } else {
             gridSection
         }
     }
 
     // MARK: - Thể Thao Torrent grid (v2.0.16)
+
+    /// Idea 7c: fixtures mentioning a pinned team sort
+    /// BEFORE the rest — a stable partition of the grid's
+    /// existing order, never a re-sort: pinned fixtures keep
+    /// their relative order, and so does everything else
+    /// (non-fixture events included).
+    private var orderedSportsEvents: [TorMeta] {
+        guard mfEvents.contains(where: { pinnedTeams.matches(title: $0.name) })
+        else { return mfEvents }
+        return mfEvents.filter { pinnedTeams.matches(title: $0.name) }
+            + mfEvents.filter { !pinnedTeams.matches(title: $0.name) }
+    }
 
     @ViewBuilder
     private var sportsSection: some View {
@@ -528,7 +630,7 @@ struct JoeTVSection: View {
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
-                        ForEach(mfEvents) { event in
+                        ForEach(orderedSportsEvents) { event in
                             eventTile(event)
                         }
                     }
@@ -590,6 +692,58 @@ struct JoeTVSection: View {
         }
         .joeCardButton()
         .focused($focusedEvent, equals: event.id)
+        // Idea 7b/7c: long-press menu — match reminder +
+        // team pinning. The tile's appearance, focus and
+        // play path are unchanged.
+        .contextMenu {
+            sportsReminderMenuItem(event)
+            ForEach(fixtureSides(event.name), id: \.self) { side in
+                Button(pinnedTeams.isPinned(side)
+                       ? "Bỏ ghim đội: \(side)" : "Ghim đội: \(side)") {
+                    pinnedTeams.toggle(side)
+                }
+            }
+        }
+    }
+
+    /// Idea 7b: the reminder toggle for one fixture. A
+    /// fixture's kickoff is read from its title with the
+    /// same KickoffParser that fills Channel.kickoff in the
+    /// playlist; the item is offered only when that kickoff
+    /// exists and is still in the future.
+    @ViewBuilder
+    private func sportsReminderMenuItem(_ event: TorMeta) -> some View {
+        if let kickoff = KickoffParser.parse(from: event.name),
+           kickoff > Date() {
+            let key = MatchReminderStore.matchKey(forTitle: event.name)
+            if matchReminders.reminder(forKey: key) != nil {
+                Button("Huỷ nhắc") {
+                    matchReminders.cancelReminder(matchKey: key)
+                }
+            } else {
+                Button("Nhắc trước 15 phút") {
+                    matchReminders.setReminder(matchKey: key,
+                                               title: event.name,
+                                               kickoff: kickoff)
+                }
+            }
+        }
+    }
+
+    /// Idea 7c: a fixture's two sides, split on " vs " /
+    /// " v " (case-insensitive). A title that does not parse
+    /// into two non-empty sides yields no pin items.
+    private func fixtureSides(_ title: String) -> [String] {
+        for separator in [" vs ", " v "] {
+            if let range = title.range(of: separator, options: .caseInsensitive) {
+                let home = String(title[..<range.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let away = String(title[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !home.isEmpty, !away.isEmpty { return [home, away] }
+            }
+        }
+        return []
     }
 
     /// One grid cell (DESIGN-SPEC §7.5): a single focusable
@@ -602,7 +756,12 @@ struct JoeTVSection: View {
     /// at top-right — red is reserved for LIVE (§3.1).
     private func tile(_ channel: Channel) -> some View {
         let focused = focusedChannel == channel.id
-        let isLiveGroup = (effectiveGroup ?? "").uppercased().contains("LIVE")
+        // The badge reads the CHANNEL's own group: on the
+        // group grid every tile's group IS the effective
+        // group, so this is unchanged there, and on the
+        // favourites grid (mixed groups) it stays truthful
+        // per channel.
+        let isLiveGroup = channel.group.uppercased().contains("LIVE")
         return Button {
             play(channel)
         } label: {
@@ -656,6 +815,15 @@ struct JoeTVSection: View {
         }
         .joeCardButton()
         .focused($focusedChannel, equals: channel.id)
+        // Idea 4: long-press toggles the channel's
+        // favourite. Appearance, focus and the play path
+        // are unchanged.
+        .contextMenu {
+            Button(channelFavourites.isFavourite(channel)
+                   ? "Bỏ khỏi Yêu thích" : "Ghim vào Yêu thích") {
+                channelFavourites.toggle(channel)
+            }
+        }
     }
 
     // v2.0.8 (Phase 1): moveInGrid is DELETED — tiles are
@@ -675,6 +843,12 @@ struct JoeTVSection: View {
             if sportsOn {
                 if !mfEvents.isEmpty {
                     Text("\(mfEvents.count) sự kiện")
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.meta)
+                }
+            } else if favouritesOn {
+                if !favouriteChannels.isEmpty {
+                    Text("\(favouriteChannels.count) kênh")
                         .font(.system(size: 23))
                         .foregroundStyle(theme.meta)
                 }

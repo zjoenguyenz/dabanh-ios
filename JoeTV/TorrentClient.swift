@@ -322,6 +322,20 @@ struct TorStream: Identifiable {
     /// (Torrentio, the default) or "MF" (MediaFusion).
     var gateway: String = "TOR"
 
+    /// v2.0.26 (idea 10): the stream's parsed display
+    /// features, stamped at fetch time from the SAME parse
+    /// the ranking uses (RankFeat.of — see fetchStreams).
+    /// playCandidates copies them onto each PlayCandidate,
+    /// and the KSPlayer host turns them into its
+    /// preferredDisplayCriteria; the AVPlayer path is
+    /// matched by the system and never reads them.
+    /// Defaults = SDR / unknown rate.
+    var dv = false
+    var hdr = false
+    /// Frame rate parsed from the release name when present
+    /// (e.g. 59.94 / 50); nil = no explicit rate in the name.
+    var fps: Double? = nil
+
     /// Debrid cache state, read from the serving gateway's
     /// own name grammar (Android 2.3.4 / 2.3.14): a Torrentio
     /// row whose name carries " download]" is a release the
@@ -593,6 +607,16 @@ enum TorrentClient {
                     s.proxyHeaders[k] = v as? String ?? ""
                 }
             }
+            // v2.0.26 (idea 10): stamp the display features
+            // from the ranking's OWN parse (RankFeat.of) —
+            // the one parse, reused, never a second divergent
+            // one. RankFeat.of is pure over name/title, so
+            // this costs nothing and cannot change ranking:
+            // rankPool re-derives the same features itself.
+            let feat = RankFeat.of(s)
+            s.dv = feat.dv
+            s.hdr = feat.hdr
+            s.fps = feat.fps
             return s
         }
     }
@@ -637,6 +661,12 @@ enum TorrentClient {
         var cam: Bool
         var dv: Bool
         var hdr: Bool
+        /// v2.0.26 (idea 10): frame rate parsed from the
+        /// release name, carried for display matching only —
+        /// rankBefore / routeBefore / releaseKey never read
+        /// it, so ranking behaviour is unchanged by its
+        /// presence.
+        var fps: Double? = nil
         var tor: Bool     // served by Torrentio (not MediaFusion)
         var seeders: Int
         var sizeGb: Double
@@ -667,6 +697,7 @@ enum TorrentClient {
                 .joined(separator: " ") + " "
             f.dv = low.contains("dolby vision") || tokens.contains(" dv ")
             f.hdr = low.contains("hdr")
+            f.fps = parseFPS(low)
             f.seeders = parseSeeders(all)
             f.sizeGb = parseSizeGb(all)
             f.provider = providerOf(s.name)
@@ -684,6 +715,32 @@ enum TorrentClient {
                 } else if started { break }
             }
             return started ? v : 0
+        }
+
+        private static let fpsRegex = try? NSRegularExpression(
+            pattern: "([0-9]+(?:\\.[0-9]+)?)\\s*fps")
+
+        /// Frame rate from the release name (v2.0.26, idea
+        /// 10): an explicit "<rate>fps" token first ("60fps",
+        /// "50fps", "25fps", "59.94fps"), else a bare
+        /// fractional rate token ("59.94", "29.97", "23.976")
+        /// — the fractional rates release names carry are
+        /// frame rates, and a bare integer without the fps
+        /// suffix is too ambiguous to claim. Nil when the
+        /// name carries no rate.
+        private static func parseFPS(_ low: String) -> Double? {
+            if let re = fpsRegex {
+                let ns = low as NSString
+                if let m = re.firstMatch(in: low, range: NSRange(
+                        location: 0, length: ns.length)),
+                   let v = Double(ns.substring(with: m.range(at: 1))) {
+                    return v
+                }
+            }
+            for rate in ["59.94", "29.97", "23.976", "23.98"] {
+                if low.contains(rate) { return Double(rate) }
+            }
+            return nil
         }
 
         private static let sizeRegex = try? NSRegularExpression(
@@ -1200,10 +1257,18 @@ enum TorrentClient {
             // so a stream whose media leg required its Referer
             // or User-Agent failed on tvOS while Android (which
             // forwards them) played it.
-            out.append(PlayCandidate(url: url,
-                                     headers: match.proxyHeaders,
-                                     label: label(match),
-                                     engine: .ffmpeg))
+            // v2.0.26 (idea 10): the stream's parsed display
+            // features ride onto the candidate (see
+            // TorStream.dv) for the KSPlayer host's
+            // preferredDisplayCriteria.
+            var leadCandidate = PlayCandidate(url: url,
+                                              headers: match.proxyHeaders,
+                                              label: label(match),
+                                              engine: .ffmpeg)
+            leadCandidate.dv = match.dv
+            leadCandidate.hdr = match.hdr
+            leadCandidate.fps = match.fps
+            out.append(leadCandidate)
         }
         // Remaining direct-URL streams, in list order. Each
         // goes through resolvePlayable too (v2.0.5): the
@@ -1232,10 +1297,16 @@ enum TorrentClient {
         }
         for (s, url) in zip(rest, resolved) {
             if let url {
-                out.append(PlayCandidate(url: url,
-                                         headers: s.proxyHeaders,
-                                         label: label(s),
-                                         engine: .ffmpeg))
+                // v2.0.26 (idea 10): same display-feature
+                // stamp as the lead candidate above.
+                var candidate = PlayCandidate(url: url,
+                                              headers: s.proxyHeaders,
+                                              label: label(s),
+                                              engine: .ffmpeg)
+                candidate.dv = s.dv
+                candidate.hdr = s.hdr
+                candidate.fps = s.fps
+                out.append(candidate)
             }
         }
         return Array(out.prefix(6))

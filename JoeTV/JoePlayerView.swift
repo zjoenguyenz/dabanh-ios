@@ -48,6 +48,19 @@ struct PlayCandidate {
     /// for provider candidates and titles without one.
     var subtitleURL: URL? = nil
 
+    /// v2.0.26 (idea 10): the torrent stream's parsed display
+    /// features, stamped by TorrentClient.playCandidates from
+    /// the TorStream's own ranking parse. The KSPlayer host
+    /// reads them to build its preferredDisplayCriteria (the
+    /// AVPlayer path is matched by the system and ignores
+    /// them). Defaults = SDR / unknown rate: provider
+    /// candidates never set them.
+    var dv = false
+    var hdr = false
+    /// Frame rate parsed from the release name when present
+    /// (e.g. 59.94 / 50); nil = no explicit rate in the name.
+    var fps: Double? = nil
+
     /// The AVURLAsset the AVPlayer path opens for this
     /// candidate: exactly the candidate's headers, plus the
     /// house user agent when none was set. Shared by the

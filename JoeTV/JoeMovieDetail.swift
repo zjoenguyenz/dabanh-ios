@@ -10,6 +10,10 @@ struct JoeMovieDetail: View {
     let route: MovieRoute
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
+    /// Idea 7a: the follow store (FollowStore.shared) —
+    /// observed so the "Theo dõi" toggle's label re-renders
+    /// the moment a follow / unfollow lands.
+    @ObservedObject private var followStore = FollowStore.shared
     @Environment(\.joeTheme) private var theme
     @State private var provider: String
     @State private var slug: String
@@ -55,6 +59,9 @@ struct JoeMovieDetail: View {
     /// control with NO binding, so the play ↔ favourite pair
     /// had no declared route at all.
     @FocusState private var focusedFav: Bool
+    /// Idea 7a: the follow toggle's focus binding, paired
+    /// with focusedFav exactly as the favourite button's is.
+    @FocusState private var focusedFollow: Bool
     @FocusState private var focusedAlt: String?
     @FocusState private var focusedRetry: Bool
 
@@ -535,6 +542,7 @@ struct JoeMovieDetail: View {
                 HStack(spacing: 18) {
                     playButton(d)
                     ultraFavCircle(d)
+                    followButton(d)
                 }
                 .padding(.top, 22)
                 if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
@@ -670,6 +678,7 @@ struct JoeMovieDetail: View {
             HStack(spacing: 18) {
                 playButton(d)
                 favButton(d)
+                followButton(d)
                 providerChip
             }
             .padding(.top, 26)
@@ -737,6 +746,7 @@ struct JoeMovieDetail: View {
                     HStack(spacing: 18) {
                         playButton(d)
                         favButton(d)
+                        followButton(d)
                     }
                     .padding(.top, 22)
                 }
@@ -1037,6 +1047,7 @@ struct JoeMovieDetail: View {
                 HStack(spacing: 18) {
                     playButton(d)
                     favButton(d)
+                    followButton(d)
                 }
                 .padding(.top, 26)
             }
@@ -1565,6 +1576,65 @@ struct JoeMovieDetail: View {
         // the focus engine's geometric moves — no
         // hand-written routing.
         .focused($focusedFav)
+    }
+
+    /// Idea 7a: is this detail a SERIES? Counted over the
+    /// SAME episode lists the episode UI renders
+    /// (serverGroups over d.servers), playable-only — the
+    /// test startEpisode applies to the same lists. More
+    /// than one playable episode across all servers =
+    /// series; a "Full" / single-episode movie is not, and
+    /// shows no follow toggle at all.
+    private func isSeries(_ d: Detail) -> Bool {
+        d.servers.flatMap { $0.episodes }
+            .filter { Providers.isPlayable(code: provider, episode: $0) }
+            .count > 1
+    }
+
+    private func isFollowing(_ d: Detail) -> Bool {
+        followStore.isFollowing(provider: provider, slug: d.movie.slug)
+    }
+
+    /// Idea 7a: the "Theo dõi" (follow) toggle — SERIES
+    /// titles only (see isSeries), standing beside the
+    /// favourite control in every detail anatomy. Built
+    /// EXACTLY as favButton is built (the same Text label
+    /// construction: 29 pt semibold, 36/17 padding,
+    /// surface2 capsule, the label's stroke reading this
+    /// button's own focus binding, .joeCardButton()) — no
+    /// new visual language. The selected-state treatment
+    /// matches the favourite button's: the accent-red
+    /// foreground while following, theme.text otherwise.
+    /// Tapping toggles through FollowStore.shared; the
+    /// current episode count is parsed from the detail
+    /// movie's episodeCurrent string by the store's own
+    /// parser.
+    @ViewBuilder
+    private func followButton(_ d: Detail) -> some View {
+        if isSeries(d) {
+            Button {
+                _ = FollowStore.shared.toggle(
+                    provider: provider,
+                    slug: d.movie.slug,
+                    title: d.movie.name,
+                    poster: d.movie.poster,
+                    currentEpisodes: FollowStore.episodeCount(
+                        from: d.movie.episodeCurrent))
+            } label: {
+                Text(isFollowing(d) ? "Đang theo dõi" : "Theo dõi")
+                    .font(.system(size: 29, weight: .semibold))
+                    .foregroundStyle(isFollowing(d)
+                                     ? JoeTheme.accentRed : theme.text)
+                    .padding(.horizontal, 36)
+                    .padding(.vertical, 17)
+                    .background(Capsule().fill(theme.surface2))
+                    .overlay(Capsule().strokeBorder(
+                        focusedFollow ? theme.focus : theme.stroke,
+                        lineWidth: focusedFollow ? theme.ringWidth : 1.5))
+            }
+            .joeCardButton()
+            .focused($focusedFollow)
+        }
     }
 
     // MARK: - Nguồn phát chips (design D)

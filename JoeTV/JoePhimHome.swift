@@ -35,6 +35,10 @@ struct JoePhimHome: View {
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var phim: PhimStore
     @Environment(\.joeTheme) private var theme
+    /// IDEA 7a: the follow store (singleton) — observed so the
+    /// "Đang theo dõi" rail and its new-episode badges re-render
+    /// the moment the followed list or its counts change.
+    @ObservedObject private var followStore = FollowStore.shared
     // v2.0.8 (Phase 1 — focus memory): these seven @FocusState
     // values are the home's focus MEMORY and nothing else. The
     // engine writes them as focus moves; the move handlers
@@ -101,6 +105,12 @@ struct JoePhimHome: View {
     /// art and vote average, resolved by the same task.
     @State private var heroLogoURL: URL?
     @State private var heroRating: Double = 0
+    /// IDEA 5: the in-app Trending rail's resolved, PLAYABLE
+    /// movies (TMDB trending/week order, catalogue-matched —
+    /// see loadTrending). Empty until the load lands, and the
+    /// rail renders only when non-empty, so an unmatched
+    /// trending title can never surface as a dead card.
+    @State private var trendingMovies: [Movie] = []
 
     var body: some View {
         Group {
@@ -129,6 +139,12 @@ struct JoePhimHome: View {
         .task {
             attempted = true
             phim.loadIfNeeded()
+        }
+        // IDEA 5: load the Trending rail ONCE per home
+        // appearance (.task semantics); loadTrending itself
+        // also guards on trendingMovies still being empty.
+        .task {
+            await loadTrending()
         }
         // CONVERGENCE (spec item 3, 2026-11-15): no programmatic
         // focus writes on the launch path. DOWN from the pills
@@ -618,7 +634,184 @@ struct JoePhimHome: View {
     /// category shelves as titled wall sections, driven by this
     /// one list — the completeness A/F have, from one source.
     private var railSpecs: [JoeRailSpec] {
-        joeRailSpecs(phim: phim, themeID: theme.id)
+        var specs = joeRailSpecs(phim: phim, themeID: theme.id)
+        // IDEA 5: the Trending rail sits right after the
+        // "Mới cập nhật" group — after the merged rail (A /
+        // Ultra), or after the four banded newest rails in
+        // design F (whose specs lead the list, in that order).
+        // Only when the trending load resolved something.
+        if !trendingMovies.isEmpty {
+            let newestScopes: Set<String> = ["merged", "kkNew", "f4kNew", "vsNew", "tpNew"]
+            var insertAt = 0
+            while insertAt < specs.count,
+                  newestScopes.contains(specs[insertAt].scope) {
+                insertAt += 1
+            }
+            specs.insert(JoeRailSpec(scope: "trending",
+                                     title: "🔥 Đang thịnh hành",
+                                     movies: trendingMovies, badges: true),
+                         at: insertAt)
+        }
+        // IDEA 7a: the Following rail, appended last, only
+        // when the owner follows at least one title.
+        if !followStore.followed.isEmpty {
+            specs.append(JoeRailSpec(scope: "following",
+                                     title: "📌 Đang theo dõi",
+                                     movies: followedMovies, badges: true))
+        }
+        return specs
+    }
+
+    /// IDEA 7a: view-model copies of the followed titles for
+    /// the Following rail ONLY (the store's records are never
+    /// mutated). The badge text comes SOLELY from the store's
+    /// episode-count comparison (hasNewEpisodes): "Tập mới"
+    /// when the latest count passed the baseline, the plain
+    /// count otherwise — never a fabricated day or date.
+    private var followedMovies: [Movie] {
+        followStore.followed.map { f in
+            var m = Movie(name: f.title, slug: f.slug,
+                          poster: f.poster, provider: f.provider)
+            if f.hasNewEpisodes {
+                m.episodeCurrent = "Tập mới · \(f.latestEpisodes) tập"
+            } else if f.latestEpisodes > 0 {
+                m.episodeCurrent = "\(f.latestEpisodes) tập"
+            }
+            return m
+        }
+    }
+
+    // MARK: - Trending rail (IDEA 5)
+
+    /// Resolve TMDB's trending/week chart into PLAYABLE
+    /// catalogue titles only, in TMDB's own order, capped at
+    /// 20. Two rungs:
+    ///   1. a tmdbId map built from EVERY movie list the
+    ///      PhimStore already holds (all published rails,
+    ///      genre/country lists included);
+    ///   2. for titles still unmatched, a bounded provider
+    ///      search — at most 8 unmatched titles, providers in
+    ///      Providers.priority order, accepting a tmdbId match
+    ///      first and a normalized-name match (name or origin
+    ///      name) behind it.
+    /// Everything still unmatched is dropped silently.
+    /// Fail-soft end to end: no TMDB key / no network simply
+    /// leaves the rail absent.
+    private func loadTrending() async {
+        guard trendingMovies.isEmpty else { return }
+        let trending = await TMDBClient.trendingWeek()
+        guard !trending.isEmpty else { return }
+        // Cold entry: the catalogue load kicked off by the
+        // sibling .task may still be in flight — give it a
+        // bounded chance to land so rung 1 sees the real
+        // catalogue instead of an empty store (15 s worst
+        // case; the store's own deadline is 25 s, and rung 2
+        // covers whatever is still missing afterwards).
+        for step in 0..<75 {
+            if !phim.catalogueIsEmpty { break }
+            // Past a 2 s grace (for the sibling load's
+            // `loading` flag to flip), a non-loading store
+            // means the load ended — stop waiting.
+            if step >= 10 && !phim.loading { break }
+            if Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let byTmdbId = catalogueByTmdbId()
+        var resolved: [Int: Movie] = [:]
+        var unmatched: [(index: Int, title: JoeTopShelfWriter.TrendingTitle)] = []
+        for (i, t) in trending.enumerated() {
+            if !t.tmdbId.isEmpty, let m = byTmdbId[t.tmdbId],
+               m.tmdbType.isEmpty || m.tmdbType == t.type {
+                resolved[i] = m
+            } else {
+                unmatched.append((index: i, title: t))
+            }
+        }
+        // Rung 2: bounded fallback search (≤ 8 titles).
+        var searches = 0
+        for entry in unmatched {
+            if searches >= 8 { break }
+            searches += 1
+            if let m = await trendingSearchMatch(for: entry.title) {
+                resolved[entry.index] = m
+            }
+        }
+        // TMDB order preserved; dedupe by catalogue identity;
+        // cap 20.
+        var out: [Movie] = []
+        var seen = Set<String>()
+        for i in trending.indices {
+            guard let m = resolved[i], !m.slug.isEmpty,
+                  seen.insert(m.id).inserted else { continue }
+            out.append(m)
+            if out.count >= 20 { break }
+        }
+        trendingMovies = out
+    }
+
+    /// tmdbId → Movie over every list the PhimStore holds.
+    /// First carrier wins (lists are visited in rail/priority
+    /// order, merged first); vietnamAll covers the store's
+    /// derived vietnamSeries / vietnamSingle views.
+    private func catalogueByTmdbId() -> [String: Movie] {
+        var map: [String: Movie] = [:]
+        func add(_ movies: [Movie]) {
+            for m in movies where !m.tmdbId.isEmpty && map[m.tmdbId] == nil {
+                map[m.tmdbId] = m
+            }
+        }
+        add(phim.merged)
+        add(phim.kkNew)
+        add(phim.f4kNew)
+        add(phim.vsNew)
+        add(phim.tpNew)
+        add(phim.chieuRap)
+        add(phim.vietnamAll)
+        add(phim.kkSeries)
+        add(phim.kkMovies)
+        add(phim.kkAnime)
+        add(phim.f4kMovies)
+        add(phim.vsSeries)
+        add(phim.tpMovies)
+        add(phim.tpSeries)
+        for spec in PhimStore.genreSpec {
+            add(phim.genreLists[spec.slug] ?? [])
+        }
+        for spec in PhimStore.countrySpec {
+            add(phim.countryLists[spec.slug] ?? [])
+        }
+        return map
+    }
+
+    /// One trending title's fallback search across the
+    /// providers (priority order): a result carrying the
+    /// trending title's tmdbId wins outright; otherwise the
+    /// first result whose normalized name (or origin name)
+    /// equals the trending title's normalized name.
+    private func trendingSearchMatch(
+        for t: JoeTopShelfWriter.TrendingTitle
+    ) async -> Movie? {
+        let target = Providers.normalizeTitle(t.title)
+        guard !target.isEmpty else { return nil }
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(code, keyword: t.title)
+            else { continue }
+            if !t.tmdbId.isEmpty,
+               let byId = results.first(where: {
+                   $0.tmdbId == t.tmdbId
+                       && ($0.tmdbType.isEmpty || $0.tmdbType == t.type)
+               }) {
+                return byId
+            }
+            if let byName = results.first(where: {
+                Providers.normalizeTitle($0.name) == target
+                    || (!$0.originName.isEmpty
+                        && Providers.normalizeTitle($0.originName) == target)
+            }) {
+                return byName
+            }
+        }
+        return nil
     }
 
     // MARK: - Design A hero
@@ -1235,7 +1428,16 @@ struct JoePhimHome: View {
                            scope: String) -> some View {
         Rail(title: title) {
             ForEach(movies) { movie in
-                Button { nav.movie = MovieRoute(
+                Button {
+                    // IDEA 7a: opening a Following-rail card
+                    // clears its new-episode badge (the store's
+                    // baseline catches up). Guarded strictly by
+                    // scope — no other rail's tap path changes.
+                    if scope == "following" {
+                        FollowStore.shared.markSeen(provider: movie.provider,
+                                                    slug: movie.slug)
+                    }
+                    nav.movie = MovieRoute(
                     provider: movie.provider, slug: movie.slug,
                     name: movie.name, poster: movie.poster, year: movie.year) } label: {
                     PosterCard(

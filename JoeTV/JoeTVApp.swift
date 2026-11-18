@@ -443,6 +443,21 @@ struct JoeRootView: View {
             // is unavailable under the owner's signing).
             await JoeTopShelfWriter.refresh(watch: watch, phim: phim)
         }
+        .task {
+            // Idea 7: the app-open hooks (episode re-check +
+            // match-reminder revalidation — see appOpenHooks()
+            // below). A SEPARATE .task from the launch gate's
+            // above: it starts only once this root view has
+            // appeared, runs BESIDE the gate — never inside it,
+            // never awaited by it — and neither the gate's
+            // overlay nor the first paint waits on it. It
+            // fires once per app session: JoeRootView is
+            // created once by the WindowGroup and lives for
+            // the whole session, and a section switch only
+            // swaps its `content`, so this task does NOT
+            // re-run on a tab switch.
+            await appOpenHooks()
+        }
         .environment(\.joeTheme, theme)
         .environmentObject(nav)
         // CONSTRUCTION LAW (v2.0.8 — supersedes the v2.0.5 N4
@@ -617,6 +632,64 @@ struct JoeRootView: View {
                                preselectStreamId: q["stream"] ?? "")
         default:
             return
+        }
+    }
+
+    /// Idea 7 — the app-open hooks: fresh-data checks that
+    /// run ONLY when the app is opened (driven by the root
+    /// view's own .task in `body` above). There is no
+    /// background refresh anywhere in this feature: nothing
+    /// here runs while the app is closed or suspended, and
+    /// no timer re-runs it — the next check happens at the
+    /// next app open. Both halves are fail-soft: a dead
+    /// network leaves the stored follow / reminder state
+    /// exactly as it was.
+    private func appOpenHooks() async {
+        // (a) Episode re-check: one detail fetch per followed
+        // title, all in flight together in a task group; a
+        // failed fetch is silent (try?) and leaves that
+        // title's stored count untouched. The stores are
+        // @MainActor, so the snapshot and each apply hop back
+        // to the main actor; the network waits happen off it.
+        let followed = await MainActor.run { FollowStore.shared.followed }
+        if !followed.isEmpty {
+            await withTaskGroup(of: Void.self) { group in
+                for title in followed {
+                    group.addTask {
+                        guard let detail = try? await Providers.detail(
+                            title.provider, slug: title.slug)
+                        else { return }
+                        let count = FollowStore.episodeCount(
+                            from: detail.movie.episodeCurrent)
+                        await MainActor.run {
+                            FollowStore.shared.applyEpisodeCheck(
+                                provider: title.provider, slug: title.slug,
+                                currentEpisodes: count)
+                        }
+                    }
+                }
+            }
+        }
+        // (b) Match-reminder revalidation, after the episode
+        // checks: the fixture list comes from the SAME entry
+        // point the Thể Thao Torrent tab loads with
+        // (TorrentClient.fetchSportsEvents — the Nuvio →
+        // MediaFusion → StremVerse chain, first non-empty
+        // wins, fail-soft to an empty list). TorMeta carries
+        // no kickoff field, so a fixture's kickoff is read
+        // from its title with the target's own KickoffParser
+        // (the "HH:MM DD/MM" stamp); fixtures whose title
+        // has no parseable kickoff are skipped.
+        let result = await TorrentClient.fetchSportsEvents()
+        let matches: [(key: String, title: String, kickoff: Date)] =
+            result.metas.compactMap { meta in
+                guard let kickoff = KickoffParser.parse(from: meta.name)
+                else { return nil }
+                return (key: MatchReminderStore.matchKey(forTitle: meta.name),
+                        title: meta.name, kickoff: kickoff)
+            }
+        await MainActor.run {
+            MatchReminderStore.shared.revalidate(matches: matches)
         }
     }
 
