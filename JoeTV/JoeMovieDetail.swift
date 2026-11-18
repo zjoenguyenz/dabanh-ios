@@ -1546,9 +1546,9 @@ private struct JoeActorNameLabel: View {
     /// cells are now focusable buttons presenting the actor
     /// page — the house .joeCardButton() construction, with
     /// the cell's visuals byte-identical to the non-button
-    /// form they replace. (Design A's actorsLine stays a
-    /// plain text line: it is the A render's own presentation,
-    /// names only, with no per-member cell to press.)
+    /// form they replace. (Design A's actorsLine was a plain
+    /// text line until v2.0.28 (FIX4 fix 3): its names are
+    /// buttons in the line's own dress now — see actorsLine.)
     private func castRow(_ cast: [TMDBCastMember]) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Diễn viên")

@@ -1389,7 +1389,7 @@ private struct PlayerController: UIViewControllerRepresentable {
     /// transitions the director allows, so stale items from a
     /// previous attempt can never double-drive the machine (the
     /// view recreates the controller per attempt via .id()).
-    final class Coordinator {
+    final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         private let director: PlayDirector
         private var statusToken: NSKeyValueObservation?
         private var failToken: NSObjectProtocol?
@@ -1430,6 +1430,7 @@ private struct PlayerController: UIViewControllerRepresentable {
 
         init(director: PlayDirector) {
             self.director = director
+            super.init()
         }
 
         /// Idea 13 (v2.0.27): adopt the hosting controller —
@@ -1441,6 +1442,36 @@ private struct PlayerController: UIViewControllerRepresentable {
             viewController = controller
             infoController.title = "Thông tin"
             controller.customInfoViewControllers = [infoController]
+            // FIX4 (fix 9): this coordinator is the player
+            // controller's delegate so the Title View can be
+            // bound to the transport bar's visibility (the
+            // delegate callback below). The Title View starts
+            // INCLUDED — it belongs with the bar.
+            controller.delegate = self
+            controller.transportBarIncludesTitleView = true
+        }
+
+        /// FIX4 (fix 9): the Title View binding. AVKit renders
+        /// the film's title + poster — idea 13's
+        /// externalMetadata, set in refreshChrome — in a Title
+        /// View above the transport bar. On tvOS 27.2.1 the
+        /// owner observed the title still sitting on screen
+        /// after the bar auto-hid; his ruling: the title hides
+        /// WITH the bar and returns WITH the bar, never on its
+        /// own schedule. AVKit announces every transport-bar
+        /// visibility transition to its delegate (this is the
+        /// documented "responding to transport bar changes"
+        /// surface), and the Title View's inclusion follows
+        /// the announced state, so the two cannot drift
+        /// apart: bar coming up → title included; bar going
+        /// away → title excluded. No separate title timer
+        /// exists anywhere in this binding.
+        func playerViewController(
+            _ playerViewController: AVPlayerViewController,
+            willTransitionToVisibilityOfTransportBar visible: Bool,
+            with _: AVPlayerViewControllerAnimationCoordinator
+        ) {
+            playerViewController.transportBarIncludesTitleView = visible
         }
 
         /// The metadata title for an item: the film title,
@@ -1474,8 +1505,16 @@ private struct PlayerController: UIViewControllerRepresentable {
             artworkTask = nil
             if let posterURL = entry.posterURL {
                 artworkTask = Task { [weak self] in
-                    let fetched = try? await URLSession.shared.data(from: posterURL)
-                    guard let (data, _) = fetched, !data.isEmpty else { return }
+                    // FIX4 (HTTP consolidation): the poster
+                    // fetch rides the shared JoeHTTP pool like
+                    // every other data fetch — pre-fix it used
+                    // URLSession.shared, outside the pool,
+                    // outside the metrics and outside every
+                    // house timeout. Fail-soft exactly as
+                    // before (any error → no artwork).
+                    let data = try? await JoeHTTP.getData(
+                        posterURL.absoluteString, timeout: 15)
+                    guard let data, !data.isEmpty else { return }
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.player?.currentItem === item else { return }
                         let artItem = AVMutableMetadataItem()

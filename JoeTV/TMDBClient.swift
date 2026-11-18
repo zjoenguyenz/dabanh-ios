@@ -304,6 +304,38 @@ enum TMDBClient {
         return id.isEmpty ? nil : id
     }
 
+    /// The reverse bridge (v2.0.28, FIX4 fix 3 face c): a
+    /// torrent meta's id IS its IMDb id (the Cinemeta/Stremio
+    /// protocol id TorMeta carries), and TMDB's /find resolves
+    /// it straight back to the TMDB identity — the lookup the
+    /// torrent detail never made, which is why torrent titles
+    /// showed no cast at all. The caller's type picks the
+    /// preferred results array; the other is tried second, so
+    /// a movie/series mislabel cannot strand the lookup.
+    /// Returns the TMDB id + kind ("movie" / "tv"); fail-soft
+    /// nil on no key, a non-IMDb id, or no match.
+    static func findByImdb(_ imdbId: String, type: String)
+        async -> (tmdbId: String, type: String)? {
+        let key = apiKey
+        guard !key.isEmpty, imdbId.hasPrefix("tt") else { return nil }
+        guard let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/find/\(imdbId)?api_key=\(key)&external_source=imdb_id",
+            timeout: callTimeout)
+        else { return nil }
+        let arrays = (type == "series" || type == "tv")
+            ? ["tv_results", "movie_results"]
+            : ["movie_results", "tv_results"]
+        for arrayKey in arrays {
+            guard let first = JSON.arr(root, arrayKey)?.first
+            else { continue }
+            let id = JSON.int(first, "id")
+            if id > 0 {
+                return (String(id), arrayKey == "tv_results" ? "tv" : "movie")
+            }
+        }
+        return nil
+    }
+
     /// Strict identity search (v2.0.5 — the Android FIX5
     /// step-3 parity the tvOS ladder never had): find the
     /// film's TMDB entry by title when NO provider record

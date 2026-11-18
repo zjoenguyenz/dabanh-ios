@@ -531,6 +531,14 @@ struct JoeTorrentDetail: View {
     /// tracks.
     @State private var viSubtitleURL: URL?
     @State private var playerHolder: JoeMovieDetail.DirectorHolder?
+    /// v2.0.28 (FIX4 fix 3, face c): the TMDB cast for this
+    /// title — the torrent path never fetched it (TorMeta's
+    /// id is the Cinemeta/IMDb id and nothing bridged it to
+    /// TMDB), so torrent details showed no cast at all.
+    /// Filled by loadCast(); empty = the row simply never
+    /// renders, exactly like the Phim detail's fail-soft.
+    @State private var cast: [TMDBCastMember] = []
+    @State private var actorRoute: JoeActorRoute?
     @FocusState private var focusedRow: String?
 
     private var meta: TorMeta { route.meta }
@@ -552,6 +560,9 @@ struct JoeTorrentDetail: View {
             }
         }
         .task { await load() }
+        .fullScreenCover(item: $actorRoute) { route in
+            JoeActorPage(route: route)
+        }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
                           filmTitle: holder.title,
@@ -574,6 +585,10 @@ struct JoeTorrentDetail: View {
             // order and spacing are identical.
             LazyVStack(alignment: .leading, spacing: 32) {
                 hero
+                if !cast.isEmpty {
+                    torCastRow
+                        .focusSection()
+                }
                 if meta.type == "series" {
                     // v2.0.5 (N1, pair i): the episode block
                     // and the stream block are declared focus
@@ -691,6 +706,10 @@ struct JoeTorrentDetail: View {
                     Text(notice)
                         .font(.system(size: 25))
                         .foregroundStyle(.orange)
+                }
+                if !cast.isEmpty {
+                    torCastRow
+                        .focusSection()
                 }
                 if meta.type == "series" {
                     episodeSection
@@ -1074,6 +1093,10 @@ struct JoeTorrentDetail: View {
     // MARK: - Loading + playing
 
     private func load() async {
+        // v2.0.28 (FIX4 fix 3, face c): the cast fetch runs
+        // beside the videos/streams loads, never in front of
+        // them — the row appears when it lands.
+        Task { await loadCast() }
         if meta.type == "series" {
             do {
                 videos = try await TorrentClient.fetchVideos(
@@ -1091,6 +1114,95 @@ struct JoeTorrentDetail: View {
             }
         }
         await loadStreams()
+    }
+
+    /// v2.0.28 (FIX4 fix 3, face c): bridge this meta to its
+    /// TMDB identity and fetch the cast the Phim detail gets
+    /// from fetchCast. The meta's own id is tried first — for
+    /// Torrentio/MediaFusion metas it IS the IMDb id, and
+    /// TMDB's /find resolves it exactly (torrent titles are
+    /// mostly US films: the easiest identity case there is).
+    /// The strict title+year searchIdentity is the fallback
+    /// for metas whose id is not an IMDb id. Fail-soft: any
+    /// miss leaves cast empty and the detail unchanged.
+    private func loadCast() async {
+        var resolved: (tmdbId: String, type: String)?
+        if meta.id.hasPrefix("tt") {
+            resolved = await TMDBClient.findByImdb(meta.id,
+                                                   type: meta.type)
+        }
+        if resolved == nil {
+            resolved = await TMDBClient.searchIdentity(
+                name: meta.name, originName: meta.name,
+                year: meta.year)
+        }
+        guard let resolved else { return }
+        let members = await TMDBClient.fetchCast(
+            tmdbId: resolved.tmdbId, type: resolved.type)
+        if !members.isEmpty { cast = members }
+    }
+
+    /// The cast row for the torrent detail — the Phim
+    /// detail's castRow construction mirrored (circular
+    /// photo, name, character, the house card button), each
+    /// cell presenting the same actor page.
+    private var torCastRow: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Diễn viên")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text.opacity(0.9))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 24) {
+                    ForEach(cast) { member in
+                        Button {
+                            actorRoute = .tmdb(
+                                personId: member.id,
+                                name: member.name,
+                                photoURL: member.photoURL)
+                        } label: {
+                            VStack(spacing: 8) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.white.opacity(0.10))
+                                    if !member.photoURL.isEmpty,
+                                       let url = URL(string: member.photoURL) {
+                                        JoeRemoteImage(url: url,
+                                                       targetPixels: 240) {
+                                            Text(String(member.name.prefix(1)))
+                                                .font(.system(size: 38, weight: .bold))
+                                                .foregroundStyle(.white.opacity(0.8))
+                                        }
+                                    } else {
+                                        Text(String(member.name.prefix(1)))
+                                            .font(.system(size: 38, weight: .bold))
+                                            .foregroundStyle(.white.opacity(0.8))
+                                    }
+                                }
+                                .frame(width: 110, height: 110)
+                                .clipShape(Circle())
+                                .overlay(Circle().strokeBorder(
+                                    Color.white.opacity(0.14),
+                                    lineWidth: 1.2))
+                                Text(member.name)
+                                    .font(.system(size: 23, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                if !member.character.isEmpty {
+                                    Text(member.character)
+                                        .font(.system(size: 23))
+                                        .foregroundStyle(theme.meta)
+                                        .lineLimit(1)
+                                        .multilineTextAlignment(.center)
+                                }
+                            }
+                            .frame(width: 120)
+                        }
+                        .joeCardButton()
+                    }
+                }
+            }
+        }
     }
 
     private func loadStreams() async {

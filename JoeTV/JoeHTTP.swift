@@ -53,53 +53,113 @@ private final class JoeMetricsCollector: NSObject, URLSessionTaskDelegate {
 /// TV that is whatever the owner's Sing-box profile decides); there
 /// is no in-app tunnel on tvOS.
 ///
-/// CONVERGENCE (Team 6 census A21/D, 2026-11-15): every fetch now
-/// rides a dedicated session whose configuration carries
-/// timeoutIntervalForResource EQUAL to the call's timeout, so a
-/// call's TOTAL duration is bounded — not just the idle gap
-/// between packets. URLSession.shared (whose resource timeout is
-/// the platform default of days) bounded nothing end-to-end: a
-/// slow-drip peer could hold a "12 s" call open indefinitely.
-/// Sessions are cached per timeout value; the configuration
-/// still resolves to the shared URLCache, so poster caching is
-/// unchanged.
+/// CONVERGENCE (Team 6 census A21/D, 2026-11-15): every fetch
+/// carries a bound on its TOTAL duration, not just the idle
+/// gap between packets — URLSession.shared (whose resource
+/// timeout is the platform default of days) bounded nothing
+/// end-to-end, and a slow-drip peer could hold a "12 s" call
+/// open indefinitely. The 2026-11-15 form enforced the bound
+/// with one dedicated session per timeout value
+/// (timeoutIntervalForResource equal to the call's timeout).
+///
+/// FIX4 (HTTP consolidation — owner-approved build item,
+/// 2026-11-18): the per-timeout sessions are GONE. They each
+/// kept their own connection pool, so the same provider host
+/// was pooled once per timeout class (12/18/25/30…) and a
+/// connection warmed by a 12 s search leg could not be reused
+/// by the 25 s detail leg behind it — repeated fresh
+/// handshakes across the fetch paths, on the owner's own
+/// measurement the app's dominant start-latency cost. Every
+/// data fetch now rides ONE shared session (below): a single
+/// pool with keep-alive reuse across provider legs, TMDB,
+/// subtitles, SourceHealth budgets, the debrid API and the
+/// player artwork. The Team 6 total-duration bound survives
+/// exactly, enforced in fetch() instead of by session
+/// configuration: each fetch races its own deadline and the
+/// loser is cancelled (see fetch). The configuration still
+/// resolves to the shared URLCache, so poster caching is
+/// unchanged. (Images keep their own profile in
+/// JoeImagePipeline — see the FIX4 report's session
+/// inventory for why.)
 enum JoeHTTP {
     static let userAgent =
         "Mozilla/5.0 (Apple TV; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)"
 
-    private static let sessionLock = NSLock()
-    private static var sessions: [Int: URLSession] = [:]
-
-    /// The configured session for a call class: idle timeout AND
-    /// total (resource) timeout both equal the call's timeout.
-    static func session(timeout: TimeInterval) -> URLSession {
-        let key = Int(timeout.rounded())
-        sessionLock.lock()
-        defer { sessionLock.unlock() }
-        if let s = sessions[key] { return s }
+    /// The one shared data session (FIX4 consolidation):
+    /// the house per-host cap of 6 (v2.0.8 Phase 7's
+    /// deliberate choice, kept), waitsForConnectivity so a
+    /// fetch fired during a tunnel/network flap waits for
+    /// the route instead of failing instantly (always
+    /// bounded by the call's own deadline in fetch), and
+    /// session-level timeout envelopes that sit BEHIND the
+    /// per-call bounds fetch enforces — the request (idle)
+    /// ceiling matches the family's largest common class,
+    /// the resource ceiling is the family's outer backstop.
+    private static let sharedSession: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout
-        // v2.0.8 Phase 7: the per-host connection cap is set
-        // DELIBERATELY (T3 connection discipline) — 6 is the
-        // platform default, now an explicit choice for this
-        // catalogue+resolver session family instead of an
-        // inherited accident. (Images run their own profile in
-        // JoeImagePipeline.)
         config.httpMaximumConnectionsPerHost = 6
-        let s = URLSession(configuration: config)
-        sessions[key] = s
-        return s
-    }
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        return URLSession(configuration: config)
+    }()
 
-    /// Phase 0 (v2.0.8): the one fetch path — same sessions,
-    /// same requests, same throws as before, plus a per-task
-    /// delegate that collects URLSessionTaskMetrics and logs
-    /// the phases per host through PerfLog.
+    /// Phase 0 (v2.0.8): the one fetch path — same requests,
+    /// same throws as before, plus a per-task delegate that
+    /// collects URLSessionTaskMetrics and logs the phases
+    /// per host through PerfLog.
+    ///
+    /// FIX4: the call's timeout is applied to the request
+    /// centrally (its idle bound — data(for:) callers did
+    /// not all set it; the per-timeout session's config used
+    /// to supply it silently), and the fetch races the
+    /// shared-session task against the call's own deadline:
+    /// the first finisher decides — the data, the fetch's
+    /// own error, or the deadline's URLError.timedOut, the
+    /// same error the old resource timeout produced. The
+    /// loser is cancelled and DRAINED, so its error can
+    /// never escape over the winner's result; caller
+    /// cancellation cancels the group, and with it the
+    /// fetch, exactly as the direct call behaved (the
+    /// findAlternatives 12 s envelope depends on that).
     private static func fetch(_ request: URLRequest, timeout: TimeInterval) async throws -> (Data, URLResponse) {
+        var request = request
+        request.timeoutInterval = timeout
         let collector = JoeMetricsCollector()
         do {
-            let (data, response) = try await session(timeout: timeout).data(for: request, delegate: collector)
+            let (data, response) = try await withThrowingTaskGroup(
+                of: (Data, URLResponse).self
+            ) { group in
+                group.addTask {
+                    try await sharedSession.data(for: request, delegate: collector)
+                }
+                group.addTask {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                    throw URLError(.timedOut)
+                }
+                // The drain: next() yields the remaining
+                // child's value (loop), nil once no children
+                // remain (stop), or throws its error, which
+                // try? turns into the stop case. Both
+                // optionals are unwrapped deliberately — a
+                // single-level unwrap would spin forever on
+                // the no-children nil.
+                do {
+                    guard let first = try await group.next() else {
+                        throw URLError(.unknown)
+                    }
+                    group.cancelAll()
+                    while let pending = try? await group.next(),
+                          pending != nil {}
+                    return first
+                } catch {
+                    group.cancelAll()
+                    while let pending = try? await group.next(),
+                          pending != nil {}
+                    throw error
+                }
+            }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             PerfLog.http(host: request.url?.host ?? "?", status: status,
                          bytes: data.count, metrics: collector.metrics)
