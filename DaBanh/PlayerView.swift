@@ -42,9 +42,36 @@ import UIKit
 /// while playback is under way.
 struct PlayerView: View {
     @ObservedObject var session: MatchPlaySession
+    /// The fixture this playback was chosen from (1.21): its
+    /// cluster renders in the board-header slot above the waiting
+    /// slate (spec §2.4/§2.6) — the same MatchState the lists and
+    /// the link board show, never a second truth. Optional: the
+    /// pre-1.21 entry points (24/7 channels) pass nil.
+    var headerEntry: FixtureEntry? = nil
+    @EnvironmentObject private var store: PlaylistStore
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     @State private var switching = true
+
+    /// The header entry re-read with the freshest matched state.
+    private var liveHeaderEntry: FixtureEntry? {
+        guard var entry = headerEntry else { return nil }
+        entry.state = store.state(for: entry.channel)
+        entry.competition = LeagueClassifier.competition(
+            for: entry.channel, state: entry.state)
+        return entry
+    }
+
+    /// The board-header slot: the fixture's cluster, shown above
+    /// the waiting slate and on the no-signal slate.
+    @ViewBuilder
+    private var boardHeaderSlot: some View {
+        if let liveHeaderEntry {
+            BoardHeaderView(entry: liveHeaderEntry)
+                .padding(.horizontal, 16)
+                .padding(.top, 54)
+        }
+    }
 
     private var sources: [Channel] { session.sources }
 
@@ -65,7 +92,10 @@ struct PlayerView: View {
             Color.black.ignoresSafeArea()
 
             if settledExhausted {
-                noSignal
+                VStack {
+                    boardHeaderSlot
+                    noSignal
+                }
                 closeButton
             } else if let channel = current, channel.streamURL != nil {
                 LivePlayerSurface(channel: channel, onFail: advance, onReady: { switching = false }, onClose: { dismiss() })
@@ -99,6 +129,7 @@ struct PlayerView: View {
                 // re-renders onto it at the same index; when the
                 // session settles empty, settledExhausted takes over.
                 VStack {
+                    boardHeaderSlot
                     Spacer()
                     HStack {
                         Text(index == 0 ? "Đang tải…" : "Đang chuyển nguồn khác…")
@@ -118,6 +149,13 @@ struct PlayerView: View {
         }
         .onAppear {
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+        }
+        .task {
+            // The opened fixture is first in line for its FotMob
+            // incidents (spec §1.2, board-open upgrade).
+            if let headerEntry {
+                await store.liveStates.ensureDetails(for: headerEntry.channel)
+            }
         }
         .onDisappear {
             OrientationHelper.lock(.all, rotateTo: .portrait)

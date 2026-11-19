@@ -121,6 +121,31 @@ struct NuvioMeta: Sendable, Identifiable {
         if let background, !background.isEmpty { return URL(string: background) }
         return nil
     }
+
+    /// One poster-URL query parameter (`lg=`, `ch=`): the addon
+    /// stamps its competition and channel hints there, and the
+    /// two always agree with the description's League line when
+    /// both exist (spec §3.2 S2).
+    private func posterParam(_ name: String) -> String? {
+        guard let poster, let comps = URLComponents(string: poster),
+              let value = comps.queryItems?.first(where: { $0.name == name })?.value,
+              !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// The meta's competition string (S2 signal): the
+    /// description's "🏆 League:" line first, the poster's `lg=`
+    /// param as the twin source. Exact-match use only
+    /// (LeagueClassifier.competition(forAddonString:)) — the
+    /// generic "Football" value is no signal.
+    var competitionString: String? {
+        leagueLine ?? posterParam("lg")
+    }
+
+    /// The poster's `ch=` channel/quality hint (e.g. "HD |
+    /// Bundesliga") — the link board's EN row label when the meta
+    /// carries no competition string (spec §2.3b).
+    var channelHint: String? { posterParam("ch") }
 }
 
 /// The three tab sections, classified and ordered.
@@ -649,6 +674,78 @@ final class NuvioAddonStore: ObservableObject {
             needles.contains {
                 channel.displayName.localizedCaseInsensitiveContains($0)
             }
+        }
+    }
+
+    /// The addon events that BELONG to a mirror fixture — the
+    /// per-match English merge (spec §2.5 as measured by
+    /// BOARD-REDESIGN-PLAN Addendum 2, which is authoritative for
+    /// belonging; owner refinement 2026-11-19 13:53: per-match
+    /// only, fail closed, BLV Anh keeps everything else).
+    ///
+    /// A meta folds only when ALL of these hold:
+    /// - it is an event (releaseInfo LIVE or a kickoff time —
+    ///   24/7 channels never match, §2.5);
+    /// - it carries team1/team2 and a `released` instant
+    ///   (NuvioMeta.kickoff) — no instant, no fold (A2.6 #2/#3);
+    /// - its canonical pair key (MatchMatching — the A2.1 key)
+    ///   equals the fixture's;
+    /// - the instant's ICT calendar date equals the fixture's
+    ///   stamp date AND the instant is within the 3 h guard of
+    ///   the fixture's kickoff (A2.1: measured folds sit at
+    ///   Δ0/+5 min; the guard stops a same-pair same-date
+    ///   different match folding on date alone);
+    /// - cluster rule: `competing` carries the OTHER fixture
+    ///   entries sharing this pair + stamp date (spelling-split
+    ///   clusters are already one entry via FixtureGrouping's
+    ///   45-min chaining, so competing entries are distinct
+    ///   matches) — the event folds here only when no competing
+    ///   fixture is also inside the guard (exactly one candidate
+    ///   inside the guard, A2.1);
+    /// - marker asymmetry (A2.1): a women-marked event takes a
+    ///   women-marked fixture; an unmarked event folds into a
+    ///   marked fixture (or the reverse) only when it is the
+    ///   unique candidate for the pair + date — when marked and
+    ///   unmarked fixtures both claim the pair, an unmarked
+    ///   event is ambiguous and stays in BLV Anh.
+    ///
+    /// Anything short of the full rule set = not a link for this
+    /// match; the event remains in the BLV Anh tab untouched.
+    func matchedEvents(for channel: Channel, competing: [Channel]) -> [NuvioMeta] {
+        guard let fixtureKey = MatchMatching.pairKey(of: channel),
+              let fixtureKickoff = channel.kickoff else { return [] }
+        let fixtureDateKey = FixtureGrouping.stampDateKey(of: fixtureKickoff)
+        let fixtureMarked = MatchMatching.fixtureIsWomenMarked(channel)
+        let competingMarked = competing.contains {
+            MatchMatching.fixtureIsWomenMarked($0)
+        }
+        let competingUnmarked = competing.contains {
+            !MatchMatching.fixtureIsWomenMarked($0)
+        }
+        return (liveEvents + upcomingEvents).filter { meta in
+            guard meta.kind != .channel,
+                  let team1 = meta.team1Name, let team2 = meta.team2Name,
+                  let metaKey = MatchMatching.pairKey(team1: team1, team2: team2),
+                  metaKey == fixtureKey,
+                  let metaKickoff = meta.kickoff,
+                  FixtureGrouping.stampDateKey(of: metaKickoff) == fixtureDateKey
+            else { return false }
+            // Cluster rule: another fixture inside the guard too
+            // means the event cannot be assigned — fail closed.
+            let competingInsideGuard = competing.contains { other in
+                other.kickoff.map {
+                    abs(metaKickoff.timeIntervalSince($0)) <= 3 * 3600
+                } ?? false
+            }
+            if competingInsideGuard { return false }
+            guard abs(metaKickoff.timeIntervalSince(fixtureKickoff)) <= 3 * 3600
+            else { return false }
+            // Marker asymmetry.
+            let eventMarked = MatchMatching.hasWomenMarker(rawName: team1)
+                || MatchMatching.hasWomenMarker(rawName: team2)
+            if eventMarked { return fixtureMarked }
+            if fixtureMarked { return !competingUnmarked }
+            return !competingMarked
         }
     }
 

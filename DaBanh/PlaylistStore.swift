@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Playlist loading, mirroring the Android app's behaviour:
@@ -53,6 +54,21 @@ final class PlaylistStore: ObservableObject {
 
     @Published private(set) var channels: [Channel] = []
     @Published private(set) var hotChannels: [Channel] = []
+
+    /// The live-state layer (1.21, spec §1): ESPN > FotMob >
+    /// LiveScore matched states behind the scoreboard boards.
+    /// Owned here so its lifecycle follows the playlist's; its
+    /// changes are forwarded into this store's objectWillChange,
+    /// so every view observing the playlist re-renders when a
+    /// state lands (the poll is 60 s while anything is live).
+    let liveStates = MatchStateStore()
+    private var stateForwarding: AnyCancellable?
+
+    init() {
+        stateForwarding = liveStates.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
 
     /// Unfiltered lists as parsed. The published lists above are these
     /// minus proven-dead links and minus .flv entries (AVPlayer cannot
@@ -133,13 +149,54 @@ final class PlaylistStore: ObservableObject {
         var seen = Set<String>()
         var live: [Channel] = []
         for channel in channels + hotChannels {
-            guard LeagueClassifier.bucket(of: channel, now: now) == 0,
+            guard effectiveBucket(of: channel, now: now) == 0,
                   !LeagueClassifier.isEN(channel) else { continue }
             if seen.insert(channel.url).inserted {
                 live.append(channel)
             }
         }
         return LeagueClassifier.sorted(live)
+    }
+
+    // MARK: - Live states + board model (1.21)
+
+    /// The matched state bound to a channel's fixture, if any.
+    func state(for channel: Channel) -> MatchState? {
+        liveStates.state(for: channel)
+    }
+
+    /// The bucket a channel effectively sits in: the matched
+    /// state wins over the wall-clock window (spec §1.4 — an FT
+    /// fixture leaves the live lists at the next poll).
+    func effectiveBucket(of channel: Channel, now: Date = Date()) -> Int {
+        LeagueClassifier.bucket(of: channel, now: now, state: liveStates.state(for: channel))
+    }
+
+    /// Fixture entries with their matched state and competition
+    /// attached — the board model every 1.21 list renders from.
+    func entries(for channels: [Channel]) -> [FixtureEntry] {
+        FixtureEntry.group(channels).map { entry in
+            var entry = entry
+            entry.state = liveStates.state(for: entry.channel)
+            entry.competition = LeagueClassifier.competition(
+                for: entry.channel, state: entry.state)
+            return entry
+        }
+    }
+
+    /// Every fixture entry of the main list (Hot listings ride the
+    /// same parse), for the cups tab: the entries whose
+    /// competition is a European cup (S1/S2-identified only).
+    var cupEntries: [FixtureEntry] {
+        entries(for: channels).filter { $0.competition?.isCup == true }
+    }
+
+    /// The player's ladder rotated to a board-chosen row (spec
+    /// §2.3a): the chosen source first, the rest of the fixture's
+    /// ladder behind it in its usual order.
+    func rotatedSources(for entry: FixtureEntry, chosen: Channel) -> [Channel] {
+        let ladder = sources(for: entry.channel)
+        return [chosen] + ladder.filter { $0.url != chosen.url }
     }
 
     // MARK: - Lifecycle
@@ -149,6 +206,7 @@ final class PlaylistStore: ObservableObject {
     func start() async {
         loadCache()
         scheduleValidation()
+        liveStates.start()
         await refresh()
         // Crest coverage updates ride the same GitHub mirror as the
         // playlist: fetch once per launch, swap in if fresher.
@@ -248,6 +306,9 @@ final class PlaylistStore: ObservableObject {
         }
         pickInitialTabIfNeeded()
         scheduleValidation()
+        // The state layer rides the playlist refresh (spec §1.6):
+        // a full sweep here, the store's own loop polls live.
+        Task { await liveStates.refreshNow() }
     }
 
     /// One playlist fetch + validation: the text must decode and parse
@@ -310,6 +371,16 @@ final class PlaylistStore: ObservableObject {
     private func publishFiltered() {
         channels = LeagueClassifier.sorted(rawChannels.filter(isDisplayable))
         hotChannels = LeagueClassifier.sorted(rawHotChannels.filter(isDisplayable))
+        // Cadence hint for the state loop + the on-demand FotMob
+        // incidents for live fixtures ESPN missed (capped inside).
+        let now = Date()
+        let liveOnes = (channels + hotChannels).filter {
+            LeagueClassifier.bucket(of: $0, now: now) == 0
+        }
+        liveStates.liveHint = !liveOnes.isEmpty || liveStates.hasLiveState
+        if !liveOnes.isEmpty {
+            Task { await liveStates.upgradeDetails(for: liveOnes) }
+        }
     }
 
     private func isDisplayable(_ ch: Channel) -> Bool {
