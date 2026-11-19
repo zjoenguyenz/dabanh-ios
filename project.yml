@@ -59,15 +59,15 @@ targets:
         # This target's own settings pair (from 1.18): it previously
         # inherited the project base (1.5/6), which never matched
         # its info.properties pair — the pair the device shows.
-        MARKETING_VERSION: "1.21"
-        CURRENT_PROJECT_VERSION: "22"
+        MARKETING_VERSION: "1.22"
+        CURRENT_PROJECT_VERSION: "23"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.21"
-        CFBundleVersion: "22"
+        CFBundleShortVersionString: "1.22"
+        CFBundleVersion: "23"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio

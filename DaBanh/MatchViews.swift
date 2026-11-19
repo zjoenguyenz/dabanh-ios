@@ -867,6 +867,15 @@ struct BoardHeaderView: View {
 /// never faked, and 24/7 channels are never fixture links).
 /// A row tap plays that row; the caller rotates the ladder /
 /// resolves the meta.
+///
+/// In-player mode (1.22, the Đổi nguồn overlay): the same board
+/// presented from inside the player. The callbacks then mean
+/// "switch to this row" (the player resolves the switch), and
+/// the highlight marks the row carrying the stream now playing
+/// — a Vietnamese row by channel URL, an English row by meta
+/// id, never by list position: a session's ladder is the
+/// board's ladder rotated, so position means nothing — instead
+/// of the list flow's index-0 "MẶC ĐỊNH".
 struct MatchBoardView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.dismiss) private var dismiss
@@ -874,6 +883,11 @@ struct MatchBoardView: View {
     let enMetas: [NuvioMeta]
     let onPlayVN: (Channel) -> Void
     let onPlayEN: (NuvioMeta) -> Void
+    /// In-player mode flag + the playing row's identity (see the
+    /// type doc). The list flow leaves all three unset.
+    var inPlayerMode: Bool = false
+    var playingChannelURL: String? = nil
+    var playingENMetaID: String? = nil
 
     /// The entry re-read with the freshest state: the sheet may
     /// sit open across a poll.
@@ -909,12 +923,17 @@ struct MatchBoardView: View {
                     let ladder = store.sources(for: entry.channel)
                     VStack(spacing: 8) {
                         ForEach(Array(ladder.enumerated()), id: \.element.id) { index, channel in
+                            let isPlaying = inPlayerMode
+                                && channel.url == playingChannelURL
                             Button {
                                 onPlayVN(channel)
                             } label: {
                                 boardRow(
                                     title: MatchTitle.clean(channel.title),
-                                    highlighted: index == 0)
+                                    highlighted: inPlayerMode ? isPlaying : index == 0,
+                                    highlightTag: inPlayerMode
+                                        ? (isPlaying ? "ĐANG PHÁT" : nil)
+                                        : (index == 0 ? "MẶC ĐỊNH" : nil))
                             }
                             .buttonStyle(.plain)
                         }
@@ -924,13 +943,16 @@ struct MatchBoardView: View {
                         sectionTitle("LINK TIẾNG ANH · BLV ANH")
                         VStack(spacing: 8) {
                             ForEach(enMetas) { meta in
+                                let isPlaying = inPlayerMode
+                                    && meta.id == playingENMetaID
                                 Button {
                                     onPlayEN(meta)
                                 } label: {
                                     boardRow(
                                         title: meta.competitionString ?? meta.channelHint ?? meta.displayName,
                                         subtitle: meta.competitionString != nil ? meta.displayName : nil,
-                                        highlighted: false)
+                                        highlighted: isPlaying,
+                                        highlightTag: isPlaying ? "ĐANG PHÁT" : nil)
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -956,7 +978,8 @@ struct MatchBoardView: View {
     }
 
     private func boardRow(title: String, subtitle: String? = nil,
-                          highlighted: Bool) -> some View {
+                          highlighted: Bool,
+                          highlightTag: String? = nil) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "play.circle.fill")
                 .font(.system(size: 20))
@@ -975,8 +998,8 @@ struct MatchBoardView: View {
                 }
             }
             Spacer(minLength: 0)
-            if highlighted {
-                Text("MẶC ĐỊNH")
+            if highlighted, let highlightTag {
+                Text(highlightTag)
                     .font(.caption2.bold())
                     .foregroundStyle(BoardPalette.sky)
             }

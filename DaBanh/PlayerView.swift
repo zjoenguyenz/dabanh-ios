@@ -40,6 +40,14 @@ import UIKit
 /// the first source this page plays is already proven alive from
 /// this phone, and sources verified later append to the ladder
 /// while playback is under way.
+///
+/// Đổi nguồn (1.22): a fixture playback also carries a source
+/// switch in the surface's control layer — the fixture's link
+/// board as an overlay, the playing row marked; a Vietnamese
+/// pick switches in place inside this session, an English pick
+/// (a different session, vended by the addon store) cover-swaps
+/// through the host. Design: screen 4 of the owner-approved
+/// portrait preview; placement per the 1.21 portrait audit §5.
 struct PlayerView: View {
     @ObservedObject var session: MatchPlaySession
     /// The fixture this playback was chosen from (1.21): its
@@ -48,10 +56,32 @@ struct PlayerView: View {
     /// the link board show, never a second truth. Optional: the
     /// pre-1.21 entry points (24/7 channels) pass nil.
     var headerEntry: FixtureEntry? = nil
+    /// The fixture's folded English links (1.22), handed in by
+    /// the host exactly as the link board receives them — the
+    /// Đổi nguồn overlay's EN section. Empty when the fixture
+    /// matched no English event (the section is then omitted,
+    /// like the board's). Values, not the addon store itself:
+    /// the host stays the store's single owner.
+    var enMetas: [NuvioMeta] = []
+    /// When this player IS an English (addon) session, the meta
+    /// it is playing — the overlay marks that EN row "ĐANG
+    /// PHÁT". Nil for a playlist session, whose playing row is
+    /// marked by channel URL instead.
+    var currentENMetaID: String? = nil
+    /// Cover-swap requests for the switches this session cannot
+    /// serve in place: an English pick (a different session),
+    /// or a Vietnamese pick whose link this session never
+    /// published. The host dismisses this cover and presents
+    /// the other — the board's own dismissal-deferred pattern.
+    var onSwitchEN: ((NuvioMeta) -> Void)? = nil
+    var onSwitchVN: ((Channel) -> Void)? = nil
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     @State private var switching = true
+    /// The Đổi nguồn overlay (the fixture's link board in its
+    /// in-player mode) is up over the playing surface.
+    @State private var sourceBoardPresented = false
 
     /// The header entry re-read with the freshest matched state.
     private var liveHeaderEntry: FixtureEntry? {
@@ -98,7 +128,12 @@ struct PlayerView: View {
                 }
                 closeButton
             } else if let channel = current, channel.streamURL != nil {
-                LivePlayerSurface(channel: channel, onFail: advance, onReady: { switching = false }, onClose: { dismiss() })
+                LivePlayerSurface(
+                    channel: channel, onFail: advance,
+                    onReady: { switching = false }, onClose: { dismiss() },
+                    showsSourceSwitch: headerEntry != nil,
+                    onSourceSwitch: { sourceBoardPresented = true },
+                    pipSuppressed: sourceBoardPresented)
                     .id(index)
                     .ignoresSafeArea()
                 if switching {
@@ -157,9 +192,59 @@ struct PlayerView: View {
                 await store.liveStates.ensureDetails(for: headerEntry.channel)
             }
         }
+        .sheet(isPresented: $sourceBoardPresented) {
+            // The Đổi nguồn overlay: the fixture's own link
+            // board in its in-player mode — same rows, same
+            // arrangement, the playing row marked. Its row
+            // callbacks are the switches below, never a fresh
+            // entry into the player.
+            if let liveHeaderEntry {
+                MatchBoardView(
+                    entry: liveHeaderEntry,
+                    enMetas: enMetas,
+                    onPlayVN: switchToVN,
+                    onPlayEN: switchToEN,
+                    inPlayerMode: true,
+                    playingChannelURL: current?.url,
+                    playingENMetaID: currentENMetaID)
+            }
+        }
         .onDisappear {
             OrientationHelper.lock(.all, rotateTo: .portrait)
         }
+    }
+
+    /// Đổi nguồn to a Vietnamese row: an in-place index set
+    /// when this session carries the link — matched by URL,
+    /// never by position (the session's ladder is the board's
+    /// ladder rotated, and a published entry may be a
+    /// Referer-repaired copy of the row's channel; the URL is
+    /// the identity that survives both). Playback continues in
+    /// the same session. A row this session never published
+    /// (verified dead, or not published yet) has no position to
+    /// set — the host re-presents a fresh session rotated to
+    /// it, the board's own entry path.
+    private func switchToVN(_ channel: Channel) {
+        sourceBoardPresented = false
+        if let position = session.sources.firstIndex(where: { $0.url == channel.url }) {
+            if position != index {
+                index = position
+                switching = true
+            }
+        } else {
+            onSwitchVN?(channel)
+        }
+    }
+
+    /// Đổi nguồn to an English row: the meta lives in a
+    /// different session vended by the addon store, so the
+    /// switch is the host's cover swap — except the meta
+    /// already playing, which is a no-op beyond closing the
+    /// overlay.
+    private func switchToEN(_ meta: NuvioMeta) {
+        sourceBoardPresented = false
+        guard meta.id != currentENMetaID else { return }
+        onSwitchEN?(meta)
     }
 
     /// The slate's own exit (no player surface exists there).
@@ -214,6 +299,14 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
     let onFail: () -> Void
     let onReady: () -> Void
     let onClose: () -> Void
+    /// Đổi nguồn (1.22): whether the surface shows the switch
+    /// button in its control layer (fixture playbacks only —
+    /// the page passes headerEntry != nil) and what a tap fires.
+    var showsSourceSwitch: Bool = false
+    var onSourceSwitch: () -> Void = {}
+    /// While the switch overlay is up, auto-PiP is suppressed
+    /// so the picture cannot leave inline under the board.
+    var pipSuppressed: Bool = false
 
     func makeUIViewController(context: Context) -> LivePlayerViewController {
         let controller = LivePlayerViewController()
@@ -221,10 +314,15 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
         controller.onFail = onFail
         controller.onReady = onReady
         controller.onClose = onClose
+        controller.showsSourceSwitch = showsSourceSwitch
+        controller.onSourceSwitch = onSourceSwitch
+        controller.pipSuppressed = pipSuppressed
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: LivePlayerViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: LivePlayerViewController, context: Context) {
+        uiViewController.setPIPSuppressed(pipSuppressed)
+    }
 
     static func dismantleUIViewController(_ uiViewController: LivePlayerViewController, coordinator: ()) {
         uiViewController.teardown()
@@ -254,10 +352,18 @@ final class LivePlayerViewController: UIViewController {
     var onFail: (() -> Void)?
     var onReady: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Đổi nguồn (1.22), vended by the surface like the other
+    /// callbacks: whether the switch button joins the control
+    /// layer, and what a tap fires. pipSuppressed is re-applied
+    /// by the representable on every update (setPIPSuppressed).
+    var showsSourceSwitch = false
+    var onSourceSwitch: (() -> Void)?
+    var pipSuppressed = false
 
     private let videoView = PlayerLayerView()
     private let controlsView = UIView()
     private let closeButton = UIButton(type: .system)
+    private let sourceSwitchButton = UIButton(type: .system)
     private let titleLabel = UILabel()
     private let playPauseButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .large)
@@ -335,6 +441,18 @@ final class LivePlayerViewController: UIViewController {
         roundButton(closeButton, "xmark", #selector(closeTapped))
         controlsView.addSubview(closeButton)
 
+        // The Đổi nguồn button (1.22): top-right — the one zone
+        // the control map leaves free — in the close button's
+        // exact chrome, inside controlsView so it inherits the
+        // 3.5 s fade and the tap-to-show behaviour. Only a
+        // fixture playback has a board to switch among; the
+        // surface is told via showsSourceSwitch.
+        if showsSourceSwitch {
+            roundButton(sourceSwitchButton, "arrow.triangle.2.circlepath", #selector(sourceSwitchTapped))
+            sourceSwitchButton.accessibilityLabel = "Đổi nguồn"
+            controlsView.addSubview(sourceSwitchButton)
+        }
+
         titleLabel.text = MatchTitle.clean(channel.title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.textColor = .white
@@ -385,7 +503,6 @@ final class LivePlayerViewController: UIViewController {
             closeButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             titleLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             titleLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             playPauseButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             playPauseButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
@@ -393,6 +510,17 @@ final class LivePlayerViewController: UIViewController {
             bottomRow.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             bottomRow.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
         ])
+        if showsSourceSwitch {
+            // The title truncates before the switch button,
+            // never under it.
+            NSLayoutConstraint.activate([
+                sourceSwitchButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+                sourceSwitchButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: sourceSwitchButton.leadingAnchor, constant: -12),
+            ])
+        } else {
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16).isActive = true
+        }
 
         spinner.color = .white
         spinner.translatesAutoresizingMaskIntoConstraints = false
@@ -411,7 +539,7 @@ final class LivePlayerViewController: UIViewController {
         if AVPictureInPictureController.isPictureInPictureSupported() {
             pipController = AVPictureInPictureController(playerLayer: videoView.playerLayer)
             pipController?.delegate = self
-            pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = !pipSuppressed
         }
     }
 
@@ -472,6 +600,20 @@ final class LivePlayerViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func closeTapped() { onClose?() }
+
+    @objc private func sourceSwitchTapped() {
+        onSourceSwitch?()
+        showControls()
+    }
+
+    /// Auto-PiP suppression (1.22): while the Đổi nguồn overlay
+    /// is up, the picture must not leave inline under the board.
+    /// The representable re-applies this on every update, so it
+    /// tracks the overlay's presentation exactly.
+    func setPIPSuppressed(_ suppressed: Bool) {
+        pipSuppressed = suppressed
+        pipController?.canStartPictureInPictureAutomaticallyFromInline = !suppressed
+    }
 
     @objc private func togglePlayPause() {
         guard let player else { return }

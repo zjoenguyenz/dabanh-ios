@@ -33,6 +33,13 @@ struct ContentView: View {
     /// never races the sheet's dismissal.
     @State private var boardEntry: FixtureEntry?
     @State private var pendingPlay: (() -> Void)?
+    /// An in-player Đổi nguồn cover swap (1.22): the live
+    /// player's pick of a link its own session cannot serve (an
+    /// English meta, or a Vietnamese row it never published)
+    /// records the presentation here and dismisses its cover;
+    /// the cover's onDismiss runs it — the pendingPlay pattern,
+    /// cover to cover, so the two covers never race.
+    @State private var pendingCoverSwap: (() -> Void)?
     /// The fixture the current player session was chosen from —
     /// the player's board-header slot renders its cluster.
     @State private var playerEntry: FixtureEntry?
@@ -77,6 +84,45 @@ struct ContentView: View {
     private func enMetas(for entry: FixtureEntry) -> [NuvioMeta] {
         nuvio.matchedEvents(for: entry.channel,
                             competing: competingChannels(for: entry))
+    }
+
+    /// A cover swap deferred to the live cover's onDismiss:
+    /// record what to present, then dismiss whichever cover is
+    /// up; its onDismiss runs the presentation (see the covers
+    /// in body). Used only by the in-player Đổi nguồn picks
+    /// below — a normal close leaves pendingCoverSwap nil.
+    private func requestCoverSwap(_ present: @escaping () -> Void) {
+        pendingCoverSwap = present
+        if selectedChannel != nil {
+            selectedChannel = nil
+        } else if selectedAddon != nil {
+            selectedAddon = nil
+        }
+    }
+
+    /// Đổi nguồn pick of an English row, from either player:
+    /// swap covers to the addon session for the meta. The
+    /// fixture stays playerEntry — the swapped-to player is the
+    /// same match, so its overlay keeps the same board.
+    private func swapToENMeta(_ meta: NuvioMeta) {
+        requestCoverSwap {
+            selectedAddonSession = nuvio.session(for: meta)
+            selectedAddon = meta
+        }
+    }
+
+    /// Đổi nguồn pick of a Vietnamese row the live session
+    /// cannot serve in place (never published by it, or the
+    /// pick was made from an English session): swap covers to
+    /// a fresh session rotated to the chosen row — the link
+    /// board's own entry path.
+    private func swapToVNRow(_ channel: Channel) {
+        guard let entry = playerEntry else { return }
+        requestCoverSwap {
+            selectedSession = ResolveHub.shared.session(
+                for: store.rotatedSources(for: entry, chosen: channel))
+            selectedChannel = channel
+        }
     }
 
     var body: some View {
@@ -130,21 +176,38 @@ struct ContentView: View {
                 Task { await nuvio.loadIfNeeded() }
             }
         }
-        .fullScreenCover(item: $selectedChannel, onDismiss: { selectedSession = nil }) { _ in
+        .fullScreenCover(item: $selectedChannel, onDismiss: {
+            selectedSession = nil
+            pendingCoverSwap?()
+            pendingCoverSwap = nil
+        }) { _ in
             // The session was captured at tap time (see the tap
             // sites); the cover never calls the hub itself, so a
             // re-evaluation here cannot swap the live player's
             // session out from under it.
             if let selectedSession {
-                PlayerView(session: selectedSession, headerEntry: playerEntry)
+                PlayerView(
+                    session: selectedSession, headerEntry: playerEntry,
+                    enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
+                    onSwitchEN: swapToENMeta,
+                    onSwitchVN: swapToVNRow)
             }
         }
-        .fullScreenCover(item: $selectedAddon, onDismiss: { selectedAddonSession = nil }) { _ in
+        .fullScreenCover(item: $selectedAddon, onDismiss: {
+            selectedAddonSession = nil
+            pendingCoverSwap?()
+            pendingCoverSwap = nil
+        }) { _ in
             // Same tap-time capture as the playlist cover above:
             // the addon store vended the session at the tap; the
             // cover only presents it.
             if let selectedAddonSession {
-                PlayerView(session: selectedAddonSession, headerEntry: playerEntry)
+                PlayerView(
+                    session: selectedAddonSession, headerEntry: playerEntry,
+                    enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
+                    currentENMetaID: selectedAddon?.id,
+                    onSwitchEN: swapToENMeta,
+                    onSwitchVN: swapToVNRow)
             }
         }
         .sheet(item: $boardEntry, onDismiss: {
