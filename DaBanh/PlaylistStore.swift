@@ -56,7 +56,7 @@ final class PlaylistStore: ObservableObject {
     @Published private(set) var hotChannels: [Channel] = []
 
     /// The live-state layer (1.21, spec §1): ESPN > FotMob >
-    /// LiveScore matched states behind the scoreboard boards.
+    /// Flashscore > LiveScore matched states behind the boards.
     /// Owned here so its lifecycle follows the playlist's; its
     /// changes are forwarded into this store's objectWillChange,
     /// so every view observing the playlist re-renders when a

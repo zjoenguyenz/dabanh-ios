@@ -3,7 +3,8 @@ import Foundation
 /// The live cluster for one fixture (Đá Banh 1.21, scoreboard
 /// redesign — DABANH-SCOREBOARD-SPEC §1): score + true
 /// minute/status + goal scorers + cards, from the layered sources
-/// ESPN (primary) > FotMob > LiveScore > bounded computed clock.
+/// ESPN (primary) > FotMob > Flashscore > LiveScore > bounded
+/// computed clock.
 /// A state is always ONE source's whole truth: layers never merge
 /// fields across sources (a score from one and scorers from
 /// another can disagree by a minute), so precedence replaces
@@ -25,6 +26,7 @@ enum MatchStatus: Sendable, Equatable {
 enum MatchSource: Sendable, Equatable {
     case espn
     case fotmob
+    case flashscore
     case livescore
 }
 
@@ -248,6 +250,10 @@ enum MatchMatching {
         "servette chenois": "servette",
         "servette geneve": "servette",
         "vitoria ba": "vitoria",
+        "rb bragantino": "bragantino",
+        "red bull bragantino": "bragantino",
+        "bragantino sp": "bragantino",
+        "vitoria salvador ba": "vitoria",
         "koge": "hb koge",
         "anh": "england",
         "phap": "france",
@@ -376,7 +382,10 @@ enum BoundedClock {
     static func text(kickoff: Date, now: Date = Date()) -> String {
         let elapsed = Int(now.timeIntervalSince(kickoff) / 60)
         if elapsed <= 45 { return "\(max(1, elapsed))'" }
-        if elapsed <= 60 { return "HT" }
+        // 46–60 is first-half added time, NOT half-time: a source
+        // must report HT for the badge to say HT (RC5, 2026-11-19).
+        // Rendered in ESPN's convention ("45'+1'").
+        if elapsed <= 60 { return "45'+\(elapsed - 45)'" }
         if elapsed > 100 { return "90+'" }
         return "\(elapsed - 15)'"
     }
@@ -440,6 +449,7 @@ private struct FotMobMatchDTO: Decodable {
     let home: FotMobTeamDTO?
     let away: FotMobTeamDTO?
     let status: FotMobStatusDTO?
+    let utcTime: String?
 }
 private struct FotMobTeamDTO: Decodable { let name: String? }
 private struct FotMobStatusDTO: Decodable {
@@ -487,7 +497,7 @@ private struct LSTeamDTO: Decodable { let Nm: String? }
 
 enum MatchStateClient {
 
-    /// The ESPN slug table (spec §1.2/§3/§4): the 13 spec slugs,
+    /// The ESPN slug table (spec §1.2/§3/§4): the spec slugs,
     /// plus the women's Champions League and UEFA World Cup
     /// qualifying, whose fixtures ride the Hot/Trực tiếp lists.
     /// Adding a competition = one row here.
@@ -507,6 +517,16 @@ enum MatchStateClient {
         ("uefa.europa.conf", .cup(.conference, women: false)),
         ("uefa.womens.champions", .cup(.champions, women: true)),
         ("fifa.worldq.uefa", .other(label: "Vòng loại World Cup")),
+        // Brazil Série A (2026-11-19): CompetitionID has no Brazil
+        // case — its league ranks are the five European countries
+        // only — and Brazilian fixtures are NOT playlist-bound to a
+        // country tab (they keep their classifier home, rank 9 /
+        // "Khác"). The settled design had Brazil riding FotMob
+        // only; ESPN's bra.1 scoreboard carries full incidents, so
+        // it joins as a state layer under the same `.other` label
+        // the FotMob map stamps for ("Série A", "BRA") — a label
+        // only, never a tab filing.
+        ("bra.1", .other(label: "Serie A Brazil")),
     ]
 
     private static func makeSession() -> URLSession {
@@ -516,10 +536,14 @@ enum MatchStateClient {
         return URLSession(configuration: config)
     }
 
-    private static func get(_ url: URL, session: URLSession) async -> Data? {
+    private static func get(_ url: URL, session: URLSession,
+                            extraHeaders: [String: String] = [:]) async -> Data? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        for (field, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse,
@@ -542,6 +566,42 @@ enum MatchStateClient {
     static func ictDateParam(_ date: Date) -> String {
         let c = ictCalendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// "yyyyMMdd" in UTC — the calendar FotMob files its day feed
+    /// under (RC1, 2026-11-19).
+    static func utcDateParam(_ date: Date) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        let c = cal.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// "yyyyMMdd" in the DEVICE's own timezone (owner ruling
+    /// 2026-11-19 17:26 CST: every app runs on Oklahoma time; only
+    /// iOS varies, following the device's timezone/GPS location).
+    /// `TimeZone.current` is the device zone — never a hardcoded
+    /// ICT clock for "today" on this platform.
+    static func localDateParam(_ date: Date) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        let c = cal.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// Inverse of the date parameters above: 00:00 UTC on the
+    /// calendar day a "yyyyMMdd" parameter names. `stampDateKey`
+    /// reads that instant back in ICT (07:00 the same day), so it
+    /// stamps to the parameter's own calendar day. Used ONLY as
+    /// the FotMob fallback date basis — never the fetch instant.
+    static func dateParamDayStartUTC(_ param: String) -> Date? {
+        guard param.count == 8,
+              let year = Int(param.prefix(4)),
+              let month = Int(param.dropFirst(4).prefix(2)),
+              let day = Int(param.suffix(2)) else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        return cal.date(from: DateComponents(year: year, month: month, day: day))
     }
 
     // MARK: ESPN
@@ -673,6 +733,7 @@ enum MatchStateClient {
         case ("2. Bundesliga", "GER"): return .league(rank: 5, lower: true)
         case ("Ligue 1", "FRA"): return .league(rank: 4, lower: false)
         case ("Ligue 2", "FRA"): return .league(rank: 4, lower: true)
+        case ("Série A", "BRA"): return .other(label: "Serie A Brazil")
         case ("Champions League", "INT"): return .cup(.champions, women: false)
         case ("Europa League", "INT"): return .cup(.europa, women: false)
         case ("Conference League", "INT"): return .cup(.conference, women: false)
@@ -680,19 +741,65 @@ enum MatchStateClient {
         }
     }
 
-    /// The day feed for today ICT: score + true minute for
+    /// The day feeds covering today: score + true minute for
     /// everything ESPN does not carry; no incidents (those come
     /// from matchDetails, on demand only).
+    ///
+    /// RC1 (2026-11-19, master fault): FotMob files matches under
+    /// the UTC date, but the old code fetched only the ICT date —
+    /// ICT is a day ahead during US-evening hours, so the whole
+    /// layer was silently empty exactly when the owner watches.
+    /// The fetch now covers BOTH the UTC filing date AND the
+    /// device-local date (owner timezone ruling 2026-11-19 17:26:
+    /// iOS follows the device's own timezone), deduped when they
+    /// coincide, and merges the feeds deduped by match id (pair
+    /// key as fallback). Each state's `dateKey` is derived from
+    /// the match's own `utcTime` through `stampDateKey` — the
+    /// playlist's ICT stamp convention, which binding keys
+    /// legitimately keep — never from "today" in any timezone.
     static func fetchFotMob() async -> [MatchState] {
         let session = makeSession()
         defer { session.invalidateAndCancel() }
         let now = Date()
-        let dateParam = ictDateParam(now)
-        let dateKey = FixtureGrouping.stampDateKey(of: now)
+        var dateParams: [String] = []
+        for param in [utcDateParam(now), localDateParam(now)]
+        where !dateParams.contains(param) {
+            dateParams.append(param)
+        }
+        var out: [MatchState] = []
+        var seenIDs: Set<Int> = []
+        var seenPairs: Set<String> = []
+        for dateParam in dateParams {
+            let states = await fetchFotMobDay(dateParam: dateParam, session: session)
+            for state in states {
+                // Dedupe on BOTH keys for every candidate: the same
+                // match may carry an id in one feed and none in the
+                // other, so checking only the key matching the
+                // record's shape let it through twice.
+                let pairStamp = state.pairKey + "|" + state.dateKey
+                if seenPairs.contains(pairStamp) { continue }
+                if let id = state.fotmobID, seenIDs.contains(id) { continue }
+                if let id = state.fotmobID { seenIDs.insert(id) }
+                seenPairs.insert(pairStamp)
+                out.append(state)
+            }
+        }
+        return out
+    }
+
+    /// One FotMob day feed (one date parameter).
+    private static func fetchFotMobDay(dateParam: String, session: URLSession) async -> [MatchState] {
         guard let url = URL(string: "https://www.fotmob.com/api/data/matches?date=\(dateParam)"),
               let data = await get(url, session: session),
               let dto = try? JSONDecoder().decode(FotMobDayDTO.self, from: data),
               let leagues = dto.leagues else { return [] }
+        // Fallback date basis for a match whose own kickoff is
+        // missing: the calendar day of THIS feed, from its
+        // dateParam — never the fetch instant. Nil only when the
+        // parameter itself is unparseable, in which case such a
+        // match is skipped below (fail closed).
+        let feedDateKey = dateParamDayStartUTC(dateParam)
+            .map { FixtureGrouping.stampDateKey(of: $0) }
         var out: [MatchState] = []
         for league in leagues {
             let competition = fotmobCompetition(name: league.name ?? "", ccode: league.ccode ?? "")
@@ -738,8 +845,18 @@ enum MatchStateClient {
                         scoreAway = Int(parts[1].trimmingCharacters(in: .whitespaces))
                     }
                 }
+                // Binding keys stay on the playlist's ICT stamp
+                // convention, derived from the match's OWN kickoff
+                // instant (utcTime) — so a state binds by its real
+                // date whichever feed file carried it. A match
+                // without a kickoff falls back to the carrying
+                // feed's own day (`feedDateKey`); with neither it
+                // is skipped — the fetch instant is never a basis.
+                let kickoff = match.utcTime.flatMap { parseISO8601($0) }
+                guard let dateKey = kickoff.map({ FixtureGrouping.stampDateKey(of: $0) })
+                        ?? feedDateKey else { continue }
                 out.append(MatchState(
-                    pairKey: key, dateKey: dateKey, eventKickoff: nil,
+                    pairKey: key, dateKey: dateKey, eventKickoff: kickoff,
                     status: status, minuteText: minute,
                     scoreHome: scoreHome, scoreAway: scoreAway,
                     htHome: nil, htAway: nil,
@@ -787,7 +904,117 @@ enum MatchStateClient {
         return (goals, cards)
     }
 
-    // MARK: LiveScore (third layer — score + minute only)
+    // MARK: Flashscore (third layer — score + status ONLY)
+
+    /// The Flashscore competition map for the league headers
+    /// VERIFIED in the 2026-11-19 probe feed (fs_feed1.txt) —
+    /// exact header strings only; any other header stamps nil and
+    /// the fixture keeps its classifier home, never a guess.
+    static func flashscoreCompetition(leagueHeader: String) -> CompetitionID? {
+        if leagueHeader.hasPrefix("EUROPE: UEFA Champions League Women") {
+            return .cup(.champions, women: true)
+        }
+        switch leagueHeader {
+        case "BRAZIL: Serie A": return .other(label: "Serie A Brazil")
+        case "SPAIN: LaLiga": return .league(rank: 2, lower: false)
+        case "SPAIN: LaLiga2": return .league(rank: 2, lower: true)
+        case "ITALY: Serie B": return .league(rank: 3, lower: true)
+        case "FRANCE: Ligue 1": return .league(rank: 4, lower: false)
+        case "FRANCE: Ligue 2": return .league(rank: 4, lower: true)
+        case "GERMANY: Bundesliga": return .league(rank: 5, lower: false)
+        case "GERMANY: 2. Bundesliga": return .league(rank: 5, lower: true)
+        default: return nil
+        }
+    }
+
+    /// The whole-world soccer day feed their own clients consume
+    /// (probe-verified 2026-11-19: HTTP 200 on every pull, static
+    /// `x-fsign` header, no account/cookies). Score + status ONLY:
+    /// the feed carries NO minute field and NO incidents, so
+    /// `minuteText` stays nil and goals/cards stay empty — the
+    /// bounded clock and the ESPN/FotMob layers own those.
+    ///
+    /// The basketball feed (f_3) is deliberately NOT fetched: this
+    /// app binds football fixtures only — no basketball fixture,
+    /// pair-keyed state or tab exists anywhere in DaBanh (the one
+    /// "NBA" hit is a Nuvio channel-family comment) — so NBB
+    /// states could never bind and would only pollute the store.
+    static func fetchFlashscore() async -> [MatchState] {
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        guard let url = URL(string: "https://www.flashscore.com/x/feed/f_1_0_3_en_1"),
+              let data = await get(url, session: session,
+                                   extraHeaders: ["x-fsign": "SW9D1eZo"]),
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty, text != "0" else { return [] }
+        return parseFlashscoreFeed(text)
+    }
+
+    /// Defensive parser for the `~` / `¬` / `KEY÷value` wire
+    /// format: records split on "~", fields on "¬", each field is
+    /// "KEY÷value". One malformed record is skipped, never fatal.
+    ///
+    /// Field semantics VERIFIED against the probe feeds
+    /// (fs_feed1.txt / fsnap2/fs.txt, cross-checked with ESPN +
+    /// FotMob at the same instant): AA = match id, AD = kickoff
+    /// epoch seconds (UTC), AE/AF = home/away team, AG/AH =
+    /// home/away score, AB = stage class (1 = scheduled — no
+    /// AG/AH, 2 = in play — AI "y" present, AG/AH live, 3 =
+    /// terminal). Terminal records split on AC: AC "3" is the
+    /// only verified finished shape (scores present in every
+    /// sample); AC "4"/"5" terminal records carry NO scores and
+    /// unverified semantics, so they fail closed (skipped). NO
+    /// half-time shape exists in any probe feed — every live
+    /// football record was first-half (AC "12") — so this layer
+    /// never reports HT; AB "2" maps to plain `.live`.
+    static func parseFlashscoreFeed(_ text: String) -> [MatchState] {
+        var out: [MatchState] = []
+        var leagueHeader = ""
+        for record in text.components(separatedBy: "~") {
+            var fields: [String: String] = [:]
+            for field in record.components(separatedBy: "¬") {
+                let parts = field.split(separator: "÷", maxSplits: 1,
+                                         omittingEmptySubsequences: false)
+                guard parts.count == 2 else { continue }
+                fields[String(parts[0])] = String(parts[1])
+            }
+            if let header = fields["ZA"] {
+                leagueHeader = header
+                continue
+            }
+            guard fields["AA"] != nil,
+                  let homeName = fields["AE"], !homeName.isEmpty,
+                  let awayName = fields["AF"], !awayName.isEmpty,
+                  let key = MatchMatching.pairKey(team1: homeName, team2: awayName),
+                  let adRaw = fields["AD"], let ad = TimeInterval(adRaw)
+            else { continue }
+            let status: MatchStatus
+            switch (fields["AB"] ?? "", fields["AC"] ?? "") {
+            case ("1", _): status = .pre
+            case ("2", _): status = .live
+            case ("3", "3"): status = .fullTime
+            default: continue // unverified shape — fail closed
+            }
+            let kickoff = Date(timeIntervalSince1970: ad)
+            out.append(MatchState(
+                pairKey: key,
+                dateKey: FixtureGrouping.stampDateKey(of: kickoff),
+                eventKickoff: kickoff,
+                status: status, minuteText: nil,
+                scoreHome: fields["AG"].flatMap { Int($0) },
+                scoreAway: fields["AH"].flatMap { Int($0) },
+                htHome: nil, htAway: nil,
+                goals: [], cards: [],
+                competition: flashscoreCompetition(leagueHeader: leagueHeader),
+                source: .flashscore,
+                fotmobID: nil, fetchedAt: Date(),
+                womenMarked: MatchMatching.hasWomenMarker(rawName: homeName)
+                    || MatchMatching.hasWomenMarker(rawName: awayName)))
+        }
+        return out
+    }
+
+    // MARK: LiveScore (fourth layer — score + minute only)
 
     static func fetchLiveScoreLive() async -> [MatchState] {
         await fetchLiveScore(urlString: "https://prod-public-api.livescore.com/v1/api/app/live/soccer/3?MD=1")
@@ -923,17 +1150,20 @@ final class MatchStateStore: ObservableObject {
         } ?? true
         async let espnFetch = MatchStateClient.fetchESPN(full: full, activeSlugs: knownSlugs)
         async let fotmobFetch = MatchStateClient.fetchFotMob()
+        async let flashFetch = MatchStateClient.fetchFlashscore()
         async let liveFetch = MatchStateClient.fetchLiveScoreLive()
         async let dateFetch = MatchStateClient.fetchLiveScoreDate(ifNeeded: wantDateFeed)
         let espnStates = await espnFetch
         let fotmobStates = await fotmobFetch
+        let flashStates = await flashFetch
         let liveStates = await liveFetch
         let dateStates = await dateFetch
 
         // Precedence by wholesale replacement per fixture key:
-        // livescore first, then FotMob, then ESPN on top.
+        // ESPN > FotMob > Flashscore > LiveScore — livescore
+        // first, then Flashscore, then FotMob, then ESPN on top.
         var merged: [String: MatchState] = [:]
-        for state in dateStates + liveStates + fotmobStates + espnStates {
+        for state in dateStates + liveStates + flashStates + fotmobStates + espnStates {
             merged[state.pairKey + "|" + state.dateKey] = state
         }
         // FotMob states inherit any cached matchDetails incidents
@@ -964,12 +1194,52 @@ final class MatchStateStore: ObservableObject {
             MatchStateClient.espnSlugs.first { $0.competition == state.competition }?.slug ?? ""
         }.filter { !$0.isEmpty })
         revision += 1
+        // RC2 (2026-11-19): the FotMob incidents upgrade also runs
+        // on this refresh cycle — the 60 s live cycle included —
+        // not only at playlist publish, so scorers/cards land
+        // within a cycle of the state that needs them.
+        await upgradeLiveFotMobDetails()
+    }
+
+    /// The refresh-cycle form of the FotMob incidents upgrade
+    /// (RC2): same discipline as `upgradeDetails(for:)` — FotMob
+    /// states only (the details endpoint is FotMob-only), capped
+    /// at 4 per pass, live first, cached ids never refetched —
+    /// driven from the store's own states because the cycle has
+    /// no channel list. Only states lacking incidents qualify.
+    private func upgradeLiveFotMobDetails() async {
+        let ordered = states.sorted {
+            ($0.status.isLiveish ? 0 : 1) < ($1.status.isLiveish ? 0 : 1)
+        }
+        var targets: [Int] = []
+        for state in ordered {
+            guard targets.count < 4,
+                  state.source == .fotmob,
+                  let id = state.fotmobID,
+                  state.goals.isEmpty, state.cards.isEmpty,
+                  detailCache[id] == nil else { continue }
+            targets.append(id)
+        }
+        if targets.isEmpty { return }
+        for id in targets {
+            if let details = await MatchStateClient.fetchFotMobDetails(matchID: id) {
+                detailCache[id] = details
+                var changed = false
+                for i in states.indices
+                where states[i].source == .fotmob && states[i].fotmobID == id {
+                    states[i].goals = details.goals
+                    states[i].cards = details.cards
+                    changed = true
+                }
+                if changed { revision += 1 }
+            }
+        }
     }
 
     /// The state bound to a fixture channel, if any: pair-key +
     /// date agreement, fail closed. When several layers bound the
     /// same fixture under different date keys, the highest layer
-    /// wins (ESPN > FotMob > LiveScore).
+    /// wins (ESPN > FotMob > Flashscore > LiveScore).
     func state(for channel: Channel) -> MatchState? {
         guard let key = MatchMatching.pairKey(of: channel),
               let kickoff = channel.kickoff else { return nil }
@@ -994,8 +1264,9 @@ final class MatchStateStore: ObservableObject {
 
     private func precedence(_ source: MatchSource) -> Int {
         switch source {
-        case .espn: return 3
-        case .fotmob: return 2
+        case .espn: return 4
+        case .fotmob: return 3
+        case .flashscore: return 2
         case .livescore: return 1
         }
     }
