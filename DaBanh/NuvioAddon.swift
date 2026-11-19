@@ -4,8 +4,16 @@ import SwiftUI
 /// The Nuvio Live Sports addon (https://nuviosports.xyz) as a
 /// source INSIDE the BLV Anh tab — owner order 2026-11-19: the
 /// addon's channels and fixtures lead that tab, the mirror's
-/// English block stays below them as the fallback pool, and
-/// nothing from the addon may surface anywhere else in the app.
+/// English block stays below them as the fallback pool.
+/// A second owner order the same day (12:58) extends the addon
+/// into the league tabs: a league tab also carries the addon's
+/// channels for its own league, and its own live fixtures from
+/// the addon lead there too — in 1.20 that is the Đức tab (the
+/// Sky Bundesliga channel family + German live fixtures) and,
+/// completing the same order, the Tây Ban Nha / Ý / Pháp tabs
+/// (the La Liga / Calcio–Serie A / Ligue 1 channel families +
+/// their live fixtures), each folded from its own probed
+/// search family and name needles (see networkFamilies).
 ///
 /// Contract (verified by live probes from this machine,
 /// 2026-11-19, against the hunt report in
@@ -229,6 +237,24 @@ enum NuvioAddonClient {
     /// networks the football catalog omits (see the file header).
     /// Every query was probed live (2026-11-19) and returns a
     /// clean family set in a single unpaged response.
+    /// "Sky Sport Bundesliga" is the Đức league tab's family
+    /// (owner order 2026-11-19 12:58): probed live, it returns
+    /// exactly the 11 Sky Sports Bundesliga channels — the
+    /// generic "Sky Sports" query is not relied on to surface
+    /// them; the snapshot's id dedupe absorbs any overlap.
+    /// The same order's other three league families, probed
+    /// live the same day: "La Liga" returns exactly the 15
+    /// La Liga channels (DAZN / Movistar / beIN / SuperSport
+    /// LaLiga, LaLiga TV + its bar and second-tier variants);
+    /// "Sky Calcio" returns exactly the 5 Sky Italia football
+    /// channels (Sky Sports Calcio + Sky Calcio 1–4 — the
+    /// needle set in ContentView also picks up "Sky Sports
+    /// Serie A", which the generic "Sky Sports" family already
+    /// surfaces); "Ligue 1" returns exactly 19 (Canal+ Ligue 1,
+    /// the Ligue 1+ set, Psg Ligue 1 — DAZN's Ligue 1 channels
+    /// ride the generic "DAZN" family). The "Serie A" query is
+    /// deliberately NOT a family: it degenerates into TV-series
+    /// channels (probed), and no league channel needs it.
     private static let networkFamilies = [
         "Sky Sports", "TNT Sports", "beIN Sports", "SuperSport",
         "Premier Sports", "ESPN", "Astro SuperSport",
@@ -236,7 +262,8 @@ enum NuvioAddonClient {
         "Arena Sport", "Digi Sport", "Orange Sport",
         "Prima Sport", "Eleven Sports", "Ziggo Sport",
         "RMC Sport", "Viaplay Sport", "CBS Sports", "FOX Sports",
-        "Stan Sport",
+        "Stan Sport", "Sky Sport Bundesliga",
+        "La Liga", "Sky Calcio", "Ligue 1",
     ]
 
     /// Hard paging bound per catalog (contract note 4): 4 pages
@@ -288,7 +315,7 @@ enum NuvioAddonClient {
     /// walks, so a truncated fetch can never replace the last
     /// good snapshot with a shorter one.
     private static func fetchPaged(session: URLSession, deadline: Date,
-                                   pageURL: @Sendable (Int) -> URL?)
+                                   pageURL: @escaping @Sendable (Int) -> URL?)
         async -> (metas: [NuvioMeta], complete: Bool) {
         func page(_ skip: Int) async -> [NuvioMeta]? {
             guard let url = pageURL(skip),
@@ -584,6 +611,45 @@ final class NuvioAddonStore: ObservableObject {
 
     var hasContent: Bool {
         !liveEvents.isEmpty || !upcomingEvents.isEmpty || !channels.isEmpty
+    }
+
+    /// Addon live fixtures the shared classifier files under
+    /// `league` — the league-tab fold (owner order 2026-11-19):
+    /// a league tab leads with its own league's live fixtures
+    /// from every source, the addon included. Classification
+    /// is the classifier's own rule run on the display name, so
+    /// a cross-border cup fixture files under the first-checked
+    /// league exactly as a mirror fixture does.
+    func liveEvents(in league: League) -> [NuvioMeta] {
+        liveEvents.filter {
+            LeagueClassifier.leagueRank(of: $0.displayName) == league.rawValue
+        }
+    }
+
+    /// Standing addon channels whose name carries `needle` —
+    /// how a league tab picks its own league's channel family
+    /// out of the snapshot (the Đức tab's needle is
+    /// "Bundesliga": the Sky Sports Bundesliga channels).
+    func standingChannels(matching needle: String) -> [NuvioMeta] {
+        channels.filter {
+            $0.displayName.localizedCaseInsensitiveContains(needle)
+        }
+    }
+
+    /// The multi-needle form of `standingChannels(matching:)` —
+    /// a league whose channel family is spelled more than one
+    /// way picks its channels by ANY of its needles: Tây Ban
+    /// Nha ("LaLiga" / "La Liga"), Ý ("Calcio" / "Serie A"),
+    /// Pháp ("Ligue 1" / the source's own "Leauge 1"
+    /// misspelling on DAZN's overflow channels). Order is the
+    /// snapshot's own (name-sorted) order, as with the
+    /// singular form.
+    func standingChannels(matchingAny needles: [String]) -> [NuvioMeta] {
+        channels.filter { channel in
+            needles.contains {
+                channel.displayName.localizedCaseInsensitiveContains($0)
+            }
+        }
     }
 
     /// Last good snapshot + when it landed. A failed refresh

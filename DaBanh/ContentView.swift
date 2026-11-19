@@ -18,9 +18,12 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedChannel: Channel?
     @State private var selectedSession: MatchPlaySession?
-    /// The Nuvio addon source for the BLV Anh tab (its content
-    /// leads the tab; the mirror's EN block stays below it as
-    /// the fallback pool). Owned here — it feeds no other tab.
+    /// The Nuvio addon source: it leads the BLV Anh tab (the
+    /// mirror's EN block stays below it as the fallback pool)
+    /// and, since 1.20, feeds the Đức league tab's addon
+    /// sections (owner order 2026-11-19) — its German live
+    /// fixtures up top with the live sections, its Sky
+    /// Bundesliga channels below the fixtures.
     @StateObject private var nuvio = NuvioAddonStore()
     @State private var selectedAddon: NuvioMeta?
     @State private var selectedAddonSession: MatchPlaySession?
@@ -331,6 +334,21 @@ struct ContentView: View {
         if store.selectedLeague == LeagueClassifier.enTabValue {
             return AnyView(enList)
         }
+        if store.selectedLeague == League.germany.rawValue {
+            return AnyView(germanyList)
+        }
+        if store.selectedLeague == League.spain.rawValue {
+            return AnyView(foldedLeagueList(.spain, needles: ["LaLiga", "La Liga"],
+                                            channelHeader: "Kênh La Liga · Nuvio"))
+        }
+        if store.selectedLeague == League.italy.rawValue {
+            return AnyView(foldedLeagueList(.italy, needles: ["Calcio", "Serie A"],
+                                            channelHeader: "Kênh Serie A · Nuvio"))
+        }
+        if store.selectedLeague == League.france.rawValue {
+            return AnyView(foldedLeagueList(.france, needles: ["Ligue 1", "Leauge 1"],
+                                            channelHeader: "Kênh Ligue 1 · Nuvio"))
+        }
         return AnyView(leagueBucketList)
     }
 
@@ -353,14 +371,197 @@ struct ContentView: View {
                           emptyText: "Chưa có kênh nào trong mục này.")
     }
 
+    /// The Đức tab (owner orders 2026-11-19): the mirror's
+    /// German fixtures in the usual bucket order — Đang đá /
+    /// Sắp đá / Khác — with the Hot group's German fixtures
+    /// merged in (URL-deduped, the liveChannels doctrine), so a
+    /// hot or live German match always surfaces here. The
+    /// addon's German live fixtures sit with the live sections
+    /// at the top, and its Sky Bundesliga channels close the
+    /// tab below the fixtures — channels never bury a match.
+    private var germanyList: some View {
+        let now = Date()
+        var seen = Set<String>()
+        let merged = (store.channels(in: .germany)
+            + store.hotChannels.filter { $0.leagueRank == League.germany.rawValue })
+            .filter { !LeagueClassifier.isEN($0) && seen.insert($0.url).inserted }
+        let entries = FixtureEntry.group(merged)
+        let live = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 0 }
+        let upcoming = entries.filter {
+            let b = LeagueClassifier.bucket(of: $0.channel, now: now)
+            return b == 1 || b == 2
+        }
+        let rest = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 3 }
+        let addonLive = nuvio.liveEvents(in: .germany)
+        let addonChannels = nuvio.standingChannels(matching: "Bundesliga")
+
+        return List {
+            if merged.isEmpty && addonLive.isEmpty && addonChannels.isEmpty {
+                if nuvio.isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text("Đang tải kênh Nuvio…")
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else {
+                    Text("Chưa có kênh nào trong mục này.")
+                        .foregroundStyle(.white.opacity(0.6))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            }
+            if !live.isEmpty {
+                Section {
+                    ForEach(live) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Đang đá", live: true)
+                }
+            }
+            if !addonLive.isEmpty {
+                Section {
+                    ForEach(addonLive) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Đang đá · Nuvio", live: true)
+                }
+            }
+            if !upcoming.isEmpty {
+                Section {
+                    ForEach(upcoming) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Sắp đá", live: false)
+                }
+            }
+            if !rest.isEmpty {
+                Section {
+                    ForEach(rest) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Khác", live: false)
+                }
+            }
+            if !addonChannels.isEmpty {
+                Section {
+                    ForEach(addonChannels) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Kênh Bundesliga · Nuvio", live: false)
+                }
+            }
+            footerRow
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .refreshable {
+            await store.refresh()
+            await nuvio.refresh()
+        }
+    }
+
+    /// A league tab with its Nuvio fold (owner order
+    /// 2026-11-19 12:58 — the Tây Ban Nha / Ý / Pháp tabs,
+    /// completing the pattern germanyList set for Đức): the
+    /// mirror's fixtures for the league in the usual bucket
+    /// order — Đang đá / Sắp đá / Khác, over exactly the
+    /// channel set leagueBucketList reads — with the addon's
+    /// live fixtures for the league sitting with the live
+    /// sections at the top and its league channels closing
+    /// the tab below the fixtures, so channels never bury a
+    /// match. Unlike the Đức tab there is no Hot-group merge
+    /// here: the mirror content is exactly what the tab
+    /// showed before the fold. Addon down ⇒ the tab is the
+    /// mirror list alone, and it never goes empty while the
+    /// mirror has the league's fixtures.
+    private func foldedLeagueList(_ league: League, needles: [String],
+                                  channelHeader: String) -> some View {
+        let now = Date()
+        let mirror = store.channels(in: league).filter { !LeagueClassifier.isEN($0) }
+        let entries = FixtureEntry.group(mirror)
+        let live = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 0 }
+        let upcoming = entries.filter {
+            let b = LeagueClassifier.bucket(of: $0.channel, now: now)
+            return b == 1 || b == 2
+        }
+        let rest = entries.filter { LeagueClassifier.bucket(of: $0.channel, now: now) == 3 }
+        let addonLive = nuvio.liveEvents(in: league)
+        let addonChannels = nuvio.standingChannels(matchingAny: needles)
+
+        return List {
+            if mirror.isEmpty && addonLive.isEmpty && addonChannels.isEmpty {
+                if nuvio.isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text("Đang tải kênh Nuvio…")
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else {
+                    Text("Chưa có kênh nào trong mục này.")
+                        .foregroundStyle(.white.opacity(0.6))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            }
+            if !live.isEmpty {
+                Section {
+                    ForEach(live) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Đang đá", live: true)
+                }
+            }
+            if !addonLive.isEmpty {
+                Section {
+                    ForEach(addonLive) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Đang đá · Nuvio", live: true)
+                }
+            }
+            if !upcoming.isEmpty {
+                Section {
+                    ForEach(upcoming) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Sắp đá", live: false)
+                }
+            }
+            if !rest.isEmpty {
+                Section {
+                    ForEach(rest) { entry in matchRow(entry) }
+                } header: {
+                    sectionHeader("Khác", live: false)
+                }
+            }
+            if !addonChannels.isEmpty {
+                Section {
+                    ForEach(addonChannels) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader(channelHeader, live: false)
+                }
+            }
+            footerRow
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .refreshable {
+            await store.refresh()
+            await nuvio.refresh()
+        }
+    }
+
     /// The BLV Anh tab (owner order 2026-11-19): the Nuvio
     /// addon's content leads — live events, upcoming events,
     /// then its 24/7 football channels — and the mirror's
     /// English-commentary block stays BELOW as the fallback pool,
     /// so the tab still has channels when the addon is down.
-    /// Nothing from the addon appears in any other tab: these
-    /// sections render only here, fed by the addon store, never
-    /// by the playlist store the other tabs read.
+    /// (The league tabs carry their own addon sections —
+    /// see germanyList and foldedLeagueList.)
     private var enList: some View {
         List {
             if !nuvio.hasContent && enChannels.isEmpty {

@@ -11,7 +11,8 @@ struct Channel: Identifiable, Equatable {
     /// Kickoff parsed from the title (Vietnam time, ICT). nil mirrors
     /// Android's kickoffMs == 0 ("no kickoff in the title").
     let kickoff: Date?
-    /// 1 = Ngoại Hạng Anh, 2 = Tây Ban Nha, 3 = Ý, 4 = Pháp, 9 = Khác.
+    /// 1 = Ngoại Hạng Anh, 2 = Tây Ban Nha, 3 = Ý, 4 = Pháp, 5 = Đức,
+    /// 9 = Khác.
     let leagueRank: Int
     /// Playback headers the entry itself declares via #EXTVLCOPT
     /// (http-referrer / http-user-agent). Some CDNs refuse the stream
@@ -37,13 +38,14 @@ struct Channel: Identifiable, Equatable {
     var logoURL: URL? { logo.isEmpty ? nil : URL(string: logo) }
 }
 
-/// The five league tabs, in the user's fixed order (Android LEAGUE_TABS /
+/// The six league tabs, in the user's fixed order (Android LEAGUE_TABS /
 /// LEAGUE_NAMES in MainActivity).
 enum League: Int, CaseIterable, Identifiable {
     case england = 1
     case spain = 2
     case italy = 3
     case france = 4
+    case germany = 5
     case other = 9
 
     var id: Int { rawValue }
@@ -54,6 +56,7 @@ enum League: Int, CaseIterable, Identifiable {
         case .spain: return "Tây Ban Nha"
         case .italy: return "Ý"
         case .france: return "Pháp"
+        case .germany: return "Đức"
         case .other: return "Khác"
         }
     }
