@@ -621,7 +621,8 @@ final class NuvioAddonStore: ObservableObject {
             return
         }
         let task = Task { [weak self] in
-            await self?.performLoad()
+            guard let self else { return }
+            await self.performLoad()
         }
         loadTask = task
         await task.value
