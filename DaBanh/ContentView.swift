@@ -18,6 +18,12 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedChannel: Channel?
     @State private var selectedSession: MatchPlaySession?
+    /// The Nuvio addon source for the BLV Anh tab (its content
+    /// leads the tab; the mirror's EN block stays below it as
+    /// the fallback pool). Owned here — it feeds no other tab.
+    @StateObject private var nuvio = NuvioAddonStore()
+    @State private var selectedAddon: NuvioMeta?
+    @State private var selectedAddonSession: MatchPlaySession?
 
     private var liveChannels: [Channel] {
         store.channels.filter { LeagueClassifier.isLive($0) }
@@ -78,10 +84,14 @@ struct ContentView: View {
                 ResolveHub.shared.preresolve(
                     ladders: featuredEntries.prefix(3).map { store.sources(for: $0.channel) })
             }
+            // The BLV Anh tab's addon source loads alongside
+            // (in-memory cache, TTL-gated on later visits).
+            await nuvio.loadIfNeeded()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await store.refreshIfStale() }
+                Task { await nuvio.loadIfNeeded() }
             }
         }
         .fullScreenCover(item: $selectedChannel, onDismiss: { selectedSession = nil }) { _ in
@@ -91,6 +101,14 @@ struct ContentView: View {
             // session out from under it.
             if let selectedSession {
                 PlayerView(session: selectedSession)
+            }
+        }
+        .fullScreenCover(item: $selectedAddon, onDismiss: { selectedAddonSession = nil }) { _ in
+            // Same tap-time capture as the playlist cover above:
+            // the addon store vended the session at the tap; the
+            // cover only presents it.
+            if let selectedAddonSession {
+                PlayerView(session: selectedAddonSession)
             }
         }
     }
@@ -215,7 +233,7 @@ struct ContentView: View {
                     liveChip
                 }
                 hotChip
-                if !enChannels.isEmpty {
+                if !enChannels.isEmpty || nuvio.hasContent {
                     enChip
                 }
                 ForEach(League.allCases) { league in
@@ -260,10 +278,11 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    /// The BLV Anh chip: the mirror's English-commentary block
-    /// ("EN · BLV Anh" group) — 24/7 channels kept as a fallback
-    /// pool for when the Vietnamese sources are slow or dead.
-    /// Hidden when the current list carries no EN channels.
+    /// The BLV Anh chip: shown when either of the tab's sources
+    /// has content — the Nuvio addon's channels and fixtures
+    /// (which lead the tab) or the mirror's English-commentary
+    /// block ("EN · BLV Anh" group, the fallback pool below
+    /// them). Hidden only when both are empty.
     private var enChip: some View {
         let selected = store.selectedLeague == LeagueClassifier.enTabValue
         return Button {
@@ -334,17 +353,58 @@ struct ContentView: View {
                           emptyText: "Chưa có kênh nào trong mục này.")
     }
 
-    /// The BLV Anh tab: the English-commentary channels as a plain
-    /// channel list — one row per channel, no fixture grouping, no
-    /// kickoff stamps (they are 24/7 channels). Tapping a row hands
-    /// the channel to the same player as every other tab.
+    /// The BLV Anh tab (owner order 2026-11-19): the Nuvio
+    /// addon's content leads — live events, upcoming events,
+    /// then its 24/7 football channels — and the mirror's
+    /// English-commentary block stays BELOW as the fallback pool,
+    /// so the tab still has channels when the addon is down.
+    /// Nothing from the addon appears in any other tab: these
+    /// sections render only here, fed by the addon store, never
+    /// by the playlist store the other tabs read.
     private var enList: some View {
         List {
-            if enChannels.isEmpty {
-                Text("Chưa có kênh tiếng Anh nào trong danh sách.")
-                    .foregroundStyle(.white.opacity(0.6))
+            if !nuvio.hasContent && enChannels.isEmpty {
+                if nuvio.isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text("Đang tải kênh Nuvio…")
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
+                } else {
+                    Text("Chưa có kênh tiếng Anh nào trong danh sách.")
+                        .foregroundStyle(.white.opacity(0.6))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            }
+            if !nuvio.liveEvents.isEmpty {
+                Section {
+                    ForEach(nuvio.liveEvents) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Đang đá · Nuvio", live: true)
+                }
+            }
+            if !nuvio.upcomingEvents.isEmpty {
+                Section {
+                    ForEach(nuvio.upcomingEvents) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Sắp đá · Nuvio", live: false)
+                }
+            }
+            if !nuvio.channels.isEmpty {
+                Section {
+                    ForEach(nuvio.channels) { entry in
+                        addonRow(entry)
+                    }
+                } header: {
+                    sectionHeader("Kênh 24/7 · Nuvio", live: false)
+                }
             }
             if !enChannels.isEmpty {
                 Section {
@@ -368,7 +428,26 @@ struct ContentView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .refreshable { await store.refresh() }
+        .refreshable {
+            await store.refresh()
+            await nuvio.refresh()
+        }
+    }
+
+    /// One addon row of the BLV Anh tab. The session is vended
+    /// by the addon store and captured into state at tap time,
+    /// exactly like a playlist tap; the cover presents it.
+    private func addonRow(_ entry: NuvioMeta) -> some View {
+        Button {
+            selectedAddonSession = nuvio.session(for: entry)
+            selectedAddon = entry
+        } label: {
+            NuvioEntryRow(entry: entry)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
     }
 
     private func bucketList(channels: [Channel], emptyText: String) -> some View {

@@ -125,12 +125,16 @@ final class PlaylistStore: ObservableObject {
     /// Every channel whose match is in its live window right now
     /// (classifier bucket 0), merged from the league lists and the Hot
     /// group, deduplicated by URL, in the standard live-first order.
+    /// English-commentary channels are confined to the BLV Anh tab and
+    /// are excluded here even if a playlist entry ever carries a
+    /// kickoff stamp (owner's order, 2026-11-19).
     var liveChannels: [Channel] {
         let now = Date()
         var seen = Set<String>()
         var live: [Channel] = []
         for channel in channels + hotChannels {
-            guard LeagueClassifier.bucket(of: channel, now: now) == 0 else { continue }
+            guard LeagueClassifier.bucket(of: channel, now: now) == 0,
+                  !LeagueClassifier.isEN(channel) else { continue }
             if seen.insert(channel.url).inserted {
                 live.append(channel)
             }

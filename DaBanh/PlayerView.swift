@@ -194,9 +194,14 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
 
     static func asset(for channel: Channel) -> AVURLAsset {
         let url = channel.streamURL ?? URL(fileURLWithPath: "/dev/null")
-        var headers: [String: String] = [:]
-        if !channel.userAgent.isEmpty { headers["User-Agent"] = channel.userAgent }
-        if !channel.referrer.isEmpty { headers["Referer"] = channel.referrer }
+        // The channel's declared headers; for addon (Nuvio)
+        // streams the registry adds the rest of the declared
+        // proxyHeaders set (Origin, …), with the channel's own
+        // pair over it — so a Referer repaired by pre-flight is
+        // the one the player sends. For a playlist channel this
+        // is exactly the old behaviour: only the declared pair,
+        // only when non-empty.
+        let headers = NuvioStreamHeaders.playerHeaders(for: channel)
         if headers.isEmpty { return AVURLAsset(url: url) }
         return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
@@ -712,11 +717,17 @@ private enum SourcePreflight {
     private static func fetch(_ ch: Channel, url: URL, referrer: String, session: URLSession) async -> FetchResult {
         var request = URLRequest(url: url)
         request.timeoutInterval = 4
-        request.setValue(
-            ch.userAgent.isEmpty ? "Mozilla/5.0 (Linux; Android 14; TV)" : ch.userAgent,
-            forHTTPHeaderField: "User-Agent")
-        if !referrer.isEmpty {
-            request.setValue(referrer, forHTTPHeaderField: "Referer")
+        // The candidate's full header set: its declared pair,
+        // plus — for addon (Nuvio) streams — the rest of the
+        // behaviorHints.proxyHeaders set (Origin included) from
+        // the registry. The explicit `referrer` argument (the
+        // declared one, or the repaired one on the repair retry)
+        // always wins. For a playlist channel the registry is
+        // empty and this is exactly the old behaviour: the TV
+        // default User-Agent when none is declared, a Referer
+        // only when one is.
+        for (field, value) in NuvioStreamHeaders.requestHeaders(for: ch, referrer: referrer) {
+            request.setValue(value, forHTTPHeaderField: field)
         }
         do {
             let (bytes, response) = try await session.bytes(for: request)
