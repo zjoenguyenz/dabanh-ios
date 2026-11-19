@@ -17,6 +17,7 @@ struct ContentView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedChannel: Channel?
+    @State private var selectedSession: MatchPlaySession?
 
     private var liveChannels: [Channel] {
         store.channels.filter { LeagueClassifier.isLive($0) }
@@ -66,14 +67,31 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .task { await store.start() }
+        .task {
+            await store.start()
+            // Pre-resolve the fixtures the first screen leads with
+            // (the featured rail), so the likeliest first tap opens
+            // on already-verified sources. ResolveHub bounds the
+            // pass to three fixtures and shares any session a tap
+            // asks for while it runs (single-flight).
+            await MainActor.run {
+                ResolveHub.shared.preresolve(
+                    ladders: featuredEntries.prefix(3).map { store.sources(for: $0.channel) })
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await store.refreshIfStale() }
             }
         }
-        .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(sources: store.sources(for: channel))
+        .fullScreenCover(item: $selectedChannel, onDismiss: { selectedSession = nil }) { _ in
+            // The session was captured at tap time (see the tap
+            // sites); the cover never calls the hub itself, so a
+            // re-evaluation here cannot swap the live player's
+            // session out from under it.
+            if let selectedSession {
+                PlayerView(session: selectedSession)
+            }
         }
     }
 
@@ -174,6 +192,7 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     ForEach(featuredEntries) { entry in
                         Button {
+                            selectedSession = ResolveHub.shared.session(for: store.sources(for: entry.channel))
                             selectedChannel = entry.channel
                         } label: {
                             FeaturedCard(entry: entry)
@@ -331,6 +350,7 @@ struct ContentView: View {
                 Section {
                     ForEach(enChannels) { channel in
                         Button {
+                            selectedSession = ResolveHub.shared.session(for: store.sources(for: channel))
                             selectedChannel = channel
                         } label: {
                             ENChannelRow(channel: channel)
@@ -400,6 +420,7 @@ struct ContentView: View {
 
     private func matchRow(_ entry: FixtureEntry) -> some View {
         Button {
+            selectedSession = ResolveHub.shared.session(for: store.sources(for: entry.channel))
             selectedChannel = entry.channel
         } label: {
             MatchCard(entry: entry)

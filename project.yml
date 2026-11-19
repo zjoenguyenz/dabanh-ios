@@ -54,13 +54,18 @@ targets:
         # 2026-11-18): the base stays 5.9 so the tvOS targets in
         # this shared project are untouched.
         SWIFT_VERSION: "6.0"
+        # This target's own settings pair (from 1.18): it previously
+        # inherited the project base (1.5/6), which never matched
+        # its info.properties pair — the pair the device shows.
+        MARKETING_VERSION: "1.18"
+        CURRENT_PROJECT_VERSION: "19"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.17"
-        CFBundleVersion: "18"
+        CFBundleShortVersionString: "1.18"
+        CFBundleVersion: "19"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio

@@ -33,22 +33,38 @@ import UIKit
 /// only when all of them fail does it settle on a "no signal"
 /// slate (which keeps its own always-visible close button — there
 /// is no video to keep clean there).
+///
+/// Since 2026-11-19 the sources arrive through a MatchPlaySession
+/// (Nuvio optimisation set, bottom of this file): candidates are
+/// pre-flight-verified in parallel and publish progressively, so
+/// the first source this page plays is already proven alive from
+/// this phone, and sources verified later append to the ladder
+/// while playback is under way.
 struct PlayerView: View {
-    let sources: [Channel]
+    @ObservedObject var session: MatchPlaySession
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
-    @State private var exhausted = false
     @State private var switching = true
+
+    private var sources: [Channel] { session.sources }
 
     private var current: Channel? {
         sources.indices.contains(index) ? sources[index] : nil
+    }
+
+    /// Out of sources for good: the session has settled AND the
+    /// player has walked past the last published source. While the
+    /// session is still verifying, an empty tail is NOT exhaustion
+    /// — more sources may still land (the waiting branch below).
+    private var settledExhausted: Bool {
+        !session.isResolving && index >= sources.count
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
 
-            if exhausted {
+            if settledExhausted {
                 noSignal
                 closeButton
             } else if let channel = current, channel.streamURL != nil {
@@ -72,9 +88,32 @@ struct PlayerView: View {
                     }
                     .ignoresSafeArea()
                 }
-            } else {
+            } else if current != nil {
                 // An unparseable URL counts as a failed source.
                 Color.clear.onAppear { advance() }
+            } else {
+                // Past the last published source, but the session
+                // is still verifying: wait on black with the
+                // switching note instead of declaring the slate.
+                // When the next verified source lands, this body
+                // re-renders onto it at the same index; when the
+                // session settles empty, settledExhausted takes over.
+                VStack {
+                    Spacer()
+                    HStack {
+                        Text(index == 0 ? "Đang tải…" : "Đang chuyển nguồn khác…")
+                            .font(.footnote)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.black.opacity(0.45), in: Capsule())
+                        Spacer()
+                    }
+                    .padding(.leading, 14)
+                    .padding(.bottom, 26)
+                }
+                .ignoresSafeArea()
+                closeButton
             }
         }
         .onAppear {
@@ -102,12 +141,14 @@ struct PlayerView: View {
     }
 
     private func advance() {
-        if index + 1 < sources.count {
-            index += 1
-            switching = true
-        } else {
-            exhausted = true
-        }
+        // Unconditional: index may move one past the last published
+        // source. Each surface fires onFail once per .id(index), so
+        // this cannot run away — with current == nil the body
+        // re-renders into the waiting branch while the session is
+        // still resolving, or the settledExhausted slate once it
+        // settles.
+        index += 1
+        switching = true
     }
 
     private var noSignal: some View {
@@ -507,4 +548,582 @@ struct RoutePickerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - Match source resolution (Nuvio optimisation set, 2026-11-19)
+
+/// The best variant a master playlist declares (RESOLUTION /
+/// BANDWIDTH of its top #EXT-X-STREAM-INF entry). The Nuvio addon
+/// corrects provider-claimed quality labels from the parsed master
+/// playlist (research §3.6); this app displays no quality label
+/// anywhere, so the parsed quality is spent where it can act: it
+/// orders the verified batch of a match's ladder, best first. A
+/// media playlist carries a single variant — nothing to parse —
+/// and ranks below any parsed master, keeping its ladder order
+/// among its peers.
+struct ParsedQuality: Sendable, Comparable {
+    let height: Int
+    let bandwidth: Int
+
+    static func < (lhs: ParsedQuality, rhs: ParsedQuality) -> Bool {
+        (lhs.height, lhs.bandwidth) < (rhs.height, rhs.bandwidth)
+    }
+
+    /// Parse a master playlist body; nil when it declares no
+    /// variants (a media playlist).
+    static func parse(masterPlaylist body: String) -> ParsedQuality? {
+        var best: ParsedQuality?
+        for rawLine in body.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("#EXT-X-STREAM-INF") else { continue }
+            var height = 0
+            if let r = line.range(of: "RESOLUTION=") {
+                let token = line[r.upperBound...].prefix { $0 != "," }
+                let parts = token.split(separator: "x")
+                if parts.count == 2 { height = Int(parts[1]) ?? 0 }
+            }
+            var bandwidth = 0
+            // Match BANDWIDTH / AVERAGE-BANDWIDTH at token
+            // boundaries: "BANDWIDTH=" is a substring of
+            // "AVERAGE-BANDWIDTH=", so a range(of:) search matches
+            // the average value when it appears first and makes the
+            // fallback unreachable. Split the attribute list (the
+            // part after the "#EXT-X-STREAM-INF:" prefix) on ","
+            // and match whole KEY= prefixes per token instead.
+            // BANDWIDTH is primary; AVERAGE-BANDWIDTH is only the
+            // fallback when no BANDWIDTH token is present.
+            let attributeList = line.split(separator: ":", maxSplits: 1).last.map(String.init) ?? line
+            var bandwidthValue: Int?
+            var averageBandwidthValue: Int?
+            for rawToken in attributeList.components(separatedBy: ",") {
+                let token = rawToken.trimmingCharacters(in: .whitespaces)
+                if token.hasPrefix("BANDWIDTH=") {
+                    bandwidthValue = Int(token.dropFirst("BANDWIDTH=".count)) ?? 0
+                } else if token.hasPrefix("AVERAGE-BANDWIDTH=") {
+                    averageBandwidthValue = Int(token.dropFirst("AVERAGE-BANDWIDTH=".count)) ?? 0
+                }
+            }
+            bandwidth = bandwidthValue ?? averageBandwidthValue ?? 0
+            let q = ParsedQuality(height: height, bandwidth: bandwidth)
+            if best == nil || q > best! { best = q }
+        }
+        return best
+    }
+}
+
+/// What pre-flight learned about one candidate link. `verified`
+/// carries the channel the player should use — the ladder entry
+/// itself, unless the Referer-repair retry rewrote its referrer —
+/// plus the parsed master-playlist quality when there was one.
+/// `kept` means "not provably dead from this device": the source
+/// is demoted behind every verified one, never dropped (see
+/// SourcePreflight for the rules and the one deliberate deviation
+/// from the plugin).
+private enum PreflightOutcome: Sendable {
+    case verified(Channel, ParsedQuality?)
+    case kept(Channel)
+    case dead
+}
+
+/// One-link pre-flight: the client port of the Nuvio addon's
+/// verify-before-serve (research §3.1/§3.2), tuned to this app's
+/// own measured doctrines (PlaylistStore.LinkProbe):
+/// - Definitive death: HTTP 404/410, or HTTP 200 whose body is not
+///   a playlist (fake-200 pages, empty bodies, variant-less and
+///   segment-less stubs, takedown slates).
+/// - 401/403 earns ONE retry with a repaired Referer derived from
+///   the stream's own host; on success the repaired Referer is
+///   written back into the channel, so the player sends it too
+///   (LivePlayerSurface.asset already forwards channel.referrer).
+///   A 403 that survives repair is KEPT but demoted, never
+///   dropped: on this household's network a 403 can mean "the
+///   tunnel is off right now" — the same reason the whole-list
+///   validator never hides a link on 403. The plugin drops it;
+///   the demotion is the deliberate local deviation.
+/// - Transient failures (5xx, network errors, timeouts) retry —
+///   3 attempts total, 0.5 s / 1.0 s backoff, 4 s per attempt —
+///   all bounded by the session's hard deadline. A network-level
+///   failure still failing after the retries counts as death only
+///   for a channel that should be serving right now (live window
+///   or 24/7); a 5xx never convicts on its own.
+/// Nonisolated, like LinkProbe: it touches no actor state.
+private enum SourcePreflight {
+
+    static func verify(_ ch: Channel, session: URLSession, deadline: Date) async -> PreflightOutcome {
+        guard let url = ch.streamURL else { return .dead }
+        var attempt = 0
+        while true {
+            attempt += 1
+            switch await fetch(ch, url: url, referrer: ch.referrer, session: session) {
+            case .ok(let quality):
+                return .verified(ch, quality)
+            case .unauthorized:
+                // Referer repair: one retry with the Referer the
+                // stream's own host implies. Skipped when that is
+                // the Referer already sent (nothing to repair).
+                if let repaired = repairedReferer(for: url), repaired != ch.referrer {
+                    switch await fetch(ch, url: url, referrer: repaired, session: session) {
+                    case .ok(let quality):
+                        let fixed = Channel(title: ch.title, logo: ch.logo, group: ch.group,
+                                            url: ch.url, kickoff: ch.kickoff,
+                                            leagueRank: ch.leagueRank,
+                                            referrer: repaired, userAgent: ch.userAgent)
+                        return .verified(fixed, quality)
+                    case .unauthorized, .transient, .other:
+                        return .kept(ch)
+                    case .dead:
+                        return .dead
+                    }
+                }
+                return .kept(ch)
+            case .dead:
+                return .dead
+            case .other:
+                return .kept(ch)
+            case .transient(let networkLevel):
+                if Task.isCancelled { return .kept(ch) }
+                if attempt >= 3 || Date() >= deadline {
+                    if networkLevel && mustBeServing(ch) { return .dead }
+                    return .kept(ch)
+                }
+                try? await Task.sleep(for: .milliseconds(attempt == 1 ? 500 : 1000))
+                if Task.isCancelled { return .kept(ch) }
+                if Date() >= deadline {
+                    if networkLevel && mustBeServing(ch) { return .dead }
+                    return .kept(ch)
+                }
+            }
+        }
+    }
+
+    private enum FetchResult {
+        case ok(ParsedQuality?)
+        case unauthorized
+        case dead
+        case transient(networkLevel: Bool)
+        case other
+    }
+
+    /// One bounded fetch: status first, then at most the first
+    /// 16 KB of body — a playlist's identity and its variant list
+    /// live in its head, and a direct-media URL must never be
+    /// downloaded whole just to prove it exists (the whole-list
+    /// validator caps its read the same way, at 4 KB).
+    private static func fetch(_ ch: Channel, url: URL, referrer: String, session: URLSession) async -> FetchResult {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4
+        request.setValue(
+            ch.userAgent.isEmpty ? "Mozilla/5.0 (Linux; Android 14; TV)" : ch.userAgent,
+            forHTTPHeaderField: "User-Agent")
+        if !referrer.isEmpty {
+            request.setValue(referrer, forHTTPHeaderField: "Referer")
+        }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+            switch status {
+            case 401, 403:
+                return .unauthorized
+            case 404, 410:
+                return .dead
+            case 500...599:
+                return .transient(networkLevel: false)
+            case 200:
+                break // classify the body below
+            default:
+                return .other
+            }
+            var buffer = Data()
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count > 16_384 { break }
+            }
+            return classify(body: buffer, url: ch.url)
+        } catch {
+            return .transient(networkLevel: true)
+        }
+    }
+
+    private static func classify(body: Data, url: String) -> FetchResult {
+        if body.isEmpty { return .dead }
+        let text = String(decoding: body, as: UTF8.self)
+        let path = url.split(separator: "?").first.map(String.init) ?? url
+        guard path.lowercased().hasSuffix(".m3u8") else {
+            // Direct-media URL: a non-empty 200 body is all the
+            // proof available at this layer (same rule as the
+            // whole-list validator).
+            return .ok(nil)
+        }
+        guard text.contains("#EXTM3U") else { return .dead }
+        // A playlist with neither variants nor segments is a stub
+        // (placeholder / takedown slate), not a stream.
+        guard text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF") else { return .dead }
+        if text.lowercased().contains("takedown") { return .dead }
+        return .ok(ParsedQuality.parse(masterPlaylist: text))
+    }
+
+    /// The Referer a stream's own host implies: scheme://host[:port]/
+    /// — the plugin's host-derived repair reduced to its portable
+    /// core (its registry/regex chain encodes its own providers).
+    private static func repairedReferer(for url: URL) -> String? {
+        guard let scheme = url.scheme, let host = url.host else { return nil }
+        var out = "\(scheme)://\(host)"
+        if let port = url.port { out += ":\(port)" }
+        return out + "/"
+    }
+
+    /// "Should be serving right now": inside the live window, or a
+    /// channel with no kickoff at all (24/7 streams). Same test the
+    /// whole-list validator applies.
+    private static func mustBeServing(_ ch: Channel, now: Date = Date()) -> Bool {
+        ch.kickoff == nil || LeagueClassifier.bucket(of: ch, now: now) == 0
+    }
+}
+
+/// One match's source-resolution session: verifies the store's
+/// ladder in parallel and publishes the playable order
+/// progressively — the client port of the Nuvio addon's progressive
+/// publication (research §3.3), with its own numbers: quorum 3
+/// verified, soft deadline 6 s, hard deadline 15 s.
+///
+/// Publication contract (the player depends on it):
+/// - Nothing publishes until the quorum, or every candidate has
+///   settled, or the soft deadline passes with at least one
+///   verified source.
+/// - The first publish is the verified batch ordered by parsed
+///   quality (best first). After that, publication is APPEND-ONLY:
+///   the published prefix never moves, so a player already walking
+///   the ladder is never disturbed by a late arrival.
+/// - Kept (unverifiable but not provably dead) sources append
+///   last, in ladder order, when resolution settles or the hard
+///   deadline passes. Dead sources never publish.
+/// - When nothing at all is playable, sources stays empty and
+///   isResolving settles false — the player shows its slate.
+@MainActor
+final class MatchPlaySession: ObservableObject {
+    @Published private(set) var sources: [Channel] = []
+    @Published private(set) var isResolving = true
+
+    let key: String
+    private var resolveTask: Task<Void, Never>?
+    private var started = false
+
+    nonisolated private static let quorum = 3
+    nonisolated private static let softDeadline: TimeInterval = 6
+    nonisolated private static let hardDeadline: TimeInterval = 15
+
+    init(key: String) {
+        self.key = key
+    }
+
+    /// A session born complete (fresh resolve-cache hit): the
+    /// cached ladder publishes instantly, with no network at all.
+    static func cached(key: String, sources: [Channel]) -> MatchPlaySession {
+        let session = MatchPlaySession(key: key)
+        session.sources = sources
+        session.isResolving = false
+        session.started = true
+        return session
+    }
+
+    func begin(ladder: [Channel]) {
+        guard !started else { return }
+        started = true
+        guard !ladder.isEmpty else {
+            isResolving = false
+            ResolveHub.shared.noteResolved(key: key, sources: [], from: self)
+            return
+        }
+        resolveTask = Task { [weak self] in
+            await self?.run(ladder: ladder)
+        }
+    }
+
+    /// Stops the verification where it stands (a superseded
+    /// pre-resolve pass). Whatever already published stays
+    /// published; a cancelled session never writes the cache.
+    func cancel() {
+        resolveTask?.cancel()
+    }
+
+    /// Whether this session's resolve task has been cancelled.
+    /// Task cancellation is recorded synchronously by cancel()
+    /// (on the main actor), so the hub can treat a cancelled
+    /// in-flight session as absent before run() notices and
+    /// forgets it itself.
+    var isCancelled: Bool {
+        resolveTask?.isCancelled ?? false
+    }
+
+    private func run(ladder: [Channel]) async {
+        let total = ladder.count
+        let hardDeadline = Date().addingTimeInterval(Self.hardDeadline)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 6
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        var verified: [(Int, Channel, ParsedQuality?)] = []
+        var kept: [(Int, Channel)] = []
+        var settled = 0
+        var published = false
+        var softPassed = false
+        var finalPublished = false
+
+        /// Publish per the contract above. `final` also appends
+        /// the kept tail.
+        func publish(final: Bool) {
+            let ordered = verified.sorted { a, b in
+                switch (a.2, b.2) {
+                case let (qa?, qb?):
+                    if qa != qb { return qa > qb }
+                    return a.0 < b.0
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return a.0 < b.0
+                }
+            }.map { $0.1 }
+            if published {
+                let have = Set(self.sources.map(\.url))
+                self.sources += ordered.filter { !have.contains($0.url) }
+            } else {
+                self.sources = ordered
+                published = true
+            }
+            if final {
+                let have = Set(self.sources.map(\.url))
+                self.sources += kept.sorted { $0.0 < $1.0 }.map { $0.1 }.filter { !have.contains($0.url) }
+            }
+        }
+
+        await withTaskGroup(of: (Int, PreflightOutcome?).self) { group in
+            for (i, ch) in ladder.enumerated() {
+                group.addTask {
+                    (i, await SourcePreflight.verify(ch, session: session, deadline: hardDeadline))
+                }
+            }
+            // The deadlines ride the same group as nil outcomes:
+            // the soft tick at 6 s, the hard tick at 15 s.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(Self.softDeadline))
+                return (-1, nil)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(Self.hardDeadline))
+                return (-2, nil)
+            }
+            for await (i, outcome) in group {
+                if Task.isCancelled { break }
+                if finalPublished { continue }
+                switch (i, outcome) {
+                case (-1, _):
+                    softPassed = true
+                    if !verified.isEmpty { publish(final: false) }
+                case (-2, _):
+                    publish(final: true)
+                    finalPublished = true
+                    group.cancelAll()
+                case (_, .verified(let ch, let quality)?):
+                    verified.append((i, ch, quality))
+                    settled += 1
+                    if settled == total {
+                        publish(final: true)
+                        group.cancelAll()
+                    } else if verified.count >= Self.quorum || softPassed {
+                        publish(final: false)
+                    }
+                case (_, .kept(let ch)?):
+                    kept.append((i, ch))
+                    settled += 1
+                    if settled == total {
+                        publish(final: true)
+                        group.cancelAll()
+                    }
+                case (_, .dead?):
+                    settled += 1
+                    if settled == total {
+                        publish(final: true)
+                        group.cancelAll()
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        if Task.isCancelled {
+            isResolving = false
+            ResolveHub.shared.forgetInFlight(key: key, from: self)
+            return
+        }
+        if !published { publish(final: true) }
+        isResolving = false
+        ResolveHub.shared.noteResolved(key: key, sources: sources, from: self)
+    }
+}
+
+/// Resolve cache + single-flight hub (research §3.4): concurrent
+/// opens of the same fixture share one in-flight session; a fresh
+/// cached ladder replays instantly with no network; a fixture that
+/// resolved to nothing playable is negative-cached for ~30 s, so a
+/// dead fixture is not re-scraped on every tap; a healthy
+/// re-resolve doubles the entry's TTL (60 s floor, 10 min cap),
+/// while an empty resolve collapses the entry to the 30 s negative
+/// TTL. In-memory only, capped at 100 entries (oldest evicted):
+/// a cold start re-verifies from the device — the only vantage
+/// point that shares the owner's network and tunnel.
+@MainActor
+final class ResolveHub {
+    static let shared = ResolveHub()
+
+    private struct Entry {
+        var sources: [Channel]
+        var storedAt: Date
+        var ttl: TimeInterval
+    }
+
+    private var cache: [String: Entry] = [:]
+    private var inFlight: [String: MatchPlaySession] = [:]
+    private var preresolveTask: Task<Void, Never>?
+    private var preresolveSessions: [MatchPlaySession] = []
+    /// Sessions a tap has been handed (created by the tap, or a
+    /// preresolve-created session the tap adopted via the
+    /// single-flight table). A preresolve sweep never cancels
+    /// these. Entries are dropped when the session leaves the
+    /// in-flight table (noteResolved / forgetInFlight).
+    private var tapAdopted: Set<ObjectIdentifier> = []
+
+    private init() {}
+
+    /// Cache identity of a ladder: its URLs, in order. Two
+    /// different fixtures never share an ordered URL list; a
+    /// refreshed playlist with different URLs is a different key
+    /// and resolves fresh.
+    static func key(for ladder: [Channel]) -> String {
+        ladder.map(\.url).joined(separator: "\n")
+    }
+
+    /// The session for a ladder: the in-flight one if this fixture
+    /// is already resolving (single-flight — a tap and a
+    /// pre-resolve pass share it), else a born-complete session
+    /// from a fresh cache entry, else a new session that starts
+    /// verifying immediately.
+    func session(for ladder: [Channel]) -> MatchPlaySession {
+        session(for: ladder, isTap: true).session
+    }
+
+    /// The hub's core lookup. `createdFresh` is true only when
+    /// this call created and started a brand-new session — a
+    /// single-flight hit and a born-complete cached session are
+    /// both not fresh. Only the preresolve pass uses the flag, to
+    /// track exactly the sessions it owns. A tap call (isTap)
+    /// also marks the returned live session tap-adopted and
+    /// drops it from the preresolve-owned list, so a later sweep
+    /// can never cancel a session a player is using.
+    private func session(for ladder: [Channel], isTap: Bool) -> (session: MatchPlaySession, createdFresh: Bool) {
+        let key = Self.key(for: ladder)
+        if let live = inFlight[key] {
+            if live.isCancelled {
+                // A cancelled session remains in the table until
+                // its run() notices and forgets it, but it will
+                // settle empty, publish nothing further and write
+                // no cache — treat it as absent: forget it with
+                // the same bookkeeping as a self-noticed
+                // cancellation and fall through to a fresh session.
+                forgetInFlight(key: key, from: live)
+            } else {
+                if isTap { noteTapAdoption(of: live) }
+                return (live, false)
+            }
+        }
+        if let entry = cache[key],
+           Date().timeIntervalSince(entry.storedAt) < entry.ttl {
+            return (MatchPlaySession.cached(key: key, sources: entry.sources), false)
+        }
+        let session = MatchPlaySession(key: key)
+        inFlight[key] = session
+        if isTap { noteTapAdoption(of: session) }
+        session.begin(ladder: ladder)
+        return (session, true)
+    }
+
+    private func noteTapAdoption(of session: MatchPlaySession) {
+        tapAdopted.insert(ObjectIdentifier(session))
+        preresolveSessions.removeAll { $0 === session }
+    }
+
+    /// Pre-resolve the fixtures the first screen leads with (the
+    /// client analogue of the addon's pre-warming, research §3.5):
+    /// bounded to the first three ladders, started one at a time.
+    /// A new call supersedes the previous pass — sessions it
+    /// started are cancelled where they stand and no further
+    /// fixtures start. Sessions begun by a tap are never touched.
+    func preresolve(ladders: [[Channel]]) {
+        preresolveTask?.cancel()
+        // Cancel only sessions this pass owns: still resolving and
+        // never handed to a tap. (Adopted sessions are also removed
+        // from preresolveSessions at adoption time — the tapAdopted
+        // check here is the second line of defence.)
+        for session in preresolveSessions
+        where session.isResolving && !tapAdopted.contains(ObjectIdentifier(session)) {
+            session.cancel()
+        }
+        preresolveSessions = []
+        let batch = Array(ladders.prefix(3))
+        guard !batch.isEmpty else { return }
+        preresolveTask = Task { [weak self] in
+            for ladder in batch {
+                if Task.isCancelled { return }
+                guard let self else { return }
+                // Track only sessions this pass created fresh: a
+                // single-flight hit may be a tap's session (or a
+                // cached replay), which this pass must never cancel.
+                let result = self.session(for: ladder, isTap: false)
+                if result.createdFresh {
+                    self.preresolveSessions.append(result.session)
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
+    }
+
+    /// Called by a session when its resolution settles: leaves the
+    /// in-flight table and writes the cache entry. Identity-guarded:
+    /// a session that has been replaced in the in-flight table by a
+    /// different session must not evict that replacement or
+    /// overwrite its cache entry, so the write is dropped when
+    /// `inFlight[key]` holds a different session object.
+    func noteResolved(key: String, sources: [Channel], from session: MatchPlaySession) {
+        if let live = inFlight[key] {
+            guard live === session else { return }
+            tapAdopted.remove(ObjectIdentifier(live))
+        }
+        inFlight[key] = nil
+        let ttl: TimeInterval
+        if sources.isEmpty {
+            ttl = 30 // negative entry — see the type doc
+        } else if let previous = cache[key] {
+            ttl = min(previous.ttl * 2, 600)
+        } else {
+            ttl = 60
+        }
+        cache[key] = Entry(sources: sources, storedAt: Date(), ttl: ttl)
+        if cache.count > 100,
+           let oldest = cache.min(by: { $0.value.storedAt < $1.value.storedAt })?.key {
+            cache[oldest] = nil
+        }
+    }
+
+    /// A cancelled session leaves the in-flight table without
+    /// writing the cache, so the next open resolves it fresh.
+    /// Identity-guarded: the entry — and its tap-adoption
+    /// bookkeeping — is dropped only when the table still holds
+    /// the session being forgotten; a stale session unwinding
+    /// after a replacement took over its key must not evict the
+    /// live replacement.
+    func forgetInFlight(key: String, from session: MatchPlaySession) {
+        guard let live = inFlight[key], live === session else { return }
+        tapAdopted.remove(ObjectIdentifier(live))
+        inFlight[key] = nil
+    }
 }
