@@ -140,7 +140,15 @@ struct PlayerView: View {
             } else if let channel = current, channel.streamURL != nil {
                 LivePlayerSurface(
                     channel: channel, onFail: advance,
-                    onReady: { switching = false }, onClose: { dismiss() },
+                    onReady: {
+                        switching = false
+                        // DB-07: the first frame is up — deep-warm
+                        // the rest of the ladder behind it (see
+                        // SourcePrewarmStore). Idempotent: a ready
+                        // after a switch just re-prioritises what
+                        // is still cold. Pure background work.
+                        session.beginPrewarming(after: index)
+                    }, onClose: { dismiss() },
                     sourceIndex: index,
                     showsSourceSwitch: headerEntry != nil,
                     onSourceSwitch: {
@@ -229,6 +237,7 @@ struct PlayerView: View {
         }
         .onDisappear {
             DiagLog.log("player", "close: player view gone at source #\(index)")
+            session.endPrewarming()
             OrientationHelper.lock(.all, rotateTo: .portrait)
         }
     }
@@ -310,6 +319,17 @@ struct PlayerView: View {
                         "advance: past the published ladder at #\(index)")
         }
         index += 1
+        // DB-07: a source pre-warming proved dead while an
+        // earlier rung played is skipped in place — the ladder
+        // steps over it instantly instead of spending a player
+        // load on it. Only the automatic advance skips: an
+        // explicit board pick (switchToVN) always tries the
+        // row the viewer chose.
+        while let ch = current, session.isWarmedDead(ch.url) {
+            DiagLog.log("player",
+                        "advance: skipping pre-warm-dead source #\(index) \(diagSourceTag(ch))")
+            index += 1
+        }
         switching = true
     }
 
@@ -431,6 +451,7 @@ final class LivePlayerViewController: UIViewController {
     private var failToken: NSObjectProtocol?
     private var firedFail = false
     private var firedReady = false
+    private var firedPlaying = false
     private var hideTimer: Timer?
     private var controlsVisible = true
     private var torn = false
@@ -672,6 +693,16 @@ final class LivePlayerViewController: UIViewController {
         case .playing:
             spinner.stopAnimating()
             playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+            if !firedPlaying {
+                firedPlaying = true
+                // DB-07: the tap→play timeline's last anchor —
+                // frames are actually flowing (distinct from
+                // .readyToPlay, which only promises them).
+                if let channel {
+                    DiagLog.log("player",
+                                "playback started: source #\(sourceIndex) \(diagSourceTag(channel))")
+                }
+            }
             // Playback is (again) real: resume the normal fade.
             scheduleControlsHide()
         case .waitingToPlayAtSpecifiedRate:
@@ -1113,6 +1144,15 @@ final class MatchPlaySession: ObservableObject {
     let key: String
     private var resolveTask: Task<Void, Never>?
     private var started = false
+    /// The ladder begin() received, kept for publishHeadNow():
+    /// the hub hands a tap its session before the cover reads
+    /// sources, and the head must be publishable from the
+    /// ladder itself, not from anything verification produced.
+    private var ladderSnapshot: [Channel] = []
+    /// DB-07: a tap published the head unverified (see
+    /// publishHeadNow) — run()'s publications append behind
+    /// it from then on, exactly as after a verified publish.
+    private var headPublished = false
 
     nonisolated private static let quorum = 3
     nonisolated private static let softDeadline: TimeInterval = 6
@@ -1135,6 +1175,7 @@ final class MatchPlaySession: ObservableObject {
     func begin(ladder: [Channel]) {
         guard !started else { return }
         started = true
+        ladderSnapshot = ladder
         guard !ladder.isEmpty else {
             isResolving = false
             ResolveHub.shared.noteResolved(key: key, sources: [], from: self)
@@ -1161,6 +1202,54 @@ final class MatchPlaySession: ObservableObject {
         resolveTask?.isCancelled ?? false
     }
 
+    /// DB-07 (plan D): publish the ladder's head the moment a
+    /// tap adopts this session — before any verification. The
+    /// head of a tap's ladder is the row the viewer picked
+    /// (callers rotate it to the front) and its URL is already
+    /// final in the playlist data, so the player starts on it
+    /// at once; verification keeps running behind it and its
+    /// publications APPEND from here on (run()'s publish
+    /// honours headPublished), so the playing rung never
+    /// moves. If the head proves dead, the player's own fail
+    /// path advances past it — and run() keeps a proven-dead
+    /// head out of the cache entry, so the next open does not
+    /// inherit it as a proven source.
+    func publishHeadNow() {
+        guard isResolving, sources.isEmpty,
+              let head = ladderSnapshot.first else { return }
+        headPublished = true
+        sources = [head]
+        DiagLog.log("player",
+                    "instant head: '\(MatchTitle.clean(head.title))' "
+                    + "published unverified for the tap — verification continues behind it")
+    }
+
+    /// DB-07: the first frame is up (the view calls this on
+    /// every ready) — deep-warm the rest of the ladder behind
+    /// the playing rung in the shared pre-warm store. Pure
+    /// background work; it never blocks or slows playback.
+    func beginPrewarming(after index: Int) {
+        let ladder = sources
+        guard ladder.count > 1, ladder.indices.contains(index) else { return }
+        let current = ladder[index]
+        SourcePrewarmStore.shared.warm(
+            ladder: ladder, startingAfter: current.url,
+            excluding: [current.url])
+    }
+
+    /// The player closed: stop spending bandwidth on warm-ups
+    /// that have not started yet.
+    func endPrewarming() {
+        SourcePrewarmStore.shared.cancelPending()
+    }
+
+    /// A source the pre-warmer proved dead (see
+    /// SourcePrewarmStore): the player's automatic advance
+    /// skips it without spending a player load on it.
+    func isWarmedDead(_ url: String) -> Bool {
+        SourcePrewarmStore.shared.isDead(url)
+    }
+
     private func run(ladder: [Channel]) async {
         let total = ladder.count
         let hardDeadline = Date().addingTimeInterval(Self.hardDeadline)
@@ -1171,6 +1260,7 @@ final class MatchPlaySession: ObservableObject {
 
         var verified: [(Int, Channel, ParsedQuality?)] = []
         var kept: [(Int, Channel)] = []
+        var deadURLs = Set<String>()
         var settled = 0
         var published = false
         var softPassed = false
@@ -1189,16 +1279,34 @@ final class MatchPlaySession: ObservableObject {
                 case (nil, nil): return a.0 < b.0
                 }
             }.map { $0.1 }
-            if published {
-                let have = Set(self.sources.map(\.url))
-                self.sources += ordered.filter { !have.contains($0.url) }
+            // Merge into the published ladder: a channel whose
+            // URL is already on the ladder replaces that rung IN
+            // PLACE — pre-flight's verified copy can carry a
+            // repaired Referer the instant head went out without,
+            // and dropping it on URL alone (the old dedup) left
+            // the live ladder holding the unrepaired original.
+            // The rung's position never changes; only genuinely
+            // new URLs append behind.
+            func merge(_ incoming: [Channel]) {
+                for ch in incoming {
+                    if let rung = self.sources.firstIndex(where: { $0.url == ch.url }) {
+                        self.sources[rung] = ch
+                    } else {
+                        self.sources.append(ch)
+                    }
+                }
+            }
+            if published || self.headPublished {
+                // DB-07: with an instant head already published,
+                // the verified batch appends behind it like any
+                // later publication — the head rung never moves.
+                merge(ordered)
             } else {
                 self.sources = ordered
                 published = true
             }
             if final {
-                let have = Set(self.sources.map(\.url))
-                self.sources += kept.sorted { $0.0 < $1.0 }.map { $0.1 }.filter { !have.contains($0.url) }
+                merge(kept.sorted { $0.0 < $1.0 }.map { $0.1 })
             }
         }
 
@@ -1246,6 +1354,7 @@ final class MatchPlaySession: ObservableObject {
                         group.cancelAll()
                     }
                 case (_, .dead?):
+                    deadURLs.insert(ladder[i].url)
                     settled += 1
                     if settled == total {
                         publish(final: true)
@@ -1264,7 +1373,282 @@ final class MatchPlaySession: ObservableObject {
         }
         if !published { publish(final: true) }
         isResolving = false
-        ResolveHub.shared.noteResolved(key: key, sources: sources, from: self)
+        // DB-07: the live ladder keeps the instant head even
+        // when pre-flight later proved it dead (the published
+        // prefix never moves under a live player), but the
+        // cache entry must not inherit a proven-dead source as
+        // playable — the next open resolves it fresh instead.
+        ResolveHub.shared.noteResolved(
+            key: key,
+            sources: sources.filter { !deadURLs.contains($0.url) },
+            from: self)
+    }
+}
+
+/// One source's deep warm (DB-07, plan D): fetch the playlist,
+/// descend a master playlist to its best variant's media
+/// playlist, then pull the first segment's head — so the CDN
+/// edge nearest this phone and the provider's session are warm
+/// before the viewer ever switches to the source, and a source
+/// that is provably dead at warm time is known before the
+/// ladder spends a player load on it.
+///
+/// Death is judged at the top playlist only, on exactly
+/// pre-flight's standard (HTTP 404/410, or a 200 whose body
+/// is not a playlist / is a takedown slate); anything
+/// transient — 5xx, 401/403 (the Referer-repair question is
+/// pre-flight's, already settled for published sources),
+/// network errors — leaves the source merely unwarmed, never
+/// marked. The variant and segment fetches below the top
+/// playlist run for their warming value only and never
+/// judge: a source can lose its top variant, or its oldest
+/// segment to the sliding live window, while it still plays.
+/// Nonisolated, like SourcePreflight: it touches no actor
+/// state.
+private enum SourcePrewarmer {
+
+    /// True only on definitive death.
+    static func warm(_ ch: Channel, session: URLSession) async -> Bool {
+        guard let url = ch.streamURL else { return true }
+        guard let head = await fetch(ch, url: url, limit: 16_384, session: session)
+        else { return false }
+        switch head.status {
+        case 404, 410: return true
+        case 200: break
+        default: return false
+        }
+        let path = ch.url.split(separator: "?").first.map(String.init) ?? ch.url
+        guard path.lowercased().hasSuffix(".m3u8") else {
+            // Direct-media URL: nothing structured to prime.
+            return false
+        }
+        let text = String(decoding: head.body, as: UTF8.self)
+        guard isPlaylist(text) else { return true }
+        var mediaText = text
+        var mediaBase = url
+        if text.contains("#EXT-X-STREAM-INF"),
+           let variant = bestVariantURL(in: text, base: url) {
+            // The descent still runs — fetching the variant
+            // playlist is most of the warming value — but its
+            // answer never judges (see the death rule above):
+            // a failed descent just ends the warm here.
+            guard let media = await fetch(ch, url: variant, limit: 16_384, session: session),
+                  media.status == 200
+            else { return false }
+            let variantText = String(decoding: media.body, as: UTF8.self)
+            guard isPlaylist(variantText) else { return false }
+            mediaText = variantText
+            mediaBase = variant
+        }
+        if let segment = firstSegmentURL(in: mediaText, base: mediaBase) {
+            // Pulled for its warming value only: a 404/410
+            // here judges nothing — the oldest segment of a
+            // sliding live window can expire between the
+            // playlist fetch and this one while the source
+            // plays on.
+            _ = await fetch(ch, url: segment, limit: 256 * 1024, session: session)
+        }
+        return false
+    }
+
+    private static func isPlaylist(_ text: String) -> Bool {
+        text.contains("#EXTM3U")
+            && (text.contains("#EXT-X-STREAM-INF") || text.contains("#EXTINF"))
+            && !text.lowercased().contains("takedown")
+    }
+
+    /// One bounded fetch in pre-flight's shape: the channel's
+    /// declared header set, a 4 s request timeout, at most
+    /// `limit` bytes of body read. Nil on a network-level error.
+    private static func fetch(_ ch: Channel, url: URL, limit: Int,
+                              session: URLSession) async -> (status: Int, body: Data)? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4
+        for (field, value) in NuvioStreamHeaders.requestHeaders(for: ch, referrer: ch.referrer) {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+            var buffer = Data()
+            if status == 200 {
+                for try await byte in bytes {
+                    buffer.append(byte)
+                    if buffer.count > limit { break }
+                }
+            }
+            return (status, buffer)
+        } catch {
+            return nil
+        }
+    }
+
+    /// The variant the player meets first when it opens a
+    /// master playlist: the highest-BANDWIDTH #EXT-X-STREAM-INF
+    /// entry (token-boundary attribute parsing, as in
+    /// ParsedQuality.parse).
+    private static func bestVariantURL(in text: String, base: URL) -> URL? {
+        var best: (bandwidth: Int, uri: String)?
+        var pendingBandwidth: Int?
+        for rawLine in text.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#EXT-X-STREAM-INF") {
+                let attributeList = line.split(separator: ":", maxSplits: 1).last.map(String.init) ?? line
+                var bandwidth = 0
+                for rawToken in attributeList.components(separatedBy: ",") {
+                    let token = rawToken.trimmingCharacters(in: .whitespaces)
+                    if token.hasPrefix("BANDWIDTH=") {
+                        bandwidth = Int(token.dropFirst("BANDWIDTH=".count)) ?? 0
+                    }
+                }
+                pendingBandwidth = bandwidth
+            } else if !line.isEmpty, !line.hasPrefix("#"), let bw = pendingBandwidth {
+                if best == nil || bw > best!.bandwidth { best = (bw, line) }
+                pendingBandwidth = nil
+            }
+        }
+        guard let uri = best?.uri else { return nil }
+        return URL(string: uri, relativeTo: base)?.absoluteURL
+    }
+
+    /// The first segment a media playlist declares.
+    private static func firstSegmentURL(in text: String, base: URL) -> URL? {
+        for rawLine in text.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            return URL(string: line, relativeTo: base)?.absoluteURL
+        }
+        return nil
+    }
+}
+
+/// The shared pre-warm queue (DB-07, plan D): deep-warms match
+/// sources in the background — from the moment a fixture's link
+/// board opens (the viewer's intent is on screen) and continuing
+/// inside the player behind the playing source. Priority is the
+/// ladder's own order, re-based behind the playing rung when
+/// the player asks; at most two warm fetches run at once, every
+/// fetch is byte-capped, and the queue only ever touches
+/// network state — playback is never blocked by it. A source it
+/// proves dead is remembered for the rest of the app run, so
+/// the player's automatic advance can skip that rung instantly
+/// (PlayerView.advance); an explicit board pick still tries
+/// the row the viewer chose. Warmth is per app run: a source
+/// warmed or proven dead once is not re-fetched for later
+/// boards or sessions of the same fixture.
+@MainActor
+final class SourcePrewarmStore {
+    static let shared = SourcePrewarmStore()
+
+    private enum WarmState { case warming, warm, dead }
+    private var states: [String: WarmState] = [:]
+    private var pending: [Channel] = []
+    private var driver: Task<Void, Never>?
+    private var driverToken: UUID?
+
+    private init() {}
+
+    func isDead(_ url: String) -> Bool { states[url] == .dead }
+
+    /// Enqueue a ladder for warming. `startingAfter` re-bases
+    /// the priority: the rungs behind that URL go first (the
+    /// order the ladder would advance through them), the
+    /// earlier rungs after. Sources already warm, warming,
+    /// proven dead or explicitly excluded are skipped; the
+    /// pending queue is rebuilt in the newest priority order
+    /// on every call, so a switch mid-warm re-prioritises
+    /// what has not started yet.
+    func warm(ladder: [Channel], startingAfter: String? = nil,
+              excluding: Set<String> = []) {
+        var ordered = ladder
+        if let anchor = startingAfter,
+           let i = ladder.firstIndex(where: { $0.url == anchor }) {
+            ordered = Array(ladder[(i + 1)...]) + Array(ladder[..<i])
+        }
+        var seen = Set<String>()
+        pending = ordered.filter { ch in
+            !excluding.contains(ch.url)
+                && states[ch.url] == nil
+                && seen.insert(ch.url).inserted
+        }
+        startDriverIfNeeded()
+    }
+
+    /// The player closed: stop spending bandwidth. In-flight
+    /// fetches are cancelled with the driver; sources left
+    /// mid-warm fall back to unwarmed (a later board or
+    /// session may warm them again), while warm and dead
+    /// verdicts are kept.
+    func cancelPending() {
+        pending = []
+        driver?.cancel()
+    }
+
+    private func startDriverIfNeeded() {
+        guard driver == nil, !pending.isEmpty else { return }
+        let token = UUID()
+        driverToken = token
+        driver = Task { [weak self] in
+            await self?.runDriver(token: token)
+        }
+    }
+
+    private func runDriver(token: UUID) async {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 6
+        let session = URLSession(configuration: config)
+        var channelsByURL: [String: Channel] = [:]
+
+        /// Pop the next source to warm, in queue order, and
+        /// mark it in flight (the same nested-helper shape as
+        /// MatchPlaySession.run's publish()).
+        func takeNext() -> Channel? {
+            guard !pending.isEmpty else { return nil }
+            let ch = pending.removeFirst()
+            channelsByURL[ch.url] = ch
+            states[ch.url] = .warming
+            return ch
+        }
+
+        defer {
+            session.invalidateAndCancel()
+            // Sources left mid-warm by a cancellation are
+            // unwarmed again, never half-marked.
+            if Task.isCancelled {
+                for url in states.filter({ $0.value == .warming }).map(\.key) {
+                    states[url] = nil
+                }
+            }
+            if driverToken == token {
+                driver = nil
+                driverToken = nil
+                // A warm() that landed while this driver was
+                // unwinding starts a fresh one.
+                startDriverIfNeeded()
+            }
+        }
+
+        await withTaskGroup(of: (String, Bool).self) { group in
+            var active = 0
+            while active < 2, let ch = takeNext() {
+                group.addTask { (ch.url, await SourcePrewarmer.warm(ch, session: session)) }
+                active += 1
+            }
+            for await (url, dead) in group {
+                active -= 1
+                if !Task.isCancelled {
+                    states[url] = dead ? .dead : .warm
+                    if dead, let ch = channelsByURL[url] {
+                        DiagLog.log("player",
+                                    "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
+                    }
+                }
+                while active < 2, let ch = takeNext() {
+                    group.addTask { (ch.url, await SourcePrewarmer.warm(ch, session: session)) }
+                    active += 1
+                }
+            }
+        }
     }
 }
 
@@ -1338,7 +1722,12 @@ final class ResolveHub {
                 // cancellation and fall through to a fresh session.
                 forgetInFlight(key: key, from: live)
             } else {
-                if isTap { noteTapAdoption(of: live) }
+                if isTap {
+                    noteTapAdoption(of: live)
+                    // DB-07: the tap plays the head NOW, even
+                    // while this shared session still verifies.
+                    live.publishHeadNow()
+                }
                 return (live, false)
             }
         }
@@ -1353,6 +1742,11 @@ final class ResolveHub {
         inFlight[key] = session
         if isTap { noteTapAdoption(of: session) }
         session.begin(ladder: ladder)
+        // DB-07: a fresh session for a tap publishes its head
+        // unverified at once (see publishHeadNow); a pre-resolve
+        // pass (isTap == false) keeps the verified-batch
+        // contract untouched.
+        if isTap { session.publishHeadNow() }
         return (session, true)
     }
 

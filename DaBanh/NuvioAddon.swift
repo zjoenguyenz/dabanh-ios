@@ -461,27 +461,37 @@ enum NuvioAddonClient {
     /// playable; nil is a failed fetch — the store treats both
     /// as an empty ladder (the player settles on its slate).
     static func fetchStreams(for meta: NuvioMeta) async -> [NuvioStream] {
+        // Đ-8 (1.26): the fetch carries an 8 s deadline — the
+        // session's bare 20 s request timeout let a slow addon
+        // hold the player's first English open for up to ~30 s.
+        // Duration + count go to the diagnostic log (numbers
+        // only — never the URL or any header).
+        let started = Date()
         let session = makeSession()
         defer { session.invalidateAndCancel() }
-        guard let url = URL(string: "\(base)/stream/\(meta.type)/\(meta.id).json"),
-              let data = await getJSON(url, session: session),
-              let dto = try? JSONDecoder().decode(NuvioStreamsDTO.self, from: data)
-        else { return [] }
         var streams: [NuvioStream] = []
-        var seenURLs = Set<String>()
-        for failable in dto.streams {
-            guard let stream = failable.value,
-                  let raw = stream.url, !raw.isEmpty,
-                  URL(string: raw) != nil,
-                  seenURLs.insert(raw).inserted
-            else { continue } // no playable url: donation / externalUrl-only row (contract note 2)
-            streams.append(NuvioStream(
-                name: stream.name,
-                title: stream.title,
-                url: raw,
-                headers: stream.behaviorHints?.proxyHeaders?.request ?? [:]))
-            if streams.count >= 12 { break }
+        if let url = URL(string: "\(base)/stream/\(meta.type)/\(meta.id).json"),
+           let data = await getJSON(url, session: session,
+                                     deadline: started.addingTimeInterval(8)),
+           let dto = try? JSONDecoder().decode(NuvioStreamsDTO.self, from: data) {
+            var seenURLs = Set<String>()
+            for failable in dto.streams {
+                guard let stream = failable.value,
+                      let raw = stream.url, !raw.isEmpty,
+                      URL(string: raw) != nil,
+                      seenURLs.insert(raw).inserted
+                else { continue } // no playable url: donation / externalUrl-only row (contract note 2)
+                streams.append(NuvioStream(
+                    name: stream.name,
+                    title: stream.title,
+                    url: raw,
+                    headers: stream.behaviorHints?.proxyHeaders?.request ?? [:]))
+                if streams.count >= 12 { break }
+            }
         }
+        DiagLog.log("nuvio", "stream fetch: \(streams.count) streams in "
+            + String(format: "%.1f", Date().timeIntervalSince(started))
+            + "s (8s deadline)")
         return streams
     }
 

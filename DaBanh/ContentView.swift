@@ -220,6 +220,12 @@ struct ContentView: View {
                 entry: entry,
                 enMetas: enMetas(for: entry),
                 onPlayVN: { channel in
+                    // DB-07: the pick anchor of the tap→play
+                    // timeline (the tap, the board and the
+                    // first frame each log their own line now).
+                    DiagLog.log("player",
+                                "tap: board pick '\(MatchTitle.clean(channel.title))' "
+                                + "host=\(channel.streamURL?.host ?? "?")")
                     pendingPlay = {
                         playerEntry = entry
                         selectedSession = ResolveHub.shared.session(
@@ -229,6 +235,8 @@ struct ContentView: View {
                     boardEntry = nil
                 },
                 onPlayEN: { meta in
+                    DiagLog.log("player",
+                                "tap: board pick EN '\(meta.name)'")
                     pendingPlay = {
                         playerEntry = entry
                         selectedAddonSession = nuvio.session(for: meta)
@@ -454,6 +462,10 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     ForEach(featuredEntries) { entry in
                         Button {
+                            // DB-07: the tap anchor of the
+                            // tap→play timeline in the log.
+                            DiagLog.log("player",
+                                        "tap: fixture '\(MatchTitle.clean(entry.channel.title))' from the list")
                             // A fixture tap opens its link board
                             // (spec §2.1); the board's row tap is
                             // what enters the player.
@@ -1022,6 +1034,8 @@ struct ContentView: View {
                 Section {
                     ForEach(enChannels) { channel in
                         Button {
+                            DiagLog.log("player",
+                                        "tap: channel '\(MatchTitle.clean(channel.title))' — direct play")
                             playerEntry = nil
                             selectedSession = ResolveHub.shared.session(for: store.sources(for: channel))
                             selectedChannel = channel
@@ -1113,6 +1127,9 @@ struct ContentView: View {
 
     private func matchRow(_ entry: FixtureEntry) -> some View {
         Button {
+            // DB-07: the tap anchor of the tap→play timeline.
+            DiagLog.log("player",
+                        "tap: fixture '\(MatchTitle.clean(entry.channel.title))' from the list")
             // A fixture tap opens its link board (spec §2.1);
             // the board's row tap enters the player.
             boardEntry = entry

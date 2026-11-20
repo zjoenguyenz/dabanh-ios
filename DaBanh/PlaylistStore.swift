@@ -69,6 +69,91 @@ enum DiagLog {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         log("app", "launch Da Banh iOS \(version) (\(build)) "
             + "on iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)")
+        startWatchdog()
+    }
+
+    // MARK: Main-actor stall watchdog (Đ-3, 1.26)
+
+    /// Lock-guarded watchdog state shared between the main-actor
+    /// heartbeat and the background checker. `@unchecked Sendable`
+    /// is honest here: every access is serialized by the lock.
+    private final class WatchdogState: @unchecked Sendable {
+        let lock = NSLock()
+        var started = false
+        var lastBeat = Date()
+        /// The last on-time beat of the stall currently open, if any.
+        var stallSince: Date?
+    }
+
+    private static let watchdog = WatchdogState()
+
+    /// Watches for main-actor stalls (Đ-3): the 53-second black
+    /// window of 2026-11-20 left no trace in this log because
+    /// nothing recorded whether the main actor was alive through
+    /// it. A main-actor heartbeat stamps the time every 2 s; a
+    /// detached checker compares it against the wall clock once
+    /// a second. A heartbeat more than 3 s late opens a stall —
+    /// one log line per stall — and the first on-time beat after
+    /// it closes the stall with its total duration. Started from
+    /// boot() so both apps get it from the one existing launch
+    /// hook; idempotent, fire-and-forget, never blocks launch.
+    private static func startWatchdog() {
+        watchdog.lock.lock()
+        guard !watchdog.started else { watchdog.lock.unlock(); return }
+        watchdog.started = true
+        watchdog.lastBeat = Date()
+        watchdog.lock.unlock()
+
+        Task { @MainActor in
+            while !Task.isCancelled {
+                watchdog.lock.lock()
+                watchdog.lastBeat = Date()
+                watchdog.lock.unlock()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+
+        Task.detached {
+            var lastCheck = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                let now = Date()
+                // If the checker itself slept far past its 1 s
+                // cadence, the whole process was suspended
+                // (backgrounded): re-baseline instead of logging
+                // the suspension gap as a stall.
+                if now.timeIntervalSince(lastCheck) > 5 {
+                    watchdog.lock.lock()
+                    watchdog.lastBeat = now
+                    watchdog.stallSince = nil
+                    watchdog.lock.unlock()
+                    lastCheck = now
+                    continue
+                }
+                lastCheck = now
+                watchdog.lock.lock()
+                let beat = watchdog.lastBeat
+                let stallSince = watchdog.stallSince
+                watchdog.lock.unlock()
+                let late = now.timeIntervalSince(beat)
+                if let since = stallSince {
+                    if late <= 3 {
+                        watchdog.lock.lock()
+                        watchdog.stallSince = nil
+                        watchdog.lock.unlock()
+                        log("app", "main stall recovered: "
+                            + String(format: "%.1f", now.timeIntervalSince(since))
+                            + "s total")
+                    }
+                } else if late > 3 {
+                    watchdog.lock.lock()
+                    watchdog.stallSince = beat
+                    watchdog.lock.unlock()
+                    log("app", "main stall: heartbeat late by "
+                        + String(format: "%.1f", late) + "s")
+                }
+            }
+        }
     }
 
     /// The current log text (the share sheet sends the file

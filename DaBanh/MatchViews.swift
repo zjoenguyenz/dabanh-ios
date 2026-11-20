@@ -980,7 +980,38 @@ struct MatchBoardView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            // DB-07: the board-open anchor of the tap→play
+            // timeline (the fixture tap, this opening, the row
+            // pick and the first frame each log their own line,
+            // so no leg of the path is blind any more). The
+            // in-player board has its own "board opened" line
+            // from the player's switch button.
+            if !inPlayerMode {
+                DiagLog.log("player",
+                            "board opened: '\(MatchTitle.clean(entry.channel.title))' "
+                            + "(\(store.sources(for: entry.channel).count) sources)")
+            }
+        }
         .task {
+            // DB-07 (plan D): the board being open is the
+            // viewer's intent on screen — deep-warm this
+            // fixture's ladder in the background from here, so
+            // whichever row he picks is already warm and the
+            // switches behind it are primed. Pure background
+            // work; the pick itself never waits for it. In
+            // in-player mode the warm re-bases behind the
+            // playing row instead.
+            await MainActor.run {
+                let ladder = store.sources(for: entry.channel)
+                if inPlayerMode {
+                    SourcePrewarmStore.shared.warm(
+                        ladder: ladder, startingAfter: playingChannelURL,
+                        excluding: Set(playingChannelURL.map { [$0] } ?? []))
+                } else {
+                    SourcePrewarmStore.shared.warm(ladder: ladder)
+                }
+            }
             // The opened board is first in line for the FotMob
             // incidents of its fixture (spec §1.2).
             await store.liveStates.ensureDetails(for: entry.channel)
