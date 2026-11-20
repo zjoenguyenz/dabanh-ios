@@ -98,17 +98,19 @@ enum DiagLog {
     /// boot() so both apps get it from the one existing launch
     /// hook; idempotent, fire-and-forget, never blocks launch.
     private static func startWatchdog() {
-        watchdog.lock.lock()
-        guard !watchdog.started else { watchdog.lock.unlock(); return }
-        watchdog.started = true
-        watchdog.lastBeat = Date()
-        watchdog.lock.unlock()
+        let shouldStart: Bool = watchdog.lock.withLock {
+            guard !watchdog.started else { return false }
+            watchdog.started = true
+            watchdog.lastBeat = Date()
+            return true
+        }
+        guard shouldStart else { return }
 
         Task { @MainActor in
             while !Task.isCancelled {
-                watchdog.lock.lock()
-                watchdog.lastBeat = Date()
-                watchdog.lock.unlock()
+                watchdog.lock.withLock {
+                    watchdog.lastBeat = Date()
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -123,32 +125,31 @@ enum DiagLog {
                 // (backgrounded): re-baseline instead of logging
                 // the suspension gap as a stall.
                 if now.timeIntervalSince(lastCheck) > 5 {
-                    watchdog.lock.lock()
-                    watchdog.lastBeat = now
-                    watchdog.stallSince = nil
-                    watchdog.lock.unlock()
+                    watchdog.lock.withLock {
+                        watchdog.lastBeat = now
+                        watchdog.stallSince = nil
+                    }
                     lastCheck = now
                     continue
                 }
                 lastCheck = now
-                watchdog.lock.lock()
-                let beat = watchdog.lastBeat
-                let stallSince = watchdog.stallSince
-                watchdog.lock.unlock()
+                let (beat, stallSince) = watchdog.lock.withLock {
+                    (watchdog.lastBeat, watchdog.stallSince)
+                }
                 let late = now.timeIntervalSince(beat)
                 if let since = stallSince {
                     if late <= 3 {
-                        watchdog.lock.lock()
-                        watchdog.stallSince = nil
-                        watchdog.lock.unlock()
+                        watchdog.lock.withLock {
+                            watchdog.stallSince = nil
+                        }
                         log("app", "main stall recovered: "
                             + String(format: "%.1f", now.timeIntervalSince(since))
                             + "s total")
                     }
                 } else if late > 3 {
-                    watchdog.lock.lock()
-                    watchdog.stallSince = beat
-                    watchdog.lock.unlock()
+                    watchdog.lock.withLock {
+                        watchdog.stallSince = beat
+                    }
                     log("app", "main stall: heartbeat late by "
                         + String(format: "%.1f", late) + "s")
                 }
