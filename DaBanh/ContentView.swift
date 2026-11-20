@@ -321,6 +321,20 @@ struct ContentView: View {
                 .padding(.bottom, 4)
         }
         .presentationBackground(.clear)
+        .onAppear {
+            // FIX-128: the board being open is the viewer's
+            // intent on screen — start hub verification for
+            // this fixture NOW (the board's own .task already
+            // deep-warms it in the pre-warm store), so the row
+            // he picks seconds later adopts an in-flight or
+            // cached resolution from ResolveHub instead of
+            // starting verification at the tap. preresolve's
+            // supersede contract applies: this pass replaces
+            // any earlier pre-resolve pass, and sessions a tap
+            // has adopted are never cancelled by it.
+            ResolveHub.shared.preresolve(
+                ladders: [store.sources(for: entry.channel)])
+        }
     }
 
     // MARK: - Header

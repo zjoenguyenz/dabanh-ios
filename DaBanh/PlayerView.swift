@@ -202,6 +202,18 @@ struct PlayerView: View {
                     .padding(.bottom, 26)
                 }
                 .ignoresSafeArea()
+                .onAppear {
+                    // FIX-128: the waiting anchor — the player
+                    // has walked past the published ladder but
+                    // resolution is still running, so it holds
+                    // for the next published batch instead of
+                    // declaring signal loss (that slate requires
+                    // settledExhausted: settled AND walked past).
+                    DiagLog.log("player",
+                                "player waiting: past the published ladder at "
+                                + "#\(index), resolution still running — "
+                                + "holding for the next batch")
+                }
                 closeButton
             }
         }
@@ -1162,6 +1174,21 @@ final class MatchPlaySession: ObservableObject {
     /// publishHeadNow) — run()'s publications append behind
     /// it from then on, exactly as after a verified publish.
     private var headPublished = false
+    /// FIX-128: the "ladder first batch" DiagLog line fires
+    /// once per session, at run()'s first publication.
+    private var didLogFirstBatch = false
+    /// FIX-128B: run() has made its FINAL publication (the
+    /// one that appends the kept tail — including a final
+    /// publication that lands ZERO rungs: every candidate
+    /// dead, or the hard deadline empty-handed). Set inside
+    /// publish(final:) at the moment of that publish, so it
+    /// is already true while run() is still draining its
+    /// task group afterwards. adoptSeed and publishHeadNow
+    /// both refuse once this is set: after the final publish
+    /// the ladder is settled, and nothing may be injected
+    /// into it for noteResolved to mistake for this run's
+    /// own result (REVIEW-128-LOOP1 F-1).
+    private var didPublishFinal = false
 
     nonisolated private static let quorum = 3
     nonisolated private static let softDeadline: TimeInterval = 6
@@ -1179,6 +1206,69 @@ final class MatchPlaySession: ObservableObject {
         session.isResolving = false
         session.started = true
         return session
+    }
+
+    /// FIX-128: a session born with a STALE resolve-cache
+    /// ladder already published (the tvOS read path: a cached
+    /// resolution is adopted, never discarded for age — see
+    /// ResolveHub). The replayed ladder excludes every source
+    /// the resolve that produced it proved dead (the cache
+    /// write filters them), so the player starts on a
+    /// previously-verified rung in the same state change as
+    /// the tap; `beginRevalidation(ladder:)` then re-resolves
+    /// behind it and run()'s publications merge into the
+    /// replayed ladder exactly as behind an instant head (the
+    /// published prefix never moves). The hub registers the
+    /// session in its in-flight table before calling
+    /// beginRevalidation, so the settle-time hub writes meet
+    /// their identity guards satisfied.
+    static func seeded(key: String, sources: [Channel]) -> MatchPlaySession {
+        let session = MatchPlaySession(key: key)
+        session.sources = sources
+        session.headPublished = true
+        session.started = true
+        return session
+    }
+
+    /// FIX-128: replay a stale cached ladder into this
+    /// session while it is still empty (a tap adopting an
+    /// in-flight session whose verification has not published
+    /// yet — the board-open pre-resolve in the 285 s case).
+    /// The replay becomes the published prefix: this session's
+    /// own publications merge behind it exactly as behind an
+    /// instant head, so verification continues behind a ladder
+    /// the player can already walk. No-op once anything has
+    /// published — a live ladder is never re-based.
+    /// FIX-128B: "anything has published" includes a final
+    /// publish that landed ZERO rungs (sources stays empty,
+    /// so the sources.isEmpty check alone cannot see it):
+    /// the didPublishFinal gate is what refuses the seed
+    /// while run() drains its task group after that publish.
+    func adoptSeed(_ seed: [Channel]) {
+        guard isResolving, !didPublishFinal, sources.isEmpty, !seed.isEmpty else { return }
+        headPublished = true
+        sources = seed
+    }
+
+    /// Starts the background re-resolution behind a seeded
+    /// (stale-adopted) ladder. The current ladder is verified
+    /// in full; nothing about the replayed prefix changes
+    /// while it runs.
+    func beginRevalidation(ladder: [Channel]) {
+        ladderSnapshot = ladder
+        guard !ladder.isEmpty else {
+            // Unreachable through the hub (a stale entry's key
+            // is its ladder's URLs, so a matching empty ladder
+            // means an empty entry, which never takes the
+            // stale path) — kept to begin()'s shape: an empty
+            // ladder settles as a negative entry.
+            isResolving = false
+            ResolveHub.shared.noteResolved(key: key, sources: [], from: self)
+            return
+        }
+        resolveTask = Task { [weak self] in
+            await self?.run(ladder: ladder)
+        }
     }
 
     func begin(ladder: [Channel]) {
@@ -1223,14 +1313,62 @@ final class MatchPlaySession: ObservableObject {
     /// path advances past it — and run() keeps a proven-dead
     /// head out of the cache entry, so the next open does not
     /// inherit it as a proven source.
+    ///
+    /// FIX-128: the head publish is FILTERED by the verdicts
+    /// this app run already holds (the hub's proven-dead set,
+    /// fed by every settled resolve, and the pre-warm store's
+    /// dead set — both definitive-death only, see isKnownDead).
+    /// A picked head already verdicted dead is never handed
+    /// to the player to die on again: the first ladder rung
+    /// not known dead publishes in its place (the pick's row
+    /// stays on the board, marked by the verdicts there; the
+    /// session's own verification still re-checks every rung
+    /// behind, so a revived source returns through run()'s
+    /// publications). When EVERY rung is known dead nothing
+    /// publishes here — the session settles on its own
+    /// evidence and the player shows its slate, instead of
+    /// replaying a death the app already knows.
+    ///
+    /// FIX-128B: the head publish also refuses once run()
+    /// has made its final publication (didPublishFinal): a
+    /// session draining its task group after an empty final
+    /// publish is settled, and an instant head injected in
+    /// that window would be written into the cache by
+    /// noteResolved as if it were the run's own result —
+    /// the same F-1 window adoptSeed is gated against.
     func publishHeadNow() {
-        guard isResolving, sources.isEmpty,
+        guard isResolving, !didPublishFinal, sources.isEmpty,
               let head = ladderSnapshot.first else { return }
+        if isKnownDead(head) {
+            guard let substitute = ladderSnapshot.first(where: { !isKnownDead($0) })
+            else { return }
+            headPublished = true
+            sources = [substitute]
+            DiagLog.log("player",
+                        "instant head: picked source \(diagSourceTag(head)) "
+                        + "already proven dead this run — starting at "
+                        + "\(diagSourceTag(substitute)) instead, "
+                        + "verification continues behind it")
+            return
+        }
         headPublished = true
         sources = [head]
         DiagLog.log("player",
                     "instant head: '\(MatchTitle.clean(head.title))' "
                     + "published unverified for the tap — verification continues behind it")
+    }
+
+    /// FIX-128: definitive death as this app run has already
+    /// judged it — a settled resolve's verdict (the hub's
+    /// proven-dead set) or a deep-warm verdict (the pre-warm
+    /// store). Both sources convict on pre-flight's standard
+    /// only (404/410, a fake-200 body, or a network failure
+    /// while the source should be serving); a 403 that
+    /// survived Referer repair is KEPT there, never dead, so
+    /// the tunnel-off case is never filtered here.
+    private func isKnownDead(_ ch: Channel) -> Bool {
+        ResolveHub.shared.isProvenDead(ch.url)
+            || SourcePrewarmStore.shared.isDead(ch.url)
     }
 
     /// DB-07: the first frame is up (the view calls this on
@@ -1315,7 +1453,23 @@ final class MatchPlaySession: ObservableObject {
                 published = true
             }
             if final {
+                // FIX-128B: mark the settle as the kept tail
+                // merges — publish() never suspends, so the
+                // flag and the merge land atomically with
+                // respect to any tap vending this session
+                // while run() drains its task group below.
+                self.didPublishFinal = true
                 merge(kept.sorted { $0.0 < $1.0 }.map { $0.1 })
+            }
+            // FIX-128: the first-batch anchor of the resolve
+            // timeline — the moment the first verified (or
+            // kept-tail) publication lands on the ladder.
+            if !self.didLogFirstBatch, !self.sources.isEmpty {
+                self.didLogFirstBatch = true
+                DiagLog.log("player",
+                            "ladder first batch: \(self.sources.count) source(s) "
+                            + "published for "
+                            + "'\(ladder.first.map { MatchTitle.clean($0.title) } ?? "?")'")
             }
         }
 
@@ -1390,6 +1544,8 @@ final class MatchPlaySession: ObservableObject {
         ResolveHub.shared.noteResolved(
             key: key,
             sources: sources.filter { !deadURLs.contains($0.url) },
+            deadURLs: deadURLs,
+            verifiedURLs: Set(verified.map { $0.1.url }),
             from: self)
     }
 }
@@ -1668,9 +1824,31 @@ final class SourcePrewarmStore {
 /// dead fixture is not re-scraped on every tap; a healthy
 /// re-resolve doubles the entry's TTL (60 s floor, 10 min cap),
 /// while an empty resolve collapses the entry to the 30 s negative
-/// TTL. In-memory only, capped at 100 entries (oldest evicted):
-/// a cold start re-verifies from the device — the only vantage
-/// point that shares the owner's network and tunnel.
+/// TTL. In-memory only, capped at 200 entries (least-recently-used
+/// evicted): a cold start re-verifies from the device — the only
+/// vantage point that shares the owner's network and tunnel.
+///
+/// FIX-128 (the tvOS tap-to-play read path, ported): a tap reads
+/// this registry in the order the SAME in-flight session → fresh
+/// cache → STALE cache → new resolve, and never pays full
+/// verification for a fixture the registry already knows:
+/// - A stale (TTL-expired) entry with a playable ladder is
+///   ADOPTED, not discarded: the tap vends a session seeded with
+///   the cached ladder — which already excludes every source
+///   that resolve proved dead — and re-resolution runs behind
+///   it, merging into the replayed ladder. The TTL now governs
+///   only when the background re-resolve runs, never whether
+///   the tap may use what is known. (Before FIX-128 the entry
+///   was treated as absent past its TTL: the 1.27 device log's
+///   Bayern tap, 285 s after the launch pre-resolve settled,
+///   created a new session and re-paid the dead head + serial
+///   failover in full.)
+/// - Every settled resolve also feeds its proven-dead URLs
+///   into an app-run dead set (provenDead below) that outlives
+///   any single entry's TTL, so a later tap's head publish can
+///   filter a source this run already convicted — the same
+///   per-run doctrine SourcePrewarmStore keeps for its own
+///   verdicts.
 @MainActor
 final class ResolveHub {
     static let shared = ResolveHub()
@@ -1679,10 +1857,31 @@ final class ResolveHub {
         var sources: [Channel]
         var storedAt: Date
         var ttl: TimeInterval
+        /// Last vend (fresh or stale) — the LRU eviction key.
+        var lastUsed: Date
+        /// FIX-128: the URLs of the entry's VERIFIED tier
+        /// (the rest of `sources` is the kept/blind tail, plus
+        /// possibly an instant head at rung 0). Recorded so a
+        /// later tap's seed order can tell a verified pick
+        /// from a merely-kept one without re-deriving tiers
+        /// from positions the merge may have shifted.
+        var verifiedURLs: Set<String>
     }
 
     private var cache: [String: Entry] = [:]
     private var inFlight: [String: MatchPlaySession] = [:]
+    /// URLs a settled resolve proved definitively dead this
+    /// app run (pre-flight's standard only — see
+    /// MatchPlaySession.isKnownDead). Outlives cache entries:
+    /// a verdict must survive the TTL of the entry that
+    /// produced it, or an expired entry resurrects its dead.
+    private var provenDead: Set<String> = []
+
+    /// Whether a settled resolve has already proven this URL
+    /// dead during this app run.
+    func isProvenDead(_ url: String) -> Bool {
+        provenDead.contains(url)
+    }
     private var preresolveTask: Task<Void, Never>?
     private var preresolveSessions: [MatchPlaySession] = []
     /// Sessions a tap has been handed (created by the tap, or a
@@ -1711,6 +1910,36 @@ final class ResolveHub {
         session(for: ladder, isTap: true).session
     }
 
+    /// FIX-128: the order a stale entry's ladder is replayed
+    /// in for a tap whose pick is `pick` (the head of the
+    /// tap's rotated ladder). Pick semantics, in order:
+    /// - The pick is in the entry's VERIFIED tier → it leads
+    ///   (it is both the viewer's choice and proven).
+    /// - The pick is only in the kept/blind tail while the
+    ///   entry holds verified rungs → the resolved order
+    ///   stands (verified first): the player starts at the
+    ///   first verified rung instead of paying the blind
+    ///   pick's possible death — the same rule publishHeadNow
+    ///   applies to a proven-dead pick, extended one tier:
+    ///   unverified loses to verified when a verified
+    ///   alternative is already known.
+    /// - Nothing in the entry is verified → the pick leads
+    ///   (among blind equals the choice rules, as the
+    ///   instant head has always done).
+    /// A pick absent from the entry (its URL rotated out of
+    /// the playlist since) leaves the resolved order alone.
+    private func tapSeedOrder(entry: Entry, pick: Channel?) -> [Channel] {
+        let seed = entry.sources
+        guard let pick,
+              let i = seed.firstIndex(where: { $0.url == pick.url }) else { return seed }
+        if entry.verifiedURLs.contains(pick.url) || entry.verifiedURLs.isEmpty {
+            return [seed[i]] + seed.enumerated()
+                .filter { $0.offset != i }
+                .map { $0.element }
+        }
+        return seed
+    }
+
     /// The hub's core lookup. `createdFresh` is true only when
     /// this call created and started a brand-new session — a
     /// single-flight hit and a born-complete cached session are
@@ -1719,6 +1948,12 @@ final class ResolveHub {
     /// also marks the returned live session tap-adopted and
     /// drops it from the preresolve-owned list, so a later sweep
     /// can never cancel a session a player is using.
+    ///
+    /// FIX-128 read order for a tap: in-flight session → fresh
+    /// cache entry → stale cache entry (seeded adoption with
+    /// re-resolution behind) → new session. A pre-resolve call
+    /// meeting a stale entry falls through to a fresh session —
+    /// refreshing the entry is exactly the pass's job.
     private func session(for ladder: [Channel], isTap: Bool) -> (session: MatchPlaySession, createdFresh: Bool) {
         let key = Self.key(for: ladder)
         if let live = inFlight[key] {
@@ -1733,16 +1968,77 @@ final class ResolveHub {
             } else {
                 if isTap {
                     noteTapAdoption(of: live)
+                    DiagLog.log("player",
+                                "resolve: tap adopted in-flight resolution for "
+                                + "'\(ladder.first?.title ?? "?")' — "
+                                + "\(live.sources.count) source(s) already published, "
+                                + "still resolving behind the player")
+                    // FIX-128: a still-empty in-flight session
+                    // (the board-open pre-resolve a second old)
+                    // is seeded with the stale cached ladder
+                    // when one exists, so the player starts on
+                    // previously-verified rungs while THIS
+                    // session's verification continues behind
+                    // the replay — the tap never waits for the
+                    // young session's first batch when an older
+                    // resolve already knows the fixture.
+                    if live.sources.isEmpty, let entry = cache[key],
+                       !entry.sources.isEmpty {
+                        let seed = tapSeedOrder(entry: entry, pick: ladder.first)
+                        live.adoptSeed(seed)
+                        cache[key]?.lastUsed = Date()
+                        DiagLog.log("player",
+                                    "resolve: tap seeded in-flight resolution for "
+                                    + "'\(ladder.first?.title ?? "?")' with the stale "
+                                    + "ladder — \(seed.count) source(s) replayed "
+                                    + "instantly, verification continues behind")
+                    }
                     // DB-07: the tap plays the head NOW, even
                     // while this shared session still verifies.
+                    // (A no-op when the seed just landed: the
+                    // replay already published a ladder.)
                     live.publishHeadNow()
                 }
                 return (live, false)
             }
         }
-        if let entry = cache[key],
-           Date().timeIntervalSince(entry.storedAt) < entry.ttl {
-            return (MatchPlaySession.cached(key: key, sources: entry.sources), false)
+        if let entry = cache[key] {
+            let age = Date().timeIntervalSince(entry.storedAt)
+            cache[key]?.lastUsed = Date()
+            if age < entry.ttl {
+                if isTap {
+                    DiagLog.log("player",
+                                "resolve: tap adopted cached resolution for "
+                                + "'\(ladder.first?.title ?? "?")' — "
+                                + "\(entry.sources.count) source(s), entry age "
+                                + "\(Int(age))s of \(Int(entry.ttl))s TTL")
+                }
+                return (MatchPlaySession.cached(key: key, sources: entry.sources), false)
+            }
+            if isTap, !entry.sources.isEmpty {
+                // FIX-128: stale adoption — the tvOS read path.
+                // The entry's ladder replays instantly (it
+                // already excludes the sources its resolve
+                // proved dead); a fresh resolve runs behind it
+                // and merges in, and its settle rewrites the
+                // entry with a doubled TTL. A stale NEGATIVE
+                // entry (empty ladder) never takes this path:
+                // there is nothing to replay, and re-resolving
+                // from scratch is the correct answer for a
+                // fixture that may have revived.
+                let session = MatchPlaySession.seeded(
+                    key: key, sources: tapSeedOrder(entry: entry, pick: ladder.first))
+                inFlight[key] = session
+                noteTapAdoption(of: session)
+                DiagLog.log("player",
+                            "resolve: tap adopted stale resolution for "
+                            + "'\(ladder.first?.title ?? "?")' — "
+                            + "\(entry.sources.count) source(s) replayed instantly, "
+                            + "re-resolving behind (entry age \(Int(age))s, "
+                            + "TTL was \(Int(entry.ttl))s)")
+                session.beginRevalidation(ladder: ladder)
+                return (session, true)
+            }
         }
         DiagLog.log("player",
                     "resolve: new session for '\(ladder.first?.title ?? "?")' "
@@ -1805,12 +2101,18 @@ final class ResolveHub {
     /// different session must not evict that replacement or
     /// overwrite its cache entry, so the write is dropped when
     /// `inFlight[key]` holds a different session object.
-    func noteResolved(key: String, sources: [Channel], from session: MatchPlaySession) {
+    func noteResolved(key: String, sources: [Channel], deadURLs: Set<String> = [],
+                      verifiedURLs: Set<String> = [],
+                      from session: MatchPlaySession) {
         if let live = inFlight[key] {
             guard live === session else { return }
             tapAdopted.remove(ObjectIdentifier(live))
         }
         inFlight[key] = nil
+        // FIX-128: the resolve's death verdicts join the
+        // app-run dead set BEFORE the entry is written, so
+        // they outlive this entry's TTL (see provenDead).
+        provenDead.formUnion(deadURLs)
         let ttl: TimeInterval
         if sources.isEmpty {
             ttl = 30 // negative entry — see the type doc
@@ -1819,10 +2121,16 @@ final class ResolveHub {
         } else {
             ttl = 60
         }
-        cache[key] = Entry(sources: sources, storedAt: Date(), ttl: ttl)
-        if cache.count > 100,
-           let oldest = cache.min(by: { $0.value.storedAt < $1.value.storedAt })?.key {
-            cache[oldest] = nil
+        let now = Date()
+        cache[key] = Entry(sources: sources, storedAt: now, ttl: ttl,
+                           lastUsed: now, verifiedURLs: verifiedURLs)
+        // FIX-128: LRU cap — evict least-recently-VENDED
+        // entries (a fixture the viewer keeps returning to
+        // keeps its verdicts; a one-off fixture's entry is
+        // the first to go).
+        while cache.count > 200,
+              let lru = cache.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
+            cache[lru] = nil
         }
     }
 
