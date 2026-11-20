@@ -176,9 +176,9 @@ struct FeaturedCard: View {
         let _ = store.crestsRevision
         if entry.isLive {
             // A live featured fixture IS the big-score board
-            // (spec §2.1/§1.5), at rail width.
-            LiveBoardView(entry: entry)
-                .frame(width: 300)
+            // (spec §2.1/§1.5), in the rail's fixed 300×176 frame
+            // (DB-03: every featured box the same size).
+            LiveBoardView(entry: entry, inRail: true)
         } else {
             featuredBody
         }
@@ -539,6 +539,17 @@ struct CrestImg: View {
 /// The C1 gold variant recolours the tile per §0.
 struct LiveBoardView: View {
     let entry: FixtureEntry
+    /// Featured-rail mode (DB-03, owner ruling 2026-11-19): every
+    /// box in the TRẬN NỔI BẬT rail shares ONE fixed frame —
+    /// 300×176, the tallest variant's height at rail width — so a
+    /// board with events and a board without one stand exactly the
+    /// same size side by side. The board's scale is derived from
+    /// the fixed rail width (never a measured width), its tile
+    /// background fills the whole frame (board(scale:) already
+    /// expands to the proposed size) and the content stays
+    /// top-aligned; the variable aspectRatio is dropped. The list
+    /// rows below keep the default (inRail = false) untouched.
+    var inRail: Bool = false
 
     private var isGold: Bool { entry.competition?.isGoldCup == true }
     private var hasEvents: Bool {
@@ -547,11 +558,17 @@ struct LiveBoardView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            board(scale: geo.size.width / 606)
+        if inRail {
+            board(scale: 300.0 / 606)
+                .frame(width: 300, height: 176)
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+        } else {
+            GeometryReader { geo in
+                board(scale: geo.size.width / 606)
+            }
+            .aspectRatio(hasEvents ? 1.72 : 2.45, contentMode: .fit)
+            .contentShape(RoundedRectangle(cornerRadius: 16))
         }
-        .aspectRatio(hasEvents ? 1.72 : 2.45, contentMode: .fit)
-        .contentShape(RoundedRectangle(cornerRadius: 16))
     }
 
     private func board(scale s: CGFloat) -> some View {

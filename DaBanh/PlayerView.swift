@@ -8,7 +8,12 @@ import UIKit
 /// with the app's own control layer — embedded full-bleed, exactly
 /// like the JTV app's player. One chrome only: close, title,
 /// play/pause, AirPlay, PiP and the fit/fill toggle all live in one
-/// control layer that fades together after 3.5 s.
+/// control layer that fades together after 3.5 s — but the fade
+/// only ever starts once playback is actually ready (DB-05):
+/// while a source is still loading, or the ladder is advancing
+/// to the next one, the chrome — the close button included —
+/// stays visible and tappable, so the viewer is never trapped
+/// on a black screen with no exit.
 ///
 /// Why not the system player (the design up to v1.15): the embedded
 /// AVPlayerViewController draws its OWN top bar (close + title)
@@ -126,13 +131,23 @@ struct PlayerView: View {
                     boardHeaderSlot
                     noSignal
                 }
+                .onAppear {
+                    DiagLog.log("player",
+                                "no signal: ladder exhausted at #\(index) — "
+                                + "'\(headerEntry.map { MatchTitle.clean($0.channel.title) } ?? session.key)'")
+                }
                 closeButton
             } else if let channel = current, channel.streamURL != nil {
                 LivePlayerSurface(
                     channel: channel, onFail: advance,
                     onReady: { switching = false }, onClose: { dismiss() },
+                    sourceIndex: index,
                     showsSourceSwitch: headerEntry != nil,
-                    onSourceSwitch: { sourceBoardPresented = true },
+                    onSourceSwitch: {
+                        DiagLog.log("player",
+                                    "source switch: board opened at source #\(index)")
+                        sourceBoardPresented = true
+                    },
                     pipSuppressed: sourceBoardPresented)
                     .id(index)
                     .ignoresSafeArea()
@@ -183,6 +198,9 @@ struct PlayerView: View {
             }
         }
         .onAppear {
+            DiagLog.log("player",
+                        "open: '\(headerEntry.map { MatchTitle.clean($0.channel.title) } ?? current.map { MatchTitle.clean($0.title) } ?? session.key)' "
+                        + "starting at source #\(index) (resolving=\(session.isResolving))")
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
         }
         .task {
@@ -210,6 +228,7 @@ struct PlayerView: View {
             }
         }
         .onDisappear {
+            DiagLog.log("player", "close: player view gone at source #\(index)")
             OrientationHelper.lock(.all, rotateTo: .portrait)
         }
     }
@@ -228,10 +247,17 @@ struct PlayerView: View {
         sourceBoardPresented = false
         if let position = session.sources.firstIndex(where: { $0.url == channel.url }) {
             if position != index {
+                DiagLog.log("player",
+                            "source switch VN in place: #\(index) -> #\(position) \(diagSourceTag(channel))")
                 index = position
                 switching = true
+            } else {
+                DiagLog.log("player",
+                            "source switch VN: already playing \(diagSourceTag(channel))")
             }
         } else {
+            DiagLog.log("player",
+                        "source switch VN via host cover-swap: \(diagSourceTag(channel))")
             onSwitchVN?(channel)
         }
     }
@@ -243,7 +269,13 @@ struct PlayerView: View {
     /// overlay.
     private func switchToEN(_ meta: NuvioMeta) {
         sourceBoardPresented = false
-        guard meta.id != currentENMetaID else { return }
+        guard meta.id != currentENMetaID else {
+            DiagLog.log("player",
+                        "source switch EN: already playing '\(meta.name)'")
+            return
+        }
+        DiagLog.log("player",
+                    "source switch EN via host cover-swap: '\(meta.name)'")
         onSwitchEN?(meta)
     }
 
@@ -270,6 +302,13 @@ struct PlayerView: View {
         // re-renders into the waiting branch while the session is
         // still resolving, or the settledExhausted slate once it
         // settles.
+        if let channel = current {
+            DiagLog.log("player",
+                        "advance: leaving source #\(index) \(diagSourceTag(channel))")
+        } else {
+            DiagLog.log("player",
+                        "advance: past the published ladder at #\(index)")
+        }
         index += 1
         switching = true
     }
@@ -290,6 +329,15 @@ struct PlayerView: View {
     }
 }
 
+/// One-line source descriptor for DiagLog (DB-06): the cleaned
+/// title plus the stream's host — never the full URL, because
+/// stream URLs can carry tokens; the existing resolve lines in
+/// this file set the same title-only style.
+private func diagSourceTag(_ channel: Channel) -> String {
+    let host = channel.streamURL?.host ?? URL(string: channel.url)?.host ?? "?"
+    return "'\(MatchTitle.clean(channel.title))' host=\(host)"
+}
+
 /// SwiftUI wrapper around the custom live-player surface. Plays
 /// immediately on appear; pauses and releases on dismantle. The
 /// asset carries exactly the headers the entry itself declared
@@ -299,6 +347,8 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
     let onFail: () -> Void
     let onReady: () -> Void
     let onClose: () -> Void
+    /// This surface's rung on the ladder, for DiagLog lines.
+    var sourceIndex: Int = 0
     /// Đổi nguồn (1.22): whether the surface shows the switch
     /// button in its control layer (fixture playbacks only —
     /// the page passes headerEntry != nil) and what a tap fires.
@@ -311,6 +361,7 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> LivePlayerViewController {
         let controller = LivePlayerViewController()
         controller.channel = channel
+        controller.sourceIndex = sourceIndex
         controller.onFail = onFail
         controller.onReady = onReady
         controller.onClose = onClose
@@ -349,6 +400,8 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
 /// player's surface so both of the owner's apps feel identical.
 final class LivePlayerViewController: UIViewController {
     var channel: Channel?
+    /// This surface's rung on the ladder, for DiagLog lines.
+    var sourceIndex = 0
     var onFail: (() -> Void)?
     var onReady: (() -> Void)?
     var onClose: (() -> Void)?
@@ -386,6 +439,8 @@ final class LivePlayerViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .black
         guard let channel else { return }
+        DiagLog.log("player",
+                    "try source #\(sourceIndex): \(diagSourceTag(channel))")
 
         // Audio session for background / PiP playback.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
@@ -411,7 +466,12 @@ final class LivePlayerViewController: UIViewController {
         observe(item: item, player: player)
         setupRemoteCommands(channel: channel)
         player.play()
-        scheduleControlsHide()
+        // DB-05: NO hide timer here. The chrome starts visible and
+        // stays visible until the item is ready to play — the
+        // fade clock starts in the ready handler below, and
+        // scheduleControlsHide() itself refuses to run before
+        // that, so no path can fade the close button out from
+        // under a viewer who is still waiting for signal.
     }
 
     override func viewDidLayoutSubviews() {
@@ -551,16 +611,24 @@ final class LivePlayerViewController: UIViewController {
             // non-isolated context, the VC's state is main-actor
             // state (Swift 6).
             let status = item.status
+            let errorText = item.error?.localizedDescription
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 switch status {
                 case .readyToPlay:
                     if !firedReady {
                         firedReady = true
+                        if let channel {
+                            DiagLog.log("player",
+                                        "source #\(sourceIndex) ready: \(diagSourceTag(channel))")
+                        }
                         self.onReady?()
+                        // DB-05: the 3.5 s fade clock starts HERE —
+                        // only once playback is real.
+                        self.scheduleControlsHide()
                     }
                 case .failed:
-                    fireFailOnce()
+                    noteFailure(errorText)
                 default:
                     break
                 }
@@ -568,8 +636,10 @@ final class LivePlayerViewController: UIViewController {
         }
         failToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
-            self?.fireFailOnce()
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]
+                as? Error)?.localizedDescription
+            self?.noteFailure(reason)
         }
         timeControlToken = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             DispatchQueue.main.async { self?.refreshPlaybackUI(player) }
@@ -582,13 +652,34 @@ final class LivePlayerViewController: UIViewController {
         DispatchQueue.main.async { self.onFail?() }
     }
 
+    /// DB-06: write the failure (with AVFoundation's reason when
+    /// it offers one) exactly once per surface, then run the
+    /// page's fail path. Both failure signals (item status and
+    /// the failed-to-end notification) funnel through here; the
+    /// firedFail guard keeps it to a single line.
+    private func noteFailure(_ reason: String?) {
+        guard !firedFail else { return }
+        if let channel {
+            DiagLog.log("player",
+                        "source #\(sourceIndex) failed: \(diagSourceTag(channel))"
+                        + (reason.map { " — \($0)" } ?? ""))
+        }
+        fireFailOnce()
+    }
+
     private func refreshPlaybackUI(_ player: AVPlayer) {
         switch player.timeControlStatus {
         case .playing:
             spinner.stopAnimating()
             playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+            // Playback is (again) real: resume the normal fade.
+            scheduleControlsHide()
         case .waitingToPlayAtSpecifiedRate:
             spinner.startAnimating()
+            // DB-05: while the spinner runs — first load or a
+            // mid-stream stall — the chrome stays up, close
+            // button included; any pending fade is cancelled.
+            keepControlsVisible()
         case .paused:
             spinner.stopAnimating()
             playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
@@ -651,6 +742,15 @@ final class LivePlayerViewController: UIViewController {
     }
 
     @objc private func toggleControls() {
+        // N-1 (REVIEW-125-LOOP1): before the first ready a tap
+        // must never hide the chrome — the close button has to
+        // stay reachable for the whole wait, even when the item
+        // sits in one waiting state without a status change to
+        // re-pin it. Pre-ready taps only show / keep visible.
+        guard firedReady else {
+            keepControlsVisible()
+            return
+        }
         controlsVisible.toggle()
         UIView.animate(withDuration: 0.25) { self.controlsView.alpha = self.controlsVisible ? 1 : 0 }
         if controlsVisible { scheduleControlsHide() } else { hideTimer?.invalidate() }
@@ -662,8 +762,23 @@ final class LivePlayerViewController: UIViewController {
         scheduleControlsHide()
     }
 
+    /// DB-05: pin the chrome on screen — used whenever the
+    /// player is waiting for signal (the spinner is running).
+    private func keepControlsVisible() {
+        hideTimer?.invalidate()
+        if !controlsVisible {
+            controlsVisible = true
+            UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 1 }
+        }
+    }
+
     private func scheduleControlsHide() {
         hideTimer?.invalidate()
+        // DB-05: the fade NEVER starts before the first ready —
+        // before that the viewer is still waiting for signal and
+        // the close button must stay. Every caller (show, toggle,
+        // stall recovery) funnels through this one guard.
+        guard firedReady else { return }
         hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.controlsVisible = false

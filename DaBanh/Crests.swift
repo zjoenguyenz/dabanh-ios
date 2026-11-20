@@ -53,6 +53,18 @@ enum Crests {
         func set(_ newValue: [String: String]) {
             lock.lock(); value = newValue; lock.unlock()
         }
+        /// Insert one entry only when its key is still absent,
+        /// atomically: the lock is held across the whole
+        /// check-and-set, so two writers racing on different
+        /// threads can neither lose each other's entries nor
+        /// overturn the first-writer-wins rule (LG-2,
+        /// REVIEW-125-LOOP1). Returns true when this call wrote.
+        func insertIfAbsent(key: String, entry: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard value[key] == nil else { return false }
+            value[key] = entry
+            return true
+        }
     }
 
     private static let mapBox = MapBox(loadMap())
@@ -60,6 +72,83 @@ enum Crests {
     private(set) static var map: [String: String] {
         get { mapBox.get() }
         set { mapBox.set(newValue) }
+    }
+
+    /// Logos learned from the state feeds themselves (DB-02,
+    /// 2026-11-19). The static map is a name list somebody must
+    /// maintain, and it silently ages: MLS was missing outright, so
+    /// a fixture ESPN had already matched — score, minute, scorers
+    /// all on the board — still rendered two empty shields because
+    /// the card looks crests up by the PLAYLIST's spelling while
+    /// the feed's own logo for that very team was decoded nowhere.
+    /// ESPN carries `team.logo` and FotMob's teamlogo resource is
+    /// keyed by the feed's team id, so every fetched state now
+    /// registers its two logos here. The registry key is computed
+    /// INSIDE this file (learnedKey: FixtureGrouping.normalizedTeam)
+    /// — this file is compiled by BOTH app targets, while the
+    /// state layer's matching type lives in MatchStateStore.swift,
+    /// which only the iOS target compiles; the first cut of this
+    /// registry keyed itself with that type's canonical key and
+    /// would have reddened the tvOS build (CB-2,
+    /// REVIEW-125-LOOP1).
+    /// normalizedTeam is the grouping layer's own reduction —
+    /// norm, filler drop (incl. "clb"), state-suffix strip — and
+    /// it lands the feed spelling ("Orlando City SC",
+    /// "FC Cincinnati") and the playlist spelling ("Orlando
+    /// City", "CLB Cincinnati") on the same keys ("orlando city",
+    /// "cincinnati"); it deliberately does less than the state
+    /// layer's canonical key (no alias tables), which is fine for
+    /// a badge cache whose writers and readers are these same two
+    /// spellings. Same lock box as the static map: states are
+    /// built off the main actor while cards read from wherever
+    /// they render. Women-marked names stay out on purpose: the
+    /// grouping key does not strip the marker into a separate
+    /// namespace the way the static map's "… women" keys do, so a
+    /// women's badge could collide with the men's team of the
+    /// same base name — the static map carries those.
+    private static let learnedBox = MapBox([:])
+
+    /// Women's marker tokens, normed — the same set the state
+    /// layer's women-marker test checks (replicated here for the
+    /// CB-2 reason above): a name carrying any one of these
+    /// tokens, in any position, is women-marked.
+    private static let learnedWomenMarkers: Set<String> = [
+        "women", "w", "nu", "feminin", "femmes", "femenino", "femenina",
+    ]
+
+    private static func learnedHasWomenMarker(_ name: String) -> Bool {
+        norm(name)
+            .split(separator: " ")
+            .contains { learnedWomenMarkers.contains(String($0)) }
+    }
+
+    /// The registry key for one team name as written anywhere.
+    private static func learnedKey(forTeam name: String) -> String {
+        FixtureGrouping.normalizedTeam(name)
+    }
+
+    /// Register one feed-carried logo under the team's registry
+    /// key. First writer wins within a launch: the feeds agree on
+    /// a club's badge, and refusing later writes keeps a stray
+    /// feed from flipping a badge cards already show. The insert
+    /// is atomic (MapBox.insertIfAbsent): ESPN and FotMob
+    /// register concurrently off the main actor in the same poll
+    /// cycle, and a get→edit→set round trip would lose the
+    /// earlier writer's entries (LG-2, REVIEW-125-LOOP1).
+    static func registerLearnedLogo(forTeam rawName: String, logoURL: URL) {
+        guard !learnedHasWomenMarker(rawName) else { return }
+        let key = learnedKey(forTeam: rawName)
+        guard !key.isEmpty else { return }
+        _ = learnedBox.insertIfAbsent(key: key, entry: logoURL.absoluteString)
+    }
+
+    /// The learned logo for one team name as written anywhere,
+    /// or nil when no fetched state has carried that team yet.
+    private static func learnedURL(forTeam name: String) -> URL? {
+        guard !learnedHasWomenMarker(name) else { return nil }
+        let key = learnedKey(forTeam: name)
+        guard !key.isEmpty, let s = learnedBox.get()[key] else { return nil }
+        return URL(string: s)
     }
 
     /// Fetch the mirror's crests.json; when it differs from what the
@@ -113,12 +202,22 @@ enum Crests {
     /// (đội tuyển quốc gia) or its long forms — those prefixes are
     /// stripped from every candidate, same rule as Android Crests.of.
     static func url(forTeam name: String) -> URL? {
+        // The verified static map first (LG-1, REVIEW-125-LOOP1):
+        // a badge somebody checked outranks a learned feed logo —
+        // FotMob's is DERIVED from the feed's team id and is not
+        // verified per team (a club FotMob has no badge for would
+        // 404, and CrestImg has no fallback once it holds a URL),
+        // so a learned logo may only fill a gap the map leaves,
+        // never cover a badge the map already carries. DB-02's
+        // goal still holds: teams the map misses entirely
+        // (Orlando City before the MLS pack, Pr San Juan) get
+        // their feed logo from the registry below.
         for key in candidateKeys(forTeam: name) {
             if let s = map[key] {
                 return URL(string: s)
             }
         }
-        return nil
+        return learnedURL(forTeam: name)
     }
 
     private static func candidateKeys(forTeam name: String) -> [String] {
@@ -336,9 +435,21 @@ enum FixtureGrouping {
     }
 
     /// Standalone tokens dropped from team names for the pair key.
+    /// "clb" (DB-04, 2026-11-19): the Vietnamese word for a club,
+    /// written in front of foreign club names by the mirror's
+    /// Vietnamese listings — "CLB Cincinnati" beside the same
+    /// fixture's "FC Cincinnati" (owner's live test: the decorated
+    /// listing formed its own fixture, bound no state and showed
+    /// the computed clock while the matched tile showed the true
+    /// minute). Measured on the live playlist the same night: 36
+    /// "clb" listings across 11 teams (CLB Thanh Hoa, CLB Pakhtakor,
+    /// CLB U23 Benfica…) and no other Vietnamese club prefix in use
+    /// ("cau lac bo" / "doi tuyen" / "doi bong" / glued "clbXxx":
+    /// zero hits), so "clb" is the only addition this evidence
+    /// supports. The state layer's matching set carries it too.
     private static let fillerTokens: Set<String> = [
         "fc", "cf", "sc", "afc", "ca", "cd", "fk", "sk",
-        "club", "ac", "as", "sd", "us", "ec",
+        "club", "clb", "ac", "as", "sd", "us", "ec",
     ]
 
     /// Brazilian federative-unit (state) codes. The mirror's

@@ -218,10 +218,14 @@ enum MatchMatching {
     /// Filler tokens: FixtureGrouping's set plus Addendum 2's
     /// measured additions — `de do da del` (particles), `dsc`,
     /// `sl`, `s` (possessive artifact), `futbol`/`football`
-    /// (spelled-out FC).
+    /// (spelled-out FC). `clb` rides in FixtureGrouping's set
+    /// (DB-04, 2026-11-19: the Vietnamese club prefix in "CLB
+    /// Cincinnati", measured across the live playlist) and must
+    /// drop here too or this layer's canonical key keeps the
+    /// token FixtureGrouping already dropped.
     private static let fillerTokens: Set<String> = [
         "fc", "cf", "sc", "afc", "ca", "cd", "fk", "sk",
-        "club", "ac", "as", "sd", "us", "ec",
+        "club", "clb", "ac", "as", "sd", "us", "ec",
         "de", "do", "da", "del", "dsc", "sl", "s", "futbol", "football",
     ]
 
@@ -437,7 +441,15 @@ private struct ESPNCompetitorDTO: Decodable {
     let score: String?
     let team: ESPNTeamDTO?
 }
-private struct ESPNTeamDTO: Decodable { let id: String?; let displayName: String? }
+private struct ESPNTeamDTO: Decodable {
+    let id: String?
+    let displayName: String?
+    /// The team's badge on ESPN's own CDN (DB-02: this field was
+    /// on the wire all along and decoded nowhere, so a matched
+    /// MLS fixture rendered empty shields — the static crest map
+    /// carries no MLS).
+    let logo: String?
+}
 private struct ESPNDetailDTO: Decodable {
     let type: ESPNTypeDTO?
     let clock: ESPNClockDTO?
@@ -475,7 +487,10 @@ private struct FotMobMatchDTO: Decodable {
     let status: FotMobStatusDTO?
     let utcTime: String?
 }
-private struct FotMobTeamDTO: Decodable { let name: String? }
+private struct FotMobTeamDTO: Decodable {
+    let id: Int?
+    let name: String?
+}
 private struct FotMobStatusDTO: Decodable {
     let started: Bool?
     let finished: Bool?
@@ -716,6 +731,17 @@ enum MatchStateClient {
                                            isHome: isHome, isRed: detail.redCard == true))
                 }
             }
+            // The feed's own badges go into Crests' learned
+            // registry (DB-02), so the card — which looks crests
+            // up by the playlist's spelling of the same team —
+            // finds them even when the static map never carried
+            // the team. (They no longer ride the state itself:
+            // the state-carried logo fields were write-only
+            // payload — N-2, REVIEW-125-LOOP1.)
+            let homeLogo = home.team?.logo.flatMap { URL(string: $0) }
+            let awayLogo = away.team?.logo.flatMap { URL(string: $0) }
+            if let homeLogo { Crests.registerLearnedLogo(forTeam: homeName, logoURL: homeLogo) }
+            if let awayLogo { Crests.registerLearnedLogo(forTeam: awayName, logoURL: awayLogo) }
             out.append(MatchState(
                 pairKey: key, dateKey: dateKey, eventKickoff: kickoff,
                 status: status, minuteText: minute,
@@ -879,6 +905,21 @@ enum MatchStateClient {
                 let kickoff = match.utcTime.flatMap { parseISO8601($0) }
                 guard let dateKey = kickoff.map({ FixtureGrouping.stampDateKey(of: $0) })
                         ?? feedDateKey else { continue }
+                // FotMob's day feed carries no logo field — only
+                // the team id — but FotMob serves every badge from
+                // its own teamlogo resource under that id (DB-02;
+                // the resource was verified live against this
+                // feed's ids, Orlando City and FC Cincinnati among
+                // them, before this derivation was trusted). The
+                // logos register into Crests exactly like ESPN's.
+                let homeLogo = match.home?.id.map {
+                    URL(string: "https://images.fotmob.com/image_resources/logo/teamlogo/\($0).png")
+                } ?? nil
+                let awayLogo = match.away?.id.map {
+                    URL(string: "https://images.fotmob.com/image_resources/logo/teamlogo/\($0).png")
+                } ?? nil
+                if let homeLogo { Crests.registerLearnedLogo(forTeam: homeName, logoURL: homeLogo) }
+                if let awayLogo { Crests.registerLearnedLogo(forTeam: awayName, logoURL: awayLogo) }
                 out.append(MatchState(
                     pairKey: key, dateKey: dateKey, eventKickoff: kickoff,
                     status: status, minuteText: minute,

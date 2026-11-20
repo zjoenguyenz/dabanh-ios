@@ -462,11 +462,29 @@ struct ContentView: View {
                             FeaturedCard(entry: entry)
                         }
                         .buttonStyle(.plain)
+                        // DB-03 carousel (owner ruling 2026-11-19):
+                        // a card away from the front position sits
+                        // slightly shrunk and dimmed; as it is
+                        // dragged into the front position the
+                        // transition interpolates it back up to the
+                        // front box's full size ("bung lên bằng
+                        // kích thước box đang nằm chính diện").
+                        // Interactive scrollTransition — the effect
+                        // tracks the scroll offset itself.
+                        .scrollTransition { content, phase in
+                            content
+                                .scaleEffect(CGFloat(1 - abs(phase.value) * 0.08))
+                                .opacity(1 - abs(phase.value) * 0.25)
+                        }
                     }
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal)
                 .padding(.vertical, 4)
             }
+            // One card at a time: the rail snaps each featured box
+            // into the front position instead of free-scrolling.
+            .scrollTargetBehavior(.viewAligned)
         }
     }
 
