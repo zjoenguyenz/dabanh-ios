@@ -43,6 +43,8 @@ struct ContentView: View {
     /// The fixture the current player session was chosen from —
     /// the player's board-header slot renders its cluster.
     @State private var playerEntry: FixtureEntry?
+    /// The diagnostic-log sheet (1.24, LOG RETRIEVAL LAW).
+    @State private var showDiagLog = false
 
     private var liveChannels: [Channel] {
         store.channels.filter { LeagueClassifier.isLive($0) }
@@ -235,6 +237,9 @@ struct ContentView: View {
                     boardEntry = nil
                 })
         }
+        .sheet(isPresented: $showDiagLog) {
+            DiagLogView()
+        }
     }
 
     // MARK: - Header
@@ -273,6 +278,7 @@ struct ContentView: View {
             headerSiteLink
             headerRefreshButton
             headerCheckButton
+            headerLogButton
         }
     }
 
@@ -284,6 +290,7 @@ struct ContentView: View {
                 headerBrand
                 Spacer(minLength: 4)
                 headerClock
+                headerLogButton
             }
             HStack(alignment: .center, spacing: 8) {
                 headerSiteLink
@@ -405,6 +412,28 @@ struct ContentView: View {
         }
         .disabled(store.isLoading || store.isValidating)
         .accessibilityLabel("Kiểm tra link")
+    }
+
+    /// Log — opens the diagnostic-log sheet (1.24, LOG
+    /// RETRIEVAL LAW: every app ships a way to get its log
+    /// out). Same mini-button chrome as its neighbours.
+    private var headerLogButton: some View {
+        Button {
+            showDiagLog = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Log")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(BoardPalette.buttonText)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Capsule().fill(BoardPalette.buttonBG))
+            .overlay(Capsule().stroke(BoardPalette.buttonBorder, lineWidth: 1))
+        }
+        .accessibilityLabel("Log chẩn đoán")
     }
 
     // MARK: - Featured rail (live fixtures, swipe left for more)
@@ -1120,6 +1149,48 @@ struct ContentView: View {
             }
         }
         .padding()
+    }
+}
+
+/// The diagnostic-log sheet (1.24): preview the log's tail,
+/// send the file out through the iOS share sheet, or clear it.
+/// The file itself is the deliverable (DiagLog in
+/// PlaylistStore.swift) — this view only presents it.
+private struct DiagLogView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(text.isEmpty ? "Log trống." : text)
+                    .font(.system(size: 10, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding()
+            }
+            .background(Color.black)
+            .navigationTitle("Log chẩn đoán")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Đóng") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: DiagLog.fileURL) {
+                        Label("Gửi log", systemImage: "square.and.arrow.up")
+                    }
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button("Xoá log", role: .destructive) {
+                        DiagLog.clear()
+                        text = ""
+                    }
+                }
+            }
+            .onAppear { text = DiagLog.snapshot() }
+        }
+        .preferredColorScheme(.dark)
     }
 }
 

@@ -1231,6 +1231,9 @@ final class ResolveHub {
            Date().timeIntervalSince(entry.storedAt) < entry.ttl {
             return (MatchPlaySession.cached(key: key, sources: entry.sources), false)
         }
+        DiagLog.log("player",
+                    "resolve: new session for '\(ladder.first?.title ?? "?")' "
+                    + "(\(ladder.count) sources)")
         let session = MatchPlaySession(key: key)
         inFlight[key] = session
         if isTap { noteTapAdoption(of: session) }

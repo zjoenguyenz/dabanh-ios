@@ -138,6 +138,15 @@ enum Crests {
         if noAge != base, !keys.contains(noAge) {
             keys.append(noAge)
         }
+        // Brazilian state suffix ("São Paulo _SP" → "sao paulo"):
+        // the same measured strip FixtureGrouping applies, so a
+        // decorated listing still finds the bare club's crest.
+        for variant in [FixtureGrouping.droppingStateSuffix(base),
+                        FixtureGrouping.droppingStateSuffix(noAge)] {
+            if !variant.isEmpty, !keys.contains(variant) {
+                keys.append(variant)
+            }
+        }
         for variant in [dropTrailingToken(noAge, "nu"), dropTrailingToken(base, "nu"),
                         dropTrailingToken(noAge, "w"), dropTrailingToken(base, "w"),
                         dropLeadingToken(noAge, "nu"), dropLeadingToken(base, "nu"),
@@ -332,6 +341,38 @@ enum FixtureGrouping {
         "club", "ac", "as", "sd", "us", "ec",
     ]
 
+    /// Brazilian federative-unit (state) codes. The mirror's
+    /// Brazilian listings decorate club names with the club's
+    /// state — "São Paulo _SP", "Fluminense _RJ", "Sao Paulo Sp"
+    /// — while every other source (ESPN, FotMob, the crest map)
+    /// writes the bare club name. Measured on the live playlist
+    /// (2026-11-19): every listing carrying one of these as a
+    /// trailing token is a Brazilian fixture, and no other
+    /// club's normalised name ends in one ("ac"/"sc" were
+    /// already filler above). Dropping ONE trailing state token
+    /// is what lets those listings group, bind and badge as the
+    /// same club (iOS 1.24 — the São Paulo vs Fluminense
+    /// duplicate: two tiles for one match, the decorated one
+    /// with no logos, no state and a different minute).
+    private static let stateSuffixTokens: Set<String> = [
+        "ac", "al", "am", "ap", "ba", "ce", "df", "es", "go",
+        "ma", "mg", "ms", "mt", "pa", "pb", "pe", "pi", "pr",
+        "rj", "rn", "ro", "rr", "rs", "sc", "se", "sp", "to",
+    ]
+
+    /// A normalised team name with ONE trailing Brazilian state
+    /// token dropped (see stateSuffixTokens). Names of fewer
+    /// than two tokens are returned untouched — the strip can
+    /// never empty a name.
+    static func droppingStateSuffix(_ normalized: String) -> String {
+        var tokens = normalized.split(separator: " ").map(String.init)
+        if tokens.count >= 2, let last = tokens.last,
+           stateSuffixTokens.contains(last) {
+            tokens.removeLast()
+        }
+        return tokens.joined(separator: " ")
+    }
+
     /// How far apart two stamps of one pair + date may chain and
     /// still be read as the same fixture.
     private static let chainWindow: TimeInterval = 45 * 60
@@ -342,7 +383,7 @@ enum FixtureGrouping {
     /// dropped — "Ca Banfield" and "Banfield" both become
     /// "banfield", "CD Tondela" becomes "tondela".
     static func normalizedTeam(_ name: String) -> String {
-        Crests.norm(name)
+        let joined = Crests.norm(name)
             .split(separator: " ")
             .filter { token in
                 let t = String(token)
@@ -354,6 +395,10 @@ enum FixtureGrouping {
                     && !t.allSatisfy({ $0.isNumber })
             }
             .joined(separator: " ")
+        // Brazilian state suffix ("sao paulo sp" → "sao paulo"),
+        // so a decorated listing groups with its bare-named
+        // twins instead of forming a second fixture (1.24).
+        return droppingStateSuffix(joined)
     }
 
     /// Order-independent pair key for a channel, or nil when its

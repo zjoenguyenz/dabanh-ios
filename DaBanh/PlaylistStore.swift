@@ -23,6 +23,109 @@ import Foundation
 /// - Fallback: the origin site (thtt.pages.dev), used only when
 ///   GitHub cannot be reached at all. It has no 🔥 Hot group, so the
 ///   Hot tab then keeps whatever it already had.
+// MARK: - Diagnostic log
+
+/// The diagnostic log (LOG RETRIEVAL LAW, owner 2026-11-18).
+/// Đá Banh iOS had NO log at all until 1.24 — no logger, no
+/// file, no export — the same gap the owner found on the tvOS
+/// app; this is the iOS side's build-out. Design rules
+/// (IOS-STUDY-NOTE-124 §3): write-only — a serial file queue
+/// with no published state, so logging can never invalidate a
+/// view or perturb the render path it observes; capped at
+/// ~512 KB with a tail-keeping rotation; secrets redacted —
+/// call sites log titles, hosts and counts, never full stream
+/// URLs (signed URLs carry credentials in their query), and
+/// `redacted(_:)` strips query + fragment from any URL that
+/// does get logged.
+enum DiagLog {
+
+    private static let queue = DispatchQueue(label: "dabanh.diaglog")
+    private static let maxBytes = 512 * 1024
+
+    static var fileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dabanh-diag.log")
+    }
+
+    /// A fresh formatter per call: ISO8601DateFormatter is not
+    /// concurrency-safe to share, and log volume is low.
+    private static func timestamp() -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: Date())
+    }
+
+    static func log(_ category: String, _ message: String) {
+        let line = "\(timestamp()) [\(category)] \(message)\n"
+        queue.async { append(line) }
+    }
+
+    /// The launch header every sent log is read against:
+    /// app version + build + OS version.
+    static func boot() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        log("app", "launch Da Banh iOS \(version) (\(build)) "
+            + "on iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)")
+    }
+
+    /// The current log text (the share sheet sends the file
+    /// itself; this feeds the in-app preview).
+    static func snapshot() -> String {
+        queue.sync {
+            guard let data = try? Data(contentsOf: fileURL) else { return "" }
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    static func clear() {
+        queue.async {
+            try? FileManager.default.removeItem(at: fileURL)
+            append("\(timestamp()) [app] log cleared\n")
+        }
+    }
+
+    /// A URL with query + fragment stripped — safe to log.
+    static func redacted(_ url: URL) -> String {
+        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return url.absoluteString }
+        comps.query = nil
+        comps.fragment = nil
+        return comps.string ?? url.absoluteString
+    }
+
+    private static func append(_ line: String) {
+        let data = Data(line.utf8)
+        if let handle = try? FileHandle(forWritingTo: fileURL) {
+            defer { try? handle.close() }
+            if (try? handle.seekToEnd()) != nil {
+                try? handle.write(contentsOf: data)
+            }
+        } else {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+        rotateIfNeeded()
+    }
+
+    /// Keep the newest half once the cap is passed, starting
+    /// the kept tail at a line boundary.
+    private static func rotateIfNeeded() {
+        guard let size = (try? FileManager.default
+                .attributesOfItem(atPath: fileURL.path)[.size]) as? Int,
+              size > maxBytes,
+              let data = try? Data(contentsOf: fileURL) else { return }
+        let tail = data.suffix(maxBytes / 2)
+        var start = tail.startIndex
+        if let newline = tail.firstIndex(of: UInt8(ascii: "\n")),
+           newline < tail.endIndex - 1 {
+            start = tail.index(after: newline)
+        }
+        try? Data(tail[start...]).write(to: fileURL, options: .atomic)
+    }
+}
+
 @MainActor
 final class PlaylistStore: ObservableObject {
 
@@ -204,6 +307,7 @@ final class PlaylistStore: ObservableObject {
     /// Called once from the root view's .task: cache first, remote second,
     /// then the 15-minute auto-refresh loop for as long as the app lives.
     func start() async {
+        DiagLog.boot()
         loadCache()
         scheduleValidation()
         liveStates.start()
@@ -282,6 +386,8 @@ final class PlaylistStore: ObservableObject {
                 setData(mergingEN(oparsed))
                 setHot(parsed)
                 statusMessage = "Gương đang chậm — đã dùng nguồn gốc mới hơn."
+                DiagLog.log("playlist",
+                            "mirror stale — origin list preferred, mirror Hot kept")
             } else {
                 try? data.write(to: mirrorCacheFileURL, options: .atomic)
                 setData(parsed)
@@ -296,7 +402,10 @@ final class PlaylistStore: ObservableObject {
                 try? data.write(to: cacheFileURL, options: .atomic)
                 setData(mergingEN(parsed))
                 statusMessage = "Đang dùng nguồn dự phòng."
+                DiagLog.log("playlist", "mirror unreachable — origin fallback used")
             } catch {
+                DiagLog.log("playlist",
+                            "refresh failed on both sources (loadedOnce=\(loadedOnce))")
                 if !loadedOnce {
                     statusMessage = "Không tải được danh sách kênh. Kiểm tra mạng rồi thử lại."
                 } else {
@@ -304,6 +413,9 @@ final class PlaylistStore: ObservableObject {
                 }
             }
         }
+        DiagLog.log("playlist",
+                    "refresh done: \(channels.count) channels, "
+                    + "\(hotChannels.count) hot, \(liveChannels.count) live")
         pickInitialTabIfNeeded()
         scheduleValidation()
         // The state layer rides the playlist refresh (spec §1.6):
@@ -481,6 +593,7 @@ final class PlaylistStore: ObservableObject {
         }
         await validateLinks(reset: true)
         let hidden = invalidURLs.count
+        DiagLog.log("links", "manual link check: \(hidden) dead links hidden")
         statusMessage = hidden > 0
             ? "Đã kiểm tra xong: ẩn \(hidden) link chết."
             : "Đã kiểm tra xong: không có link chết."

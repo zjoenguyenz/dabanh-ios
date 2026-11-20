@@ -291,7 +291,15 @@ enum MatchMatching {
             tokens.removeLast()
         }
         let joined = tokens.joined(separator: " ")
-        return wholeNameAliases[joined] ?? joined
+        if let alias = wholeNameAliases[joined] { return alias }
+        // Brazilian state suffix (FixtureGrouping's measured
+        // strip, 1.24): "sao paulo sp" must canonicalise to the
+        // same key as ESPN's "sao paulo" or the decorated listing
+        // can never bind this fixture's state — it then renders
+        // the bounded computed clock beside the matched tile's
+        // true minute, and one match shows two times.
+        let stripped = FixtureGrouping.droppingStateSuffix(joined)
+        return wholeNameAliases[stripped] ?? stripped
     }
 
     /// Canonical team key for a RAW team name (source feeds, Nuvio
@@ -324,6 +332,22 @@ enum MatchMatching {
             .map { canonicalTeam(normalizedName: $0) }
             .sorted()
             .joined(separator: " vs ")
+    }
+
+    /// The comparable minute of a source's minute text ("53'",
+    /// "45'+2'", "90'+3'"): the sum of its number groups, so
+    /// added time counts on top of the regulation minute — the
+    /// convention ESPN's own displayClock follows. nil when the
+    /// text carries no number at all (e.g. Flashscore states,
+    /// whose minuteText is always nil). Used only by the
+    /// staleness guard (1.24) to compare two SOURCE states'
+    /// freshness; the bounded computed clock never participates.
+    static func minuteValue(of text: String?) -> Int? {
+        guard let text else { return nil }
+        let numbers = text.split(whereSeparator: { !$0.isNumber })
+            .compactMap { Int($0) }
+        guard !numbers.isEmpty else { return nil }
+        return numbers.reduce(0, +)
     }
 
     /// True when a raw team name carries a women's marker token —
@@ -1114,6 +1138,10 @@ final class MatchStateStore: ObservableObject {
     private var lastFullAt: Date?
     private var lastLiveScoreDateAt: Date?
     private var knownSlugs: Set<String> = []
+    /// The last staleness-guard firing logged per fixture pair
+    /// key, so a firing is written to the diagnostic log once,
+    /// not on every render that re-runs the selection.
+    private var lastGuardLog: [String: String] = [:]
     private var loopTask: Task<Void, Never>?
     private var refreshing = false
     private var detailCache: [Int: (goals: [GoalEvent], cards: [CardEvent])] = [:]
@@ -1178,6 +1206,8 @@ final class MatchStateStore: ObservableObject {
         }
         if upgraded.isEmpty {
             if let last = lastSuccessAt, now.timeIntervalSince(last) < 30 * 60 {
+                DiagLog.log("cluster",
+                            "cycle full=\(full): no states returned — keeping last-good snapshot")
                 return // keep the last-good snapshot
             }
             if !states.isEmpty {
@@ -1194,6 +1224,12 @@ final class MatchStateStore: ObservableObject {
             MatchStateClient.espnSlugs.first { $0.competition == state.competition }?.slug ?? ""
         }.filter { !$0.isEmpty })
         revision += 1
+        DiagLog.log("cluster",
+                    "cycle full=\(full): espn=\(espnStates.count) "
+                    + "fotmob=\(fotmobStates.count) flash=\(flashStates.count) "
+                    + "livescore=\(liveStates.count + dateStates.count) "
+                    + "merged=\(upgraded.count) "
+                    + "live=\(upgraded.filter { $0.status.isLiveish }.count)")
         // RC2 (2026-11-19): the FotMob incidents upgrade also runs
         // on this refresh cycle — the 60 s live cycle included —
         // not only at playlist publish, so scorers/cards land
@@ -1259,7 +1295,62 @@ final class MatchStateStore: ObservableObject {
         let exact = candidates.filter { $0.womenMarked == marked }
         let pool = !exact.isEmpty ? exact
             : (candidates.count == 1 ? candidates : [])
-        return pool.max { precedence($0.source) < precedence($1.source) }
+        guard let winner = pool.max(by: {
+            precedence($0.source) < precedence($1.source)
+        }) else { return nil }
+        return stalenessOverride(of: winner, in: pool) ?? winner
+    }
+
+    /// Staleness guard (1.24): precedence is absolute, so a top
+    /// layer whose clock stops advancing while the match plays on
+    /// would outrank fresher layers forever. When the precedence
+    /// winner is LIVE and another candidate state for the same
+    /// fixture is also LIVE with a materially later minute (≥4′ —
+    /// several poll cycles of advancement the winner missed) and
+    /// no fewer goals (goals never un-happen), the fresher state
+    /// wins wholesale — still one source's whole truth, never a
+    /// field merge.
+    ///
+    /// Fail-closed by construction: the winner must be `.live`
+    /// (a reported HT/FT/pre/postponed state is a real status,
+    /// never "corrected" — RC5 discipline), the challenger must
+    /// be `.live` too, both must carry a parseable minute AND a
+    /// score, and the bounded computed clock is not a state and
+    /// can never challenge. For São Paulo vs Fluminense
+    /// (2026-11-19) this guard would NOT have fired — ESPN and
+    /// FotMob agreed to the minute; the wrong number that night
+    /// was the computed clock on the duplicate unbound tile.
+    private func stalenessOverride(of winner: MatchState,
+                                   in pool: [MatchState]) -> MatchState? {
+        guard winner.status == .live,
+              let winnerMinute = MatchMatching.minuteValue(of: winner.minuteText),
+              let winnerHome = winner.scoreHome,
+              let winnerAway = winner.scoreAway
+        else { return nil }
+        let challengers = pool.filter { other in
+            guard other != winner, other.status == .live,
+                  let minute = MatchMatching.minuteValue(of: other.minuteText),
+                  minute >= winnerMinute + 4,
+                  let home = other.scoreHome, let away = other.scoreAway
+            else { return false }
+            return home + away >= winnerHome + winnerAway
+        }
+        guard let freshest = challengers.max(by: { a, b in
+            let am = MatchMatching.minuteValue(of: a.minuteText) ?? 0
+            let bm = MatchMatching.minuteValue(of: b.minuteText) ?? 0
+            if am != bm { return am < bm }
+            return precedence(a.source) < precedence(b.source)
+        }) else { return nil }
+        let signature = "\(winner.source):\(winnerMinute)->"
+            + "\(freshest.source):\(MatchMatching.minuteValue(of: freshest.minuteText) ?? -1)"
+        if lastGuardLog[winner.pairKey] != signature {
+            lastGuardLog[winner.pairKey] = signature
+            DiagLog.log("cluster",
+                        "staleness guard: \(winner.pairKey) — \(winner.source) "
+                        + "\(winner.minuteText ?? "?") superseded by fresher "
+                        + "\(freshest.source) \(freshest.minuteText ?? "?")")
+        }
+        return freshest
     }
 
     private func precedence(_ source: MatchSource) -> Int {
