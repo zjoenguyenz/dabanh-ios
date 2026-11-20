@@ -148,6 +148,15 @@ struct PlayerView: View {
                         // after a switch just re-prioritises what
                         // is still cold. Pure background work.
                         session.beginPrewarming(after: index)
+                    },
+                    onDefinitiveFail: { reason in
+                        // FIX-129 (Item C): a DEFINITIVE player
+                        // failure (see LivePlayerViewController's
+                        // classifier) teaches the session: the
+                        // URL is marked dead for the session and
+                        // the hub, so no later merge, publish or
+                        // tap hands it to a player again.
+                        session.markPlayerDead(channel, reason: reason)
                     }, onClose: { dismiss() },
                     sourceIndex: index,
                     showsSourceSwitch: headerEntry != nil,
@@ -387,6 +396,12 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
     let channel: Channel
     let onFail: () -> Void
     let onReady: () -> Void
+    /// FIX-129 (Item C): a DEFINITIVE failure of this surface's
+    /// source, classified by the view controller (TLS/certificate
+    /// invalid, or HTTP 403/404 in the item's access log), with a
+    /// short reason tag. Optional: surfaces that pass nil keep
+    /// the pre-FIX-129 behaviour exactly.
+    var onDefinitiveFail: ((String) -> Void)? = nil
     let onClose: () -> Void
     /// This surface's rung on the ladder, for DiagLog lines.
     var sourceIndex: Int = 0
@@ -405,6 +420,7 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
         controller.sourceIndex = sourceIndex
         controller.onFail = onFail
         controller.onReady = onReady
+        controller.onDefinitiveFail = onDefinitiveFail
         controller.onClose = onClose
         controller.showsSourceSwitch = showsSourceSwitch
         controller.onSourceSwitch = onSourceSwitch
@@ -445,6 +461,10 @@ final class LivePlayerViewController: UIViewController {
     var sourceIndex = 0
     var onFail: (() -> Void)?
     var onReady: (() -> Void)?
+    /// FIX-129 (Item C): fired (with a reason tag) when this
+    /// surface's failure is DEFINITIVE — see
+    /// definitiveFailureReason(for:) — just before onFail.
+    var onDefinitiveFail: ((String) -> Void)?
     var onClose: (() -> Void)?
     /// Đổi nguồn (1.22), vended by the surface like the other
     /// callbacks: whether the switch button joins the control
@@ -466,6 +486,10 @@ final class LivePlayerViewController: UIViewController {
     private let liveBadge = UILabel()
 
     private var player: AVPlayer?
+    /// FIX-129 (Item C): the playing item, kept so its access
+    /// log can be read at failure time (the HTTP status of the
+    /// request that failed lives there, not in item.error).
+    private var playerItem: AVPlayerItem?
     private var pipController: AVPictureInPictureController?
     private var statusToken: NSKeyValueObservation?
     private var timeControlToken: NSKeyValueObservation?
@@ -489,6 +513,7 @@ final class LivePlayerViewController: UIViewController {
         try? AVAudioSession.sharedInstance().setActive(true)
 
         let item = AVPlayerItem(asset: LivePlayerSurface.asset(for: channel))
+        playerItem = item
         let titleItem = AVMutableMetadataItem()
         titleItem.identifier = AVMetadataIdentifier.commonIdentifierTitle
         titleItem.value = channel.title as NSString
@@ -653,7 +678,7 @@ final class LivePlayerViewController: UIViewController {
             // non-isolated context, the VC's state is main-actor
             // state (Swift 6).
             let status = item.status
-            let errorText = item.error?.localizedDescription
+            let itemError = item.error
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 switch status {
@@ -670,7 +695,7 @@ final class LivePlayerViewController: UIViewController {
                         self.scheduleControlsHide()
                     }
                 case .failed:
-                    noteFailure(errorText)
+                    noteFailure(itemError)
                 default:
                     break
                 }
@@ -679,9 +704,9 @@ final class LivePlayerViewController: UIViewController {
         failToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
         ) { [weak self] note in
-            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]
-                as? Error)?.localizedDescription
-            self?.noteFailure(reason)
+            let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]
+                as? Error
+            self?.noteFailure(error)
         }
         timeControlToken = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             DispatchQueue.main.async { self?.refreshPlaybackUI(player) }
@@ -699,14 +724,79 @@ final class LivePlayerViewController: UIViewController {
     /// page's fail path. Both failure signals (item status and
     /// the failed-to-end notification) funnel through here; the
     /// firedFail guard keeps it to a single line.
-    private func noteFailure(_ reason: String?) {
+    private func noteFailure(_ error: Error?) {
         guard !firedFail else { return }
         if let channel {
             DiagLog.log("player",
                         "source #\(sourceIndex) failed: \(diagSourceTag(channel))"
-                        + (reason.map { " — \($0)" } ?? ""))
+                        + (error.map { " — \($0.localizedDescription)" } ?? ""))
+        }
+        // FIX-129 (Item C): a definitive failure teaches the
+        // session BEFORE the page advances, so the resolve
+        // still running behind this player cannot merge the
+        // same URL back onto the ladder (see markPlayerDead).
+        if let reason = definitiveFailureReason(for: error) {
+            onDefinitiveFail?(reason)
         }
         fireFailOnce()
+    }
+
+    /// FIX-129 (Item C): classify a PLAYER-observed failure as
+    /// definitive, or not. Definitive means the URL itself is
+    /// condemned for this app run — the failure cannot heal
+    /// within the session:
+    /// - HTTP 403 / 404, read from the item's ACCESS LOG
+    ///   (AVPlayerItemAccessLogEvent.errorStatusCode — the most
+    ///   recent error event at failure time): AVPlayerItem.error
+    ///   does not carry the HTTP status, the access log does.
+    /// - A TLS/certificate failure: NSURLErrorDomain secure-
+    ///   connection codes (-1200…-1206: failed, bad date,
+    ///   untrusted, unknown root, not yet valid, client cert
+    ///   rejected/required), searched through the underlying-
+    ///   error chain, with the stable localized text
+    ///   ("…certificate…") as a fallback when the error arrives
+    ///   wrapped in an AVFoundation domain.
+    /// Everything else — timeouts, stalls, 5xx, generic network
+    /// errors — returns nil and marks NOTHING (house doctrine:
+    /// only definitive verdicts condemn).
+    ///
+    /// How this differs from pre-flight's KEPT-403: pre-flight's
+    /// 403 is a bare probe's answer, which on this household's
+    /// network can mean "the tunnel is off right now", so the
+    /// source is kept (demoted, still playable). A 403 the
+    /// PLAYER receives is a different observation: the source
+    /// had already been published to the viewer — verified, or
+    /// the instant head he picked — and the full playback
+    /// request, with the channel's own headers and repaired
+    /// Referer, was still refused (or the playlist is simply
+    /// gone: 404). That verdict is about THIS URL as served to
+    /// the player, and it condemns only that URL, for this
+    /// session/run — pre-flight's kept-403 handling is
+    /// untouched and still governs sources the player has not
+    /// tried.
+    private func definitiveFailureReason(for error: Error?) -> String? {
+        if let events = playerItem?.errorLog()?.events {
+            for event in events.reversed() where event.errorStatusCode != 0 {
+                if event.errorStatusCode == 403 || event.errorStatusCode == 404 {
+                    return "HTTP \(event.errorStatusCode)"
+                }
+                break // the newest error event is not a 403/404
+            }
+        }
+        var current = error as NSError?
+        var depth = 0
+        while let ns = current, depth < 3 {
+            if ns.domain == NSURLErrorDomain, (-1206 ... -1200).contains(ns.code) {
+                return "TLS/certificate invalid"
+            }
+            current = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        if let text = error?.localizedDescription.lowercased(),
+           text.contains("certificate") {
+            return "TLS/certificate invalid"
+        }
+        return nil
     }
 
     private func refreshPlaybackUI(_ player: AVPlayer) {
@@ -876,6 +966,7 @@ final class LivePlayerViewController: UIViewController {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         videoView.playerLayer.player = nil
         player = nil
+        playerItem = nil
     }
 }
 
@@ -1189,6 +1280,13 @@ final class MatchPlaySession: ObservableObject {
     /// into it for noteResolved to mistake for this run's
     /// own result (REVIEW-128-LOOP1 F-1).
     private var didPublishFinal = false
+    /// FIX-129 (Item C): URLs the PLAYER itself failed with a
+    /// definitive error during this session (see
+    /// markPlayerDead). run()'s publications never merge one
+    /// back onto the ladder, and the settle writes them into
+    /// the cache entry's dead set, so the condemnation outlives
+    /// the session through ResolveHub.provenDead.
+    private var playerDeadURLs: Set<String> = []
 
     nonisolated private static let quorum = 3
     nonisolated private static let softDeadline: TimeInterval = 6
@@ -1397,6 +1495,27 @@ final class MatchPlaySession: ObservableObject {
         SourcePrewarmStore.shared.isDead(url)
     }
 
+    /// FIX-129 (Item C): the player failed this source with a
+    /// DEFINITIVE error (TLS/certificate invalid, HTTP 403/404
+    /// — classified in LivePlayerViewController). Until now a
+    /// player failure taught the ladder nothing: in the 1.28
+    /// device log the Castilla head died on an invalid
+    /// certificate at 21:35:20Z and the resolve's first batch
+    /// one second later merged the SAME URL back in place, and
+    /// a second pick re-tried the same host for seconds. The
+    /// mark lands in three places: this session's exclusion set
+    /// (run()'s merge honours it — see publish(final:)), the
+    /// hub's provenDead (so publishHeadNow filters the URL for
+    /// every later tap this run, and this session's settle
+    /// writes it into the cache entry's dead set), and one
+    /// DiagLog line per URL.
+    func markPlayerDead(_ ch: Channel, reason: String) {
+        guard playerDeadURLs.insert(ch.url).inserted else { return }
+        let host = ch.streamURL?.host ?? URL(string: ch.url)?.host ?? "?"
+        DiagLog.log("player", "player-dead: \(host) — \(reason)")
+        ResolveHub.shared.notePlayerDead(url: ch.url)
+    }
+
     private func run(ladder: [Channel]) async {
         let total = ladder.count
         let hardDeadline = Date().addingTimeInterval(Self.hardDeadline)
@@ -1436,6 +1555,17 @@ final class MatchPlaySession: ObservableObject {
             // new URLs append behind.
             func merge(_ incoming: [Channel]) {
                 for ch in incoming {
+                    // FIX-129 (Item C): a URL the player has
+                    // definitively condemned this session never
+                    // merges back — neither as a replacement of
+                    // its own rung (the Castilla shape: the
+                    // instant head died on a certificate error
+                    // and the first batch re-published the same
+                    // URL in place) nor as an append. A rung
+                    // already published stays published (the
+                    // prefix never moves); the player has
+                    // already advanced past it.
+                    if self.playerDeadURLs.contains(ch.url) { continue }
                     if let rung = self.sources.firstIndex(where: { $0.url == ch.url }) {
                         self.sources[rung] = ch
                     } else {
@@ -1543,8 +1673,10 @@ final class MatchPlaySession: ObservableObject {
         // playable — the next open resolves it fresh instead.
         ResolveHub.shared.noteResolved(
             key: key,
-            sources: sources.filter { !deadURLs.contains($0.url) },
-            deadURLs: deadURLs,
+            sources: sources.filter {
+                !deadURLs.contains($0.url) && !playerDeadURLs.contains($0.url)
+            },
+            deadURLs: deadURLs.union(playerDeadURLs),
             verifiedURLs: Set(verified.map { $0.1.url }),
             from: self)
     }
@@ -1763,6 +1895,9 @@ final class SourcePrewarmStore {
         config.timeoutIntervalForRequest = 6
         let session = URLSession(configuration: config)
         var channelsByURL: [String: Channel] = [:]
+        /// FIX-129 (Item B): when each in-flight warm started,
+        /// for the ready line's elapsed time below.
+        var startedAt: [String: Date] = [:]
 
         /// Pop the next source to warm, in queue order, and
         /// mark it in flight (the same nested-helper shape as
@@ -1772,6 +1907,15 @@ final class SourcePrewarmStore {
             let ch = pending.removeFirst()
             channelsByURL[ch.url] = ch
             states[ch.url] = .warming
+            // FIX-129 (Item B): a warm START line per source.
+            // Until now the store logged only a proven death,
+            // so a device log could not show that warming had
+            // happened at all (the 1.28 log carries zero
+            // prewarm lines); the start/ready pair below is
+            // the evidence the next log is read against.
+            startedAt[ch.url] = Date()
+            DiagLog.log("player",
+                        "prewarm: warming \(diagSourceTag(ch))")
             return ch
         }
 
@@ -1806,6 +1950,20 @@ final class SourcePrewarmStore {
                     if dead, let ch = channelsByURL[url] {
                         DiagLog.log("player",
                                     "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
+                    } else if let ch = channelsByURL[url] {
+                        // FIX-129 (Item B): the warm READY line
+                        // (host + elapsed, via diagSourceTag) —
+                        // the counterpart of the start line in
+                        // takeNext(). A warm that ends neither
+                        // dead nor cancelled lands here: the top
+                        // playlist (and, for a master, the best
+                        // variant + first segment head) was
+                        // fetched, so the host is warm.
+                        let ms = startedAt[url].map {
+                            Int(Date().timeIntervalSince($0) * 1000)
+                        } ?? -1
+                        DiagLog.log("player",
+                                    "prewarm: ready \(diagSourceTag(ch)) in \(ms)ms")
                     }
                 }
                 while active < 2, let ch = takeNext() {
@@ -1881,6 +2039,17 @@ final class ResolveHub {
     /// dead during this app run.
     func isProvenDead(_ url: String) -> Bool {
         provenDead.contains(url)
+    }
+
+    /// FIX-129 (Item C): a PLAYER-observed definitive failure
+    /// (TLS/certificate invalid, HTTP 403/404) joins the same
+    /// app-run dead set a settled resolve feeds, so
+    /// publishHeadNow filters the URL for every later tap —
+    /// including taps of other fixtures whose ladders carry
+    /// the same URL. Session-scoped in effect (the set is
+    /// in-memory, per app run, like every verdict here).
+    func notePlayerDead(url: String) {
+        provenDead.insert(url)
     }
     private var preresolveTask: Task<Void, Never>?
     private var preresolveSessions: [MatchPlaySession] = []

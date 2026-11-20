@@ -529,6 +529,75 @@ enum TeamNameNorm {
         "losc lille": "lille",
         "rc celta": "celta vigo",
         "atletico mineiro": "atletico",
+        // FIX-129 (2026-11-20, DB-09 / FL-336) — the owner's
+        // 1.28-test screenshots showed Troyes TWICE: the bound
+        // Ligue 1 board "Troyes 2–1 Le Havre" and an unbound
+        // featured card "Troyes vs Havre AC" (league KHÁC, "VS",
+        // placeholder crest). A listing titled "Havre AC"
+        // canonicalises to the bare stem "havre" — "ac" is a
+        // filler token — while every feed and every other
+        // listing lands on "le havre", so the group split and
+        // neither state nor crest could bind to the twin. The
+        // same detector pass (name sweep + kickoff-instant net
+        // over the frozen corpus and the fresh playlist of
+        // 2026-11-20 ~21:40Z) measured eleven more football
+        // splits of the same class in the fresh playlist; each
+        // entry below is measured same-fixture (same opponent,
+        // identical kickoff instant) in that playlist, and the
+        // one-club producer census over the frozen corpus, its
+        // feeds and both fresh playlist files shows each source
+        // stem produced by exactly one club:
+        // - "havre" → "le havre" — the "Havre AC" / bare
+        //   "Havre" forms of Le Havre AC (the club's own full
+        //   name, carried by the feeds as "Le Havre AC"); the
+        //   stem's only measured producer is the owner's
+        //   device playlist (the title had rotated out of both
+        //   fresh files by fetch time — the screenshot is the
+        //   producer evidence).
+        // - "dep independiente" → "independiente medellin" and
+        //   "ind santa fe" → "santa fe" — the fresh playlist's
+        //   "Dep.Independiente vs Ind. Santa Fe" (04:30 21/11)
+        //   beside its own full-name listings of the same
+        //   fixture; BOTH sides carry an alias (the san carlos
+        //   shape — the pair key converges only when both do).
+        // - "atl bucaramanga" → "bucaramanga" — "Atl.
+        //   Bucaramanga vs America de Cali" (06:35 21/11)
+        //   beside the full-name listings; the existing
+        //   "atletico bucaramanga" entry covers the unabbreviated
+        //   spelling only.
+        // - "atl san luis" → "atletico san luis" — "Puebla Vs
+        //   Atl San Luis" (08:00 21/11) beside the full form.
+        // - "dep la coruna" → "deportivo a coruna" — "Alaves Vs
+        //   Dep La Coruna" (20:00 21/11); the "alaves" side
+        //   already converges (FIX-127E).
+        // - "leeds" → "leeds united", "tottenham" →
+        //   "tottenham hotspur", "ipswich" → "ipswich town" —
+        //   bare short forms in the fresh playlist's 22:00
+        //   21/11 listings ("Chelsea vs Leeds", "Tottenham Vs
+        //   Ipswich Town", "Tottenham vs Ipswich") beside the
+        //   full forms every feed writes.
+        // - "psg" → "paris saint germain" — "Ogc Nice Vs Psg"
+        //   (23:15 21/11) beside "OGC Nice vs Paris Saint
+        //   Germain".
+        // - "newcastle" → "newcastle united" — "Newcastle vs
+        //   Arsenal" (00:30 22/11) beside the full form;
+        //   "Newcastle Jets" is a different stem and untouched.
+        // - "olympique lyon" → "lyon" — "LOSC Lille vs
+        //   Olympique Lyon" (02:45 22/11) beside the same
+        //   fixture's "… vs Lyon" listings and every feed's
+        //   bare "Lyon".
+        "havre": "le havre",
+        "dep independiente": "independiente medellin",
+        "ind santa fe": "santa fe",
+        "atl bucaramanga": "bucaramanga",
+        "atl san luis": "atletico san luis",
+        "dep la coruna": "deportivo a coruna",
+        "leeds": "leeds united",
+        "tottenham": "tottenham hotspur",
+        "ipswich": "ipswich town",
+        "psg": "paris saint germain",
+        "newcastle": "newcastle united",
+        "olympique lyon": "lyon",
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,

@@ -194,6 +194,31 @@ struct ContentView: View {
             await MainActor.run {
                 ResolveHub.shared.preresolve(
                     ladders: featuredEntries.prefix(3).map { store.sources(for: $0.channel) })
+                // FIX-129 (DB-07 residual, Item B): deep-warm the
+                // HEAD source of each fixture in the same launch
+                // preresolve set (bound: at most 3 heads, one per
+                // fixture, in featured order, through the pre-warm
+                // store's existing max-2-concurrent driver). The
+                // 1.28 device log's Andorra pick adopted its cached
+                // ladder instantly yet still took 8 s to first
+                // frame — pure cold-host load on live2.zktsva.app,
+                // a host the SAME log later served in 1 s once an
+                // earlier play had warmed it (Cercle Brugge).
+                // Verification alone does not warm the media
+                // path: pre-flight reads only the playlist head,
+                // while SourcePrewarmer descends to the first
+                // segment. One warm() call for all three heads —
+                // the store rebuilds its pending queue on every
+                // call, so per-fixture calls would drop each
+                // other's not-yet-started heads. A later board
+                // open re-prioritises the queue as before.
+                let heads = featuredEntries.prefix(3)
+                    .compactMap { store.sources(for: $0.channel).first }
+                if !heads.isEmpty {
+                    DiagLog.log("player",
+                                "prewarm: launch warm queued — \(heads.count) featured head source(s)")
+                    SourcePrewarmStore.shared.warm(ladder: heads)
+                }
             }
             // The BLV Anh tab's addon source loads alongside
             // (in-memory cache, TTL-gated on later visits).
