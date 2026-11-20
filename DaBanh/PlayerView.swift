@@ -238,7 +238,16 @@ struct PlayerView: View {
         .onDisappear {
             DiagLog.log("player", "close: player view gone at source #\(index)")
             session.endPrewarming()
-            OrientationHelper.lock(.all, rotateTo: .portrait)
+            // FIX-127B: no orientation widen here. A Đổi
+            // nguồn route flip replaces this view in place
+            // inside the still-up cover, and SwiftUI gives
+            // no ordering guarantee against the incoming
+            // view's onAppear — an unconditional widen could
+            // land last and leave the swapped-to player
+            // portrait-capable. The lock now follows the
+            // presentation: ContentView asserts landscape
+            // from the route state and widens to .all only
+            // in the cover's onDismiss (a genuine close).
         }
     }
 

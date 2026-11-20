@@ -213,129 +213,53 @@ struct MatchState: Sendable, Equatable {
 /// Scope limits (A2.1): marker stripping applies ONLY to this
 /// belonging key — FixtureGrouping's card identity is untouched,
 /// and classification (LeagueClassifier) still sees the markers.
+///
+/// FIX-127 (2026-11-20) supersedes the implementation, not the
+/// design: the tables and the pipeline moved into TeamNameNorm,
+/// the ONE normalization module every layer shares, and the
+/// pipeline gained the steps the A2.1 shape could not express —
+/// age markers are extracted BEFORE alias resolution and
+/// re-attached as a canonical tag (the whole-name lookup on the
+/// unstripped "y u17" is what split Ý U17 from Italy U17,
+/// DB-04 variant 2), the leading "Câu lạc bộ (bóng đá)" club
+/// phrase drops, measured city qualifiers (jeddah/samara) drop
+/// from the tail, and letters the diacritic fold cannot
+/// decompose (ı, ğ-class) fold by hand. This type keeps its
+/// public API and delegates; its private tables are gone.
 enum MatchMatching {
-
-    /// Filler tokens: FixtureGrouping's set plus Addendum 2's
-    /// measured additions — `de do da del` (particles), `dsc`,
-    /// `sl`, `s` (possessive artifact), `futbol`/`football`
-    /// (spelled-out FC). `clb` rides in FixtureGrouping's set
-    /// (DB-04, 2026-11-19: the Vietnamese club prefix in "CLB
-    /// Cincinnati", measured across the live playlist) and must
-    /// drop here too or this layer's canonical key keeps the
-    /// token FixtureGrouping already dropped.
-    private static let fillerTokens: Set<String> = [
-        "fc", "cf", "sc", "afc", "ca", "cd", "fk", "sk",
-        "club", "clb", "ac", "as", "sd", "us", "ec",
-        "de", "do", "da", "del", "dsc", "sl", "s", "futbol", "football",
-    ]
-
-    /// Women's markers stripped as leading/trailing tokens of the
-    /// belonging key (A2.1 step 4).
-    private static let womenMarkers: Set<String> = [
-        "women", "w", "nu", "feminin", "femmes", "femenino", "femenina",
-    ]
-
-    /// Token aliases (A2.2, measured): applied per token after the
-    /// filler drop.
-    private static let tokenAliases: [String: String] = [
-        "munchen": "munich",
-        "wien": "vienna",
-        "koln": "cologne",
-        "mgladbach": "gladbach",
-        "lyonnes": "lyon",
-    ]
-
-    /// Whole-name aliases (A2.2, measured; whole canonical name
-    /// only, never substring) plus the survey's VN national-team
-    /// aliases (§3.2 of the survey).
-    private static let wholeNameAliases: [String: String] = [
-        "atletico penarol": "penarol",
-        "montevideo city torque": "montevideo city",
-        "servette chenois": "servette",
-        "servette geneve": "servette",
-        "vitoria ba": "vitoria",
-        "rb bragantino": "bragantino",
-        "red bull bragantino": "bragantino",
-        "bragantino sp": "bragantino",
-        "vitoria salvador ba": "vitoria",
-        "koge": "hb koge",
-        "anh": "england",
-        "phap": "france",
-        "y": "italy",
-        "duc": "germany",
-        "tay ban nha": "spain",
-        "ha lan": "netherlands",
-        "bo dao nha": "portugal",
-        "bi": "belgium",
-        "dan mach": "denmark",
-        "thuy si": "switzerland",
-        "ao": "austria",
-        "ba lan": "poland",
-        "sec": "czechia",
-        "tho nhi ky": "turkiye",
-        "nga": "russia",
-        "han quoc": "south korea",
-        "nhat ban": "japan",
-        "my": "usa",
-        "uc": "australia",
-    ]
-
-    /// The canonical pipeline (A2.1 steps 2–5) over an already
-    /// Crests.norm-normalised name.
-    private static func canonicalise(normalized: String) -> String {
-        var tokens = normalized
-            .split(separator: " ")
-            .map(String.init)
-            .filter { !fillerTokens.contains($0) && !$0.allSatisfy({ $0.isNumber }) }
-            .map { tokenAliases[$0] ?? $0 }
-        while let first = tokens.first, womenMarkers.contains(first) {
-            tokens.removeFirst()
-        }
-        while let last = tokens.last, womenMarkers.contains(last) {
-            tokens.removeLast()
-        }
-        let joined = tokens.joined(separator: " ")
-        if let alias = wholeNameAliases[joined] { return alias }
-        // Brazilian state suffix (FixtureGrouping's measured
-        // strip, 1.24): "sao paulo sp" must canonicalise to the
-        // same key as ESPN's "sao paulo" or the decorated listing
-        // can never bind this fixture's state — it then renders
-        // the bounded computed clock beside the matched tile's
-        // true minute, and one match shows two times.
-        let stripped = FixtureGrouping.droppingStateSuffix(joined)
-        return wholeNameAliases[stripped] ?? stripped
-    }
 
     /// Canonical team key for a RAW team name (source feeds, Nuvio
     /// metas).
     static func canonicalTeam(rawName: String) -> String {
-        canonicalise(normalized: Crests.norm(rawName))
+        TeamNameNorm.canonicalKey(forTeam: rawName)
     }
 
     /// Canonical team key for an already-normalised name
     /// (FixtureGrouping.normalizedTeam output — the mirror side).
+    /// TeamNameNorm's pipeline is idempotent over its own
+    /// grouping key, so this lands on the same key as the raw
+    /// name would.
     static func canonicalTeam(normalizedName: String) -> String {
-        canonicalise(normalized: normalizedName)
+        TeamNameNorm.canonicalKey(forTeam: normalizedName)
     }
 
     /// The pair key for two raw team names (source feeds, Nuvio
     /// metas), or nil when either side canonicalises away.
     static func pairKey(team1: String, team2: String) -> String? {
-        let a = canonicalTeam(rawName: team1)
-        let b = canonicalTeam(rawName: team2)
-        guard !a.isEmpty, !b.isEmpty else { return nil }
-        return [a, b].sorted().joined(separator: " vs ")
+        TeamNameNorm.pairKey(team1: team1, team2: team2)
     }
 
     /// The pair key for a playlist channel, or nil when its title
-    /// has no recognisable pair.
+    /// has no recognisable pair. Built from the title's raw sides
+    /// through the shared module (FIX-127): the old construction
+    /// canonicalised the GROUPING pair key's sides, which is how
+    /// a grouping-level variant the grouping layer could not
+    /// resolve (an age-prefixed VN name, a city qualifier) reached
+    /// this layer already split.
     static func pairKey(of channel: Channel) -> String? {
-        guard let raw = FixtureGrouping.pairKey(of: channel) else { return nil }
-        return raw
-            .components(separatedBy: " vs ")
-            .map { canonicalTeam(normalizedName: $0) }
-            .sorted()
-            .joined(separator: " vs ")
+        guard let (a, b) = Crests.teams(ofCleanTitle: MatchTitle.clean(channel.title))
+        else { return nil }
+        return TeamNameNorm.pairKey(team1: a, team2: b)
     }
 
     /// The comparable minute of a source's minute text ("53'",
@@ -360,9 +284,7 @@ enum MatchMatching {
     /// has its own guard in LeagueClassifier; this one serves
     /// belonging only.)
     static func hasWomenMarker(rawName: String) -> Bool {
-        Crests.norm(rawName)
-            .split(separator: " ")
-            .contains { womenMarkers.contains(String($0)) }
+        TeamNameNorm.hasWomenMarker(rawName)
     }
 
     /// True when a fixture channel's pair is women-marked.
@@ -498,6 +420,16 @@ private struct FotMobStatusDTO: Decodable {
     let scoreStr: String?
     let liveTime: FotMobLiveTimeDTO?
     let halfs: FotMobHalfsDTO?
+    /// The match's kickoff instant — carried HERE, inside the
+    /// status object, in the day feed (verified on the raw feed,
+    /// 2026-11-20, FIX-127). The match-level `utcTime` the DTO
+    /// above declares does not exist in this feed, so every
+    /// FotMob state used to fall back to the feed-day dateKey
+    /// and fail date agreement for any fixture whose ICT date
+    /// differs from the feed's UTC filing date — the whole
+    /// post-midnight block (00:30 ICT kickoffs) could never bind
+    /// a FotMob state.
+    let utcTime: String?
 }
 private struct FotMobLiveTimeDTO: Decodable { let short: String? }
 private struct FotMobHalfsDTO: Decodable {
@@ -902,7 +834,12 @@ enum MatchStateClient {
                 // without a kickoff falls back to the carrying
                 // feed's own day (`feedDateKey`); with neither it
                 // is skipped — the fetch instant is never a basis.
-                let kickoff = match.utcTime.flatMap { parseISO8601($0) }
+                // FIX-127: the day feed carries the instant inside
+                // the status object (see FotMobStatusDTO.utcTime);
+                // the match-level field is kept as a fallback for
+                // any feed shape that does carry it.
+                let kickoff = (statusDTO.utcTime ?? match.utcTime)
+                    .flatMap { parseISO8601($0) }
                 guard let dateKey = kickoff.map({ FixtureGrouping.stampDateKey(of: $0) })
                         ?? feedDateKey else { continue }
                 // FotMob's day feed carries no logo field — only
@@ -1231,6 +1168,10 @@ final class MatchStateStore: ObservableObject {
         // Precedence by wholesale replacement per fixture key:
         // ESPN > FotMob > Flashscore > LiveScore — livescore
         // first, then Flashscore, then FotMob, then ESPN on top.
+        // (The snapshot stays one source's whole state per key;
+        // the partial-state completion happens at lookup time,
+        // in `filledFromPool`, where the date-agreed pool for the
+        // fixture is known — FIX-127.)
         var merged: [String: MatchState] = [:]
         for state in dateStates + liveStates + flashStates + fotmobStates + espnStates {
             merged[state.pairKey + "|" + state.dateKey] = state
@@ -1339,7 +1280,85 @@ final class MatchStateStore: ObservableObject {
         guard let winner = pool.max(by: {
             precedence($0.source) < precedence($1.source)
         }) else { return nil }
-        return stalenessOverride(of: winner, in: pool) ?? winner
+        let resolved = stalenessOverride(of: winner, in: pool) ?? winner
+        return filledFromPool(resolved, pool: pool)
+    }
+
+    /// Partial-state merge (FIX-127, 2026-11-20): precedence picks
+    /// the winning SOURCE, but a source's state is often partial —
+    /// Flashscore carries score with no minute and no incidents,
+    /// a FotMob state can carry the minute while another layer
+    /// carries the score — and wholesale replacement used to
+    /// throw the complement away, so the fixture rendered the
+    /// parts no single source had assembled (the "VS" row beside
+    /// a bound state: winner held status+minute, its score sat in
+    /// the losing state). The winner now keeps every field it
+    /// HAS; only its gaps are filled, from the same lookup pool
+    /// (same fixture, date-agreed, marker-disciplined — never
+    /// from outside it), highest precedence first:
+    /// - status: a `.pre` winner yields to a pool donor already
+    ///   live / half-time / full-time (a reported later status is
+    ///   never downgraded — RC5 discipline, as in the staleness
+    ///   guard);
+    /// - score and half-time score: filled as PAIRS from the
+    ///   first donor carrying both sides AND agreeing with
+    ///   every side the winner already holds — home from one
+    ///   source and away from another is never mixed, and a
+    ///   donor that contradicts a set side is refused, so the
+    ///   winner's half pair stays unfilled (fail closed);
+    /// - minute, incidents, competition: filled when absent.
+    /// A donor never overwrites a set field, so the merged state
+    /// is still recognisably the winner's truth, completed.
+    private func filledFromPool(_ winner: MatchState,
+                                pool: [MatchState]) -> MatchState {
+        let donors = pool
+            .filter {
+                !($0.pairKey == winner.pairKey && $0.dateKey == winner.dateKey)
+            }
+            .sorted { precedence($0.source) > precedence($1.source) }
+        guard !donors.isEmpty else { return winner }
+        var out = winner
+        if out.status == .pre,
+           let donor = donors.first(where: {
+               $0.status == .live || $0.status == .halfTime
+                   || $0.status == .fullTime
+           }) {
+            out.status = donor.status
+            if out.minuteText == nil { out.minuteText = donor.minuteText }
+        }
+        if out.scoreHome == nil || out.scoreAway == nil,
+           let donor = donors.first(where: {
+               $0.scoreHome != nil && $0.scoreAway != nil
+                   && (out.scoreHome == nil || $0.scoreHome == out.scoreHome)
+                   && (out.scoreAway == nil || $0.scoreAway == out.scoreAway)
+           }) {
+            out.scoreHome = donor.scoreHome
+            out.scoreAway = donor.scoreAway
+        }
+        if out.htHome == nil || out.htAway == nil,
+           let donor = donors.first(where: {
+               $0.htHome != nil && $0.htAway != nil
+                   && (out.htHome == nil || $0.htHome == out.htHome)
+                   && (out.htAway == nil || $0.htAway == out.htAway)
+           }) {
+            out.htHome = donor.htHome
+            out.htAway = donor.htAway
+        }
+        if out.minuteText == nil {
+            out.minuteText = donors.first(where: { $0.minuteText != nil })?.minuteText
+        }
+        if out.goals.isEmpty,
+           let donor = donors.first(where: { !$0.goals.isEmpty }) {
+            out.goals = donor.goals
+        }
+        if out.cards.isEmpty,
+           let donor = donors.first(where: { !$0.cards.isEmpty }) {
+            out.cards = donor.cards
+        }
+        if out.competition == nil {
+            out.competition = donors.first(where: { $0.competition != nil })?.competition
+        }
+        return out
     }
 
     /// Staleness guard (1.24): precedence is absolute, so a top

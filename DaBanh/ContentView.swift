@@ -16,8 +16,30 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selectedChannel: Channel?
-    @State private var selectedSession: MatchPlaySession?
+    /// FIX-127 (owner order 2026-11-20 — "làm 1 lần hoàn
+    /// tất ngay"): ONE presentation route for the link board
+    /// and the player, shown by ONE full-screen cover below. A
+    /// fixture tap sets .board; a board pick flips the SAME
+    /// cover to .playVN/.playEN in the same state change — no
+    /// dismissal in between. The chain this replaces (board
+    /// .sheet whose onDismiss ran a stored deferred-play
+    /// closure that set a separate cover's item) measured a 29 s
+    /// pick→player gap on device in 1.26 even though the
+    /// stream URL was published instantly: the relay, not the
+    /// playback, ate the time. Closing either screen clears
+    /// the route through the cover's own dismissal.
+    private enum Route {
+        case board(FixtureEntry)
+        case playVN(session: MatchPlaySession, channel: Channel)
+        case playEN(session: MatchPlaySession, meta: NuvioMeta)
+    }
+    @State private var route: Route?
+    /// Whether the single cover is up. Separate from `route`
+    /// so a close (either screen's own dismiss()) leaves the
+    /// route in place until the cover's onDismiss clears it —
+    /// the outgoing screen stays rendered through its
+    /// dismissal instead of blanking to the nil case.
+    @State private var coverUp = false
     /// The Nuvio addon source: it leads the BLV Anh tab (the
     /// mirror's EN block stays below it as the fallback pool)
     /// and, since 1.20, feeds the Đức league tab's addon
@@ -25,21 +47,6 @@ struct ContentView: View {
     /// fixtures up top with the live sections, its Sky
     /// Bundesliga channels below the fixtures.
     @StateObject private var nuvio = NuvioAddonStore()
-    @State private var selectedAddon: NuvioMeta?
-    @State private var selectedAddonSession: MatchPlaySession?
-    /// The fixture whose link board is open (spec §2: a fixture
-    /// tap opens the board; a board row tap plays). The play
-    /// action is deferred to the sheet's onDismiss so the cover
-    /// never races the sheet's dismissal.
-    @State private var boardEntry: FixtureEntry?
-    @State private var pendingPlay: (() -> Void)?
-    /// An in-player Đổi nguồn cover swap (1.22): the live
-    /// player's pick of a link its own session cannot serve (an
-    /// English meta, or a Vietnamese row it never published)
-    /// records the presentation here and dismisses its cover;
-    /// the cover's onDismiss runs it — the pendingPlay pattern,
-    /// cover to cover, so the two covers never race.
-    @State private var pendingCoverSwap: (() -> Void)?
     /// The fixture the current player session was chosen from —
     /// the player's board-header slot renders its cluster.
     @State private var playerEntry: FixtureEntry?
@@ -88,42 +95,62 @@ struct ContentView: View {
                             competing: competingChannels(for: entry))
     }
 
-    /// A cover swap deferred to the live cover's onDismiss:
-    /// record what to present, then dismiss whichever cover is
-    /// up; its onDismiss runs the presentation (see the covers
-    /// in body). Used only by the in-player Đổi nguồn picks
-    /// below — a normal close leaves pendingCoverSwap nil.
-    private func requestCoverSwap(_ present: @escaping () -> Void) {
-        pendingCoverSwap = present
-        if selectedChannel != nil {
-            selectedChannel = nil
-        } else if selectedAddon != nil {
-            selectedAddon = nil
-        }
+    /// Open (or re-target) the single cover: every play entry
+    /// point funnels through here — set the route, raise the
+    /// cover. When the cover is already up (a board pick, an
+    /// in-player Đổi nguồn swap) only the route changes: the
+    /// cover's content swaps in place and nothing dismisses.
+    private func present(_ newRoute: Route) {
+        route = newRoute
+        coverUp = true
     }
 
     /// Đổi nguồn pick of an English row, from either player:
-    /// swap covers to the addon session for the meta. The
-    /// fixture stays playerEntry — the swapped-to player is the
-    /// same match, so its overlay keeps the same board.
+    /// flip the route to the addon session for the meta. The
+    /// fixture stays playerEntry — the swapped-to player is
+    /// the same match, so its overlay keeps the same board.
+    /// routeContent's .id makes the flip build a fresh
+    /// PlayerView, the freshness the old dismiss→present
+    /// relay provided, without the relay.
     private func swapToENMeta(_ meta: NuvioMeta) {
-        requestCoverSwap {
-            selectedAddonSession = nuvio.session(for: meta)
-            selectedAddon = meta
-        }
+        let session = nuvio.session(for: meta)
+        DiagLog.log("player", "route set: player — EN swap '\(meta.name)'")
+        present(.playEN(session: session, meta: meta))
     }
 
     /// Đổi nguồn pick of a Vietnamese row the live session
     /// cannot serve in place (never published by it, or the
-    /// pick was made from an English session): swap covers to
-    /// a fresh session rotated to the chosen row — the link
-    /// board's own entry path.
+    /// pick was made from an English session): flip the route
+    /// to a fresh session rotated to the chosen row — the
+    /// link board's own entry path.
     private func swapToVNRow(_ channel: Channel) {
         guard let entry = playerEntry else { return }
-        requestCoverSwap {
-            selectedSession = ResolveHub.shared.session(
-                for: store.rotatedSources(for: entry, chosen: channel))
-            selectedChannel = channel
+        let session = ResolveHub.shared.session(
+            for: store.rotatedSources(for: entry, chosen: channel))
+        DiagLog.log("player",
+                    "route set: player — VN swap '\(MatchTitle.clean(channel.title))'")
+        present(.playVN(session: session, channel: channel))
+    }
+
+    /// Identity of the current player route, in the same
+    /// terms routeContent keys its PlayerView .id by; nil on
+    /// the board route and with no route set. FIX-127B: the
+    /// orientation lock is driven from this value (see the
+    /// onChange in body) so the lock follows the
+    /// PRESENTATION, not the PlayerView instance — an
+    /// in-place Đổi nguồn swap changes the key and
+    /// re-asserts landscape, and only the cover's genuine
+    /// dismissal widens the lock back to .all.
+    private var playerRouteKey: String? {
+        switch route {
+        case .playVN(let session, _):
+            return "vn:" + session.key
+        case .playEN(let session, let meta):
+            return "en:" + meta.id + ":" + session.key
+        case .board(_):
+            return nil
+        case nil:
+            return nil
         }
     }
 
@@ -178,44 +205,86 @@ struct ContentView: View {
                 Task { await nuvio.loadIfNeeded() }
             }
         }
-        .fullScreenCover(item: $selectedChannel, onDismiss: {
-            selectedSession = nil
-            pendingCoverSwap?()
-            pendingCoverSwap = nil
-        }) { _ in
-            // The session was captured at tap time (see the tap
-            // sites); the cover never calls the hub itself, so a
-            // re-evaluation here cannot swap the live player's
-            // session out from under it.
-            if let selectedSession {
-                PlayerView(
-                    session: selectedSession, headerEntry: playerEntry,
-                    enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
-                    onSwitchEN: swapToENMeta,
-                    onSwitchVN: swapToVNRow)
+        // FIX-127: the ONE cover for board + player (see the
+        // Route state above). Its content is routeContent; a
+        // route flip while it is up swaps the content in
+        // place — no dismissal anywhere on a play path. A
+        // close from inside (either screen's own dismiss())
+        // drops coverUp; onDismiss then clears the route.
+        // The sessions are captured into the route at tap
+        // time (see the tap sites); the cover never calls the
+        // hub itself, so a re-evaluation here cannot swap the
+        // live player's session out from under it.
+        .fullScreenCover(isPresented: $coverUp, onDismiss: {
+            route = nil
+            // FIX-127B: this dismissal is the ONLY genuine
+            // close of board or player — the one place the
+            // orientation lock widens back to .all. A route
+            // flip never reaches here (the cover stays up).
+            OrientationHelper.lock(.all, rotateTo: .portrait)
+        }) {
+            routeContent
+        }
+        .onChange(of: playerRouteKey) { _, key in
+            // FIX-127B: every arrival at a player route —
+            // the first open and every in-place Đổi nguồn
+            // swap — re-asserts the landscape lock, so the
+            // lock's final state never depends on the
+            // appear/disappear ordering of the swapped
+            // PlayerView instances.
+            if key != nil {
+                OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
             }
         }
-        .fullScreenCover(item: $selectedAddon, onDismiss: {
-            selectedAddonSession = nil
-            pendingCoverSwap?()
-            pendingCoverSwap = nil
-        }) { _ in
-            // Same tap-time capture as the playlist cover above:
-            // the addon store vended the session at the tap; the
-            // cover only presents it.
-            if let selectedAddonSession {
-                PlayerView(
-                    session: selectedAddonSession, headerEntry: playerEntry,
-                    enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
-                    currentENMetaID: selectedAddon?.id,
-                    onSwitchEN: swapToENMeta,
-                    onSwitchVN: swapToVNRow)
-            }
+        .sheet(isPresented: $showDiagLog) {
+            DiagLogView()
         }
-        .sheet(item: $boardEntry, onDismiss: {
-            pendingPlay?()
-            pendingPlay = nil
-        }) { entry in
+    }
+
+    /// What the single cover shows for the current route.
+    /// The player branches carry an explicit .id keyed to the
+    /// session (and the meta), so a Đổi nguồn route flip
+    /// builds a FRESH PlayerView — its @State starts over,
+    /// exactly as when the old relay dismissed and
+    /// re-presented — while a flip that changes nothing
+    /// rebuilds nothing. The session key is the ladder's URLs
+    /// in order, so a rotation to a different head is a
+    /// different key.
+    @ViewBuilder
+    private var routeContent: some View {
+        switch route {
+        case .board(let entry):
+            boardPanel(entry)
+        case .playVN(let session, _):
+            PlayerView(
+                session: session, headerEntry: playerEntry,
+                enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
+                onSwitchEN: swapToENMeta,
+                onSwitchVN: swapToVNRow)
+                .id("vn:" + session.key)
+        case .playEN(let session, let meta):
+            PlayerView(
+                session: session, headerEntry: playerEntry,
+                enMetas: playerEntry.map { enMetas(for: $0) } ?? [],
+                currentENMetaID: meta.id,
+                onSwitchEN: swapToENMeta,
+                onSwitchVN: swapToVNRow)
+                .id("en:" + meta.id + ":" + session.key)
+        case nil:
+            Color.black.ignoresSafeArea()
+        }
+    }
+
+    /// The link board wearing the panel it had as a sheet
+    /// (FIX-127): the cover's background is clear, the list
+    /// behind shows through dimmed, and the board itself —
+    /// the unchanged MatchBoardView — sits in a rounded
+    /// panel. Its own X button dismisses the cover, which
+    /// clears the route (see the cover's onDismiss above).
+    private func boardPanel(_ entry: FixtureEntry) -> some View {
+        ZStack {
+            Color.black.opacity(0.6)
+                .ignoresSafeArea()
             MatchBoardView(
                 entry: entry,
                 enMetas: enMetas(for: entry),
@@ -226,28 +295,32 @@ struct ContentView: View {
                     DiagLog.log("player",
                                 "tap: board pick '\(MatchTitle.clean(channel.title))' "
                                 + "host=\(channel.streamURL?.host ?? "?")")
-                    pendingPlay = {
-                        playerEntry = entry
-                        selectedSession = ResolveHub.shared.session(
-                            for: store.rotatedSources(for: entry, chosen: channel))
-                        selectedChannel = channel
-                    }
-                    boardEntry = nil
+                    playerEntry = entry
+                    let session = ResolveHub.shared.session(
+                        for: store.rotatedSources(for: entry, chosen: channel))
+                    // FIX-127: the route flip IS the
+                    // presentation now — this line and
+                    // PlayerView's "open:" line bracket the
+                    // whole pick→player leg in the log.
+                    DiagLog.log("player",
+                                "route set: player — VN '\(MatchTitle.clean(channel.title))'")
+                    present(.playVN(session: session, channel: channel))
                 },
                 onPlayEN: { meta in
                     DiagLog.log("player",
                                 "tap: board pick EN '\(meta.name)'")
-                    pendingPlay = {
-                        playerEntry = entry
-                        selectedAddonSession = nuvio.session(for: meta)
-                        selectedAddon = meta
-                    }
-                    boardEntry = nil
+                    playerEntry = entry
+                    let session = nuvio.session(for: meta)
+                    DiagLog.log("player",
+                                "route set: player — EN '\(meta.name)'")
+                    present(.playEN(session: session, meta: meta))
                 })
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .padding(.horizontal, 4)
+                .padding(.top, 48)
+                .padding(.bottom, 4)
         }
-        .sheet(isPresented: $showDiagLog) {
-            DiagLogView()
-        }
+        .presentationBackground(.clear)
     }
 
     // MARK: - Header
@@ -469,7 +542,7 @@ struct ContentView: View {
                             // A fixture tap opens its link board
                             // (spec §2.1); the board's row tap is
                             // what enters the player.
-                            boardEntry = entry
+                            present(.board(entry))
                         } label: {
                             FeaturedCard(entry: entry)
                         }
@@ -1037,8 +1110,10 @@ struct ContentView: View {
                             DiagLog.log("player",
                                         "tap: channel '\(MatchTitle.clean(channel.title))' — direct play")
                             playerEntry = nil
-                            selectedSession = ResolveHub.shared.session(for: store.sources(for: channel))
-                            selectedChannel = channel
+                            let session = ResolveHub.shared.session(for: store.sources(for: channel))
+                            DiagLog.log("player",
+                                        "route set: player — VN direct '\(MatchTitle.clean(channel.title))'")
+                            present(.playVN(session: session, channel: channel))
                         } label: {
                             ENChannelRow(channel: channel)
                         }
@@ -1067,8 +1142,10 @@ struct ContentView: View {
     private func addonRow(_ entry: NuvioMeta) -> some View {
         Button {
             playerEntry = nil
-            selectedAddonSession = nuvio.session(for: entry)
-            selectedAddon = entry
+            let session = nuvio.session(for: entry)
+            DiagLog.log("player",
+                        "route set: player — EN direct '\(entry.name)'")
+            present(.playEN(session: session, meta: entry))
         } label: {
             NuvioEntryRow(entry: entry)
         }
@@ -1132,7 +1209,7 @@ struct ContentView: View {
                         "tap: fixture '\(MatchTitle.clean(entry.channel.title))' from the list")
             // A fixture tap opens its link board (spec §2.1);
             // the board's row tap enters the player.
-            boardEntry = entry
+            present(.board(entry))
         } label: {
             MatchCard(entry: entry)
         }
