@@ -112,6 +112,7 @@ struct MUMatchDetailView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         hero
+                        eventsSection
                         sourceButton
                     }
                 }
@@ -358,6 +359,136 @@ struct MUMatchDetailView: View {
         return nil
     }
 
+    // MARK: Events (FIX-133, item G — theme-mu/DETAIL-EVENTS-SPEC.md)
+
+    /// The match-events section (spec §2): the half-time
+    /// score line and the two-column goals/cards block,
+    /// inserted between the hero and the source button
+    /// inside the existing ScrollView. Display only — the
+    /// data already arrives on this page (`liveEntry.state`
+    /// carries htHome/htAway + goals + cards, and the view's
+    /// .task already fires ensureDetails). The section is
+    /// ABSENT ENTIRELY when there is nothing to show (no
+    /// state, or a state with neither a half-time score nor
+    /// any event) — no divider, no placeholder line.
+    @ViewBuilder
+    private var eventsSection: some View {
+        if let state = liveEntry.state {
+            let hasHT = state.htHome != nil && state.htAway != nil
+            let hasEvents = !state.goals.isEmpty || !state.cards.isEmpty
+            if hasHT || hasEvents {
+                VStack(alignment: .leading, spacing: 0) {
+                    Rectangle()
+                        .fill(MUTokens.border)
+                        .frame(height: 1)
+                    if hasHT, let htHome = state.htHome, let htAway = state.htAway {
+                        HStack(spacing: 6) {
+                            Text("HIỆP 1")
+                                .font(MUFont.body(10, .semibold))
+                                .tracking(0.15 * 10)
+                                .foregroundStyle(MUTokens.secondary)
+                            Text("\(htHome) – \(htAway)")
+                                .font(MUFont.body(11, .semibold))
+                                .foregroundStyle(MUTokens.cream)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 8)
+                    }
+                    if hasEvents {
+                        eventsColumns(state)
+                            // Spec §2.3: 10 pt under the HT
+                            // line when both parts show. With
+                            // events alone the block takes the
+                            // same 8 pt under-divider rhythm
+                            // the HT line uses (the only
+                            // under-divider spacing the spec
+                            // defines).
+                            .padding(.top, hasHT ? 10 : 8)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+        }
+    }
+
+    /// The two event columns (spec §2.4): the hero's own
+    /// geometry — 1fr · 112 · 1fr at spacing 6 — so each
+    /// team's events sit directly under its crest and name.
+    /// Home left-aligned, away right-aligned; within a
+    /// column, goals first, then cards, each in the source
+    /// array's own (chronological) order. No row cap.
+    private func eventsColumns(_ state: MatchState) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            eventsColumn(state, isHome: true)
+            Color.clear.frame(width: 112)
+            eventsColumn(state, isHome: false)
+        }
+    }
+
+    private func eventsColumn(_ state: MatchState, isHome: Bool) -> some View {
+        VStack(alignment: isHome ? .leading : .trailing, spacing: 6) {
+            ForEach(Array(state.goals.filter { $0.isHome == isHome }.enumerated()),
+                    id: \.offset) { _, goal in
+                goalRow(goal)
+            }
+            ForEach(Array(state.cards.filter { $0.isHome == isHome }.enumerated()),
+                    id: \.offset) { _, card in
+                cardRow(card)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isHome ? .leading : .trailing)
+    }
+
+    /// One goal line (spec §2.4): minute first, then the
+    /// scorer, with the app's global " (pen)" / " (OG)"
+    /// suffixes in the same size and colour. The away
+    /// column keeps this same internal order and hugs the
+    /// right edge via the column's trailing alignment (the
+    /// LiveBoardView precedent — the row itself never
+    /// reverses).
+    private func goalRow(_ goal: GoalEvent) -> some View {
+        let suffix = (goal.isPenalty ? " (pen)" : "") + (goal.isOwnGoal ? " (OG)" : "")
+        return HStack(spacing: 5) {
+            Text(goal.minuteText)
+                .font(MUFont.body(11, .semibold))
+                .foregroundStyle(MUTokens.cream)
+            Text(goal.scorer + suffix)
+                .font(MUFont.body(11))
+                .foregroundStyle(MUTokens.cream)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(spokenMinute(goal.minuteText)), \(goal.scorer), bàn thắng")
+    }
+
+    /// One card line (spec §2.4): the 8×11 card chip
+    /// (radius 2 — yellow is the app-wide card constant,
+    /// red is the theme's red), then the player, then the
+    /// minute.
+    private func cardRow(_ card: CardEvent) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(card.isRed ? MUTokens.red : BoardPalette.cardYellow)
+                .frame(width: 8, height: 11)
+            Text(card.player)
+                .font(MUFont.body(11))
+                .foregroundStyle(MUTokens.cream)
+                .lineLimit(1)
+            Text(card.minuteText)
+                .font(MUFont.body(11, .semibold))
+                .foregroundStyle(MUTokens.cream)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(card.isRed ? "thẻ đỏ" : "thẻ vàng"), \(card.player), \(spokenMinute(card.minuteText))")
+    }
+
+    /// "72'" → "72 phút" for the VoiceOver line forms the
+    /// spec fixes (§2.7).
+    private func spokenMinute(_ minuteText: String) -> String {
+        minuteText.replacingOccurrences(of: "'", with: " phút")
+    }
+
     // MARK: Source button + sheet (FIX-MU-5, item B)
 
     /// The count pill the button and the sheet header share
@@ -438,11 +569,33 @@ struct MUMatchDetailView: View {
                     .foregroundStyle(MUTokens.cream)
                 Spacer(minLength: 8)
                 countChip
+                // FIX-133 (audit D23): the sheet language's
+                // 44×44 header close — the sheet dismissed by
+                // drag/swipe alone before; the button is the
+                // settings sheet's own close, carried over.
+                Button {
+                    showSourceSheet = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(MUTokens.cream)
+                        .frame(width: 44, height: 44)
+                        .background(MUPressedBackground(Circle(), MUTokens.card))
+                        .overlay(Circle().stroke(MUTokens.border, lineWidth: 1))
+                }
+                .buttonStyle(MUPressButtonStyle())
+                .accessibilityLabel("Đóng")
             }
             Text("Chạm vào một nguồn để phát ngay.")
                 .font(MUFont.body(11))
                 .foregroundStyle(MUTokens.secondary)
                 .padding(.top, 7)
+                // FIX-133 (audit D28): the spec's description
+                // margins are 7 top / 17 bottom — the bottom
+                // 17 was lost when the list moved into the
+                // sheet, leaving only the group header's own
+                // 16 above the first group.
+                .padding(.bottom, 17)
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     if !ladder.isEmpty {
@@ -524,6 +677,10 @@ struct MUMatchDetailView: View {
         }
         .buttonStyle(MUPressButtonStyle())
         .opacity(unavailable ? 0.45 : 1)
+        // FIX-133 (audit D42): the unavailable treatment's
+        // "no click" half — a proven-dead row is really
+        // disabled now, not merely dimmed over a live button.
+        .disabled(unavailable)
     }
 
     private func enRow(_ meta: NuvioMeta) -> some View {
@@ -612,15 +769,11 @@ struct MUMatchDetailView: View {
     /// A quality chip only when the channel's own title
     /// carries a quality token — shown verbatim, never
     /// converted into a resolution the app did not measure.
+    /// FIX-133 (audit F13): the rule itself now lives in the
+    /// shared `muQualityToken(for:)` (MUHomeView.swift), so
+    /// the in-player board rows read the identical function.
     private func qualityToken(for channel: Channel) -> String? {
-        let title = MatchTitle.clean(channel.title).uppercased()
-        if title.contains("FHD") { return "FHD" }
-        if title.contains("UHD") || title.contains("4K") { return "4K" }
-        if title.contains("1080") { return "1080p" }
-        if title.contains("720") { return "720p" }
-        if title.contains("HD") { return "HD" }
-        if title.contains("SD") { return "SD" }
-        return nil
+        muQualityToken(for: channel)
     }
 
     // MARK: Sticky footer CTA

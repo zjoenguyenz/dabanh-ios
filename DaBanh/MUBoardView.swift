@@ -101,17 +101,37 @@ struct MUBoardView: View {
         .padding(.bottom, 8)
     }
 
+    /// The detail page's own unavailable test, verbatim
+    /// (FIX-133, audit F14): a source the app itself has
+    /// proven dead — ResolveHub's proven-dead set or the
+    /// pre-warm store's dead verdict.
+    private func isUnavailable(_ channel: Channel) -> Bool {
+        ResolveHub.shared.isProvenDead(channel.url)
+            || SourcePrewarmStore.shared.isDead(channel.url)
+    }
+
     private func vnRow(_ channel: Channel) -> some View {
         let isPlaying = channel.url == playingChannelURL
+        let unavailable = isUnavailable(channel)
         let name = muCommentatorName(MatchTitle.clean(channel.title), group: channel.group)
         return Button {
             onPlayVN(channel)
         } label: {
             boardRow(name: name,
-                     note: isPlaying ? "Đang phát" : "Bình luận tiếng Việt",
-                     isPlaying: isPlaying)
+                     note: unavailable
+                         ? "Tạm không khả dụng"
+                         : (isPlaying ? "Đang phát" : "Bình luận tiếng Việt"),
+                     quality: muQualityToken(for: channel),
+                     isPlaying: isPlaying,
+                     unavailable: unavailable)
         }
         .buttonStyle(MUPressButtonStyle())
+        // FIX-133 (F14): the design's unavailable treatment
+        // — dimmed in place, in its original group order,
+        // and really disabled (the D42 ruling applied here
+        // too: no tap on a proven-dead row).
+        .opacity(unavailable ? 0.45 : 1)
+        .disabled(unavailable)
     }
 
     private func enRow(_ meta: NuvioMeta) -> some View {
@@ -131,8 +151,12 @@ struct MUBoardView: View {
     /// (min-height 60, padding 8v/12h, gap 10, radius 12,
     /// badge 35×32): the playing row wears the design's
     /// selected state (maroon fill, gold border, gold
-    /// check); every other row keeps the play affordance.
-    private func boardRow(name: String, note: String, isPlaying: Bool) -> some View {
+    /// check); every other available row keeps the play
+    /// affordance. FIX-133: the row now also carries the
+    /// detail rows' quality chip where a real token exists
+    /// (F13) and the unavailable state's cross (F14).
+    private func boardRow(name: String, note: String, quality: String? = nil,
+                          isPlaying: Bool, unavailable: Bool = false) -> some View {
         HStack(spacing: 10) {
             Text(muBadgeText(name))
                 .font(MUFont.body(11, .bold))
@@ -156,7 +180,26 @@ struct MUBoardView: View {
                     .multilineTextAlignment(.leading)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if isPlaying {
+            if let quality {
+                // F13: the detail rows' chip, same values —
+                // 9/400, secondary, 6h/3v padding, radius 5,
+                // border 1; a real title token only, never
+                // fabricated (muQualityToken's rule).
+                Text(quality)
+                    .font(MUFont.body(9))
+                    .foregroundStyle(MUTokens.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(MUTokens.border, lineWidth: 1)
+                    )
+            }
+            if unavailable {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(MUTokens.secondary)
+            } else if isPlaying {
                 Image(systemName: "checkmark")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(MUTokens.gold)

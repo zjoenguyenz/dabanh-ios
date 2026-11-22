@@ -683,6 +683,35 @@ enum TeamNameNorm {
         "borneo samarinda": "borneo",
         "pusamania borneo": "borneo",
         "asan mugunghwa": "chungnam asan",
+        // FIX-133 (2026-11-22, DB-18 / FL-400) — the owner's
+        // 1.32-test photo (10:51 CST) showed Kortrijk vs
+        // Union SG TWICE on one board: the featured card
+        // "Câu lạc bộ Kortrijk vs Union Saint-Gilloise"
+        // (bound, 0:1, crests) and a standard card "Kv
+        // Kortrijk vs Union Sg" (unbound — "VS", no crests).
+        // Both new spellings, traced through the pipeline:
+        // - "Câu lạc bộ Kortrijk" needs NO entry: step 2
+        //   already strips the leading translated decoration
+        //   "cau lac bo", landing on "kortrijk". The class is
+        //   covered by the mechanism, not by an alias.
+        // - "kv kortrijk" → "kortrijk": the Belgian "KV"
+        //   club-form prefix (Koninklijke Voetbalclub) is not
+        //   a filler token and no token alias reaches it, so
+        //   the whole-name entry closes it — the kvc westerlo
+        //   shape. No other club produces this stem.
+        // - "union sg" → "union saint gilloise": the short
+        //   listing form of Royale Union Saint-Gilloise. The
+        //   entry deliberately targets the FULL spelling:
+        //   step 8's second alias pass then resolves it
+        //   through the FIX-MU-5 entry ("union saint
+        //   gilloise" → "union st gilloise"), so every
+        //   spelling of the club lands on the ONE established
+        //   canon "union st gilloise" — the same stem the
+        //   full spelling already produced before this
+        //   change (regression-traced below in FIX-133's
+        //   report: the FIX-MU-5 entry itself is untouched).
+        "kv kortrijk": "kortrijk",
+        "union sg": "union saint gilloise",
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,

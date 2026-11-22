@@ -77,6 +77,10 @@ final class MUChromeViews {
     let volumeButton = UIButton(type: .system)
     let livePill = UIView()
     let livePillLabel = UILabel()
+    /// The pill's leading dot as a real 4×4 view (FIX-133,
+    /// audit A15) — it was a bullet text glyph, which is
+    /// neither 4×4 nor separated by the drawn 5 pt gap.
+    let livePillDot = UIView()
     let leagueLabel = UILabel()
     let titleLabel = UILabel()
     let statusLabel = UILabel()
@@ -84,6 +88,12 @@ final class MUChromeViews {
     let liveStateLabel = UILabel()
     /// The broadcast glyph before "Đang ở LIVE" (#137).
     let liveStateIcon = UIImageView()
+    /// The invisible 44 pt hit target over the icon +
+    /// "Đang ở LIVE" label (FIX-133, audit B29): the drawn
+    /// element was a passive label; the spec's timeline row
+    /// carries a 44-high LIVE action that returns playback
+    /// to the live edge.
+    let liveStateButton = UIButton(type: .system)
     let progressTrack = UIView()
     let progressFill = UIView()
     let progressKnob = UIView()
@@ -256,8 +266,14 @@ extension LivePlayerViewController {
         controlsView.addSubview(mu.livePill)
         mu.livePillLabel.font = MUFont.uiBody(10, .bold)
         mu.livePillLabel.textColor = MUUIColor.cream
-        mu.livePillLabel.text = "● LIVE"
+        mu.livePillLabel.text = "LIVE"
         mu.livePill.addSubview(mu.livePillLabel)
+        // FIX-133 (A15): the drawn dot — 4×4, cream, with a
+        // 5 pt gap to the label (laid out in
+        // layoutEyebrowRow).
+        mu.livePillDot.backgroundColor = MUUIColor.cream
+        mu.livePillDot.layer.cornerRadius = 2
+        mu.livePill.addSubview(mu.livePillDot)
         mu.leagueLabel.font = MUFont.uiBody(10, .semibold)
         mu.leagueLabel.textColor = MUUIColor.gold
         controlsView.addSubview(mu.leagueLabel)
@@ -285,6 +301,14 @@ extension LivePlayerViewController {
         mu.liveStateIcon.contentMode = .scaleAspectFit
         mu.liveStateIcon.isHidden = true
         controlsView.addSubview(mu.liveStateIcon)
+        // FIX-133 (B29): the LIVE action's hit target —
+        // transparent, framed over the icon + label in
+        // layoutTimeRow, hidden unless the surface is live
+        // (refreshMUChrome drives it).
+        mu.liveStateButton.accessibilityLabel = "Về trực tiếp"
+        mu.liveStateButton.addTarget(self, action: #selector(muLiveEdgeTapped), for: .touchUpInside)
+        mu.liveStateButton.isHidden = true
+        controlsView.addSubview(mu.liveStateButton)
         mu.progressTrack.backgroundColor = MUUIColor.border
         mu.progressTrack.layer.cornerRadius = 2
         controlsView.addSubview(mu.progressTrack)
@@ -409,6 +433,13 @@ extension LivePlayerViewController {
         // other clock wording (half-time, a badge) keeps the
         // plain LIVE form.
         mu.livePillLabel.text = Self.livePillText(clock: info.clockText)
+        // FIX-133 (A15): the pill label carries the spec's
+        // .05em tracking in EVERY form (the eyebrow's kern
+        // pattern, applied where the text lands).
+        applyMUKern(mu.livePillLabel, factor: 0.05)
+        // FIX-133 (B29): the LIVE action exists only while
+        // the surface is live.
+        mu.liveStateButton.isHidden = !info.isLive
         mu.leagueLabel.text = info.leagueText
         // Spec TYPE (FIX-MU-3, finding 10): the eyebrow
         // carries .15em tracking. Its font never changes
@@ -430,13 +461,16 @@ extension LivePlayerViewController {
 
     /// FIX-MU-5 (#132): "LIVE · 67'" when the clock text is
     /// a live minute (digits + the trailing apostrophe the
-    /// feeds render), else the plain "● LIVE".
+    /// feeds render), else the plain "LIVE". (FIX-133, A15:
+    /// the leading dot the drawing shows in BOTH forms is
+    /// the pill's own 4×4 dot view now, not a glyph in this
+    /// string — the minute form used to drop it entirely.)
     private static func livePillText(clock: String?) -> String {
         if let clock, clock.hasSuffix("'"),
            clock.contains(where: \.isNumber) {
             return "LIVE · \(clock)"
         }
-        return "● LIVE"
+        return "LIVE"
     }
 
     /// A team's 3-letter chip abbreviation, derived from its
@@ -590,6 +624,12 @@ extension LivePlayerViewController {
         let isLandscape = bounds.width > bounds.height
         if mu.landscape != isLandscape {
             mu.landscape = isLandscape
+            // FIX-133 (audit D17): the landscape page's chip
+            // gap is the spec's 12; portrait keeps 8. Set
+            // here, on the flip, so layoutChips' width
+            // accounting (which reads the stack spacing)
+            // always agrees with the stack itself.
+            mu.chipsStack.spacing = isLandscape ? 12 : 8
             rebuildMUChips()
         }
         if bounds.height >= bounds.width {
@@ -786,9 +826,14 @@ extension LivePlayerViewController {
 
     private func layoutEyebrowRow(_ mu: MUChromeViews, x: CGFloat, y: CGFloat,
                                   width: CGFloat, titleSize: CGFloat) {
-        let pillW = mu.livePillLabel.intrinsicContentSize.width + 16
+        // FIX-133 (A15): the pill's width accounting carries
+        // the dot view now — 8 inset + 4 dot + 5 gap + the
+        // label + 8 inset (was: the label + 16, with a bullet
+        // glyph of uncontrolled size inside the text).
+        let pillW = mu.livePillLabel.intrinsicContentSize.width + 16 + 4 + 5
         mu.livePill.frame = CGRect(x: x, y: y, width: mu.livePill.isHidden ? 0 : pillW, height: 20)
-        mu.livePillLabel.frame = CGRect(x: 8, y: 0, width: pillW - 16, height: 20)
+        mu.livePillDot.frame = CGRect(x: 8, y: 8, width: 4, height: 4)
+        mu.livePillLabel.frame = CGRect(x: 8 + 4 + 5, y: 0, width: pillW - 16 - 4 - 5, height: 20)
         let leagueX = x + (mu.livePill.isHidden ? 0 : pillW + 8)
         mu.leagueLabel.frame = CGRect(x: leagueX, y: y, width: max(0, x + width - leagueX), height: 20)
     }
@@ -804,6 +849,11 @@ extension LivePlayerViewController {
         let liveX = x + width - liveW - iconW
         mu.liveStateIcon.frame = CGRect(x: liveX, y: y, width: 14, height: 14)
         mu.liveStateLabel.frame = CGRect(x: liveX + iconW, y: y, width: liveW, height: 14)
+        // FIX-133 (B29): the LIVE action's 44-high hit
+        // target, centred on the 14-high row, spanning
+        // exactly the icon + label it activates.
+        mu.liveStateButton.frame = CGRect(x: liveX, y: y - 15,
+                                          width: iconW + liveW, height: 44)
     }
 
     /// The progress bar: these are live streams with no
@@ -835,14 +885,18 @@ extension LivePlayerViewController {
 
     private func layoutChips(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
         mu.chipsScroll.frame = CGRect(x: x, y: y, width: width, height: 44)
+        // FIX-133 (D17): the gap in this accounting is the
+        // stack's own spacing (8 portrait / 12 landscape),
+        // never a second literal that can drift from it.
+        let gap = mu.chipsStack.spacing
         var totalW: CGFloat = 0
         for button in mu.chipButtons {
             let w = button.intrinsicContentSize.width
             button.frame = CGRect(x: 0, y: 0, width: w, height: 44)
-            totalW += w + 8
+            totalW += w + gap
         }
-        mu.chipsStack.frame = CGRect(x: 0, y: 0, width: max(0, totalW - 8), height: 44)
-        mu.chipsScroll.contentSize = CGSize(width: max(0, totalW - 8), height: 44)
+        mu.chipsStack.frame = CGRect(x: 0, y: 0, width: max(0, totalW - gap), height: 44)
+        mu.chipsScroll.contentSize = CGSize(width: max(0, totalW - gap), height: 44)
     }
 
     // MARK: - Actions
@@ -865,6 +919,20 @@ extension LivePlayerViewController {
 
     @objc func muAllSourcesTapped() {
         onSourceSwitch?()
+        showControls()
+    }
+
+    /// FIX-133 (audit B29): the timeline LIVE action — a
+    /// tap on "Đang ở LIVE" returns playback to the live
+    /// edge (the end of the item's seekable window), the
+    /// real-playback form of the mock's "LIVE restores".
+    @objc func muLiveEdgeTapped() {
+        guard let item = playerItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else {
+            showControls()
+            return
+        }
+        player?.seek(to: CMTimeAdd(range.start, range.duration))
         showControls()
     }
 

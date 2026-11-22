@@ -191,6 +191,17 @@ enum MUTokens {
 /// until a Vietnamese-capable Outfit is sourced. Dropping
 /// real Outfit TTFs into the bundle + UIAppFonts activates
 /// them with no code change.
+///
+/// FIX-133 (2026-11-22, theme-mu/FONT-SUBSTITUTE-NOTE.md):
+/// the owner chose Manrope as the sanctioned substitute —
+/// the closest face to Outfit with FULL Vietnamese coverage
+/// (measured: 0/104 missing, Outfit misses 92/104). Manrope
+/// is bundled (DaBanh/Fonts/Manrope-*.ttf) and resolves ONLY
+/// under the drawing United theme: `bodyPSName` returns the
+/// Manrope names while the stored theme is `.united`, and
+/// the Outfit names (→ the system fallback, exactly as
+/// before) under MU Wally — Wally's typography is untouched,
+/// and classic never reads MUFont at all.
 enum MUFont {
     static let displayPSName = "BarlowCondensed-ExtraBold"
 
@@ -202,6 +213,17 @@ enum MUFont {
             case .medium: return "Outfit-Medium"
             case .semibold: return "Outfit-SemiBold"
             case .bold: return "Outfit-Bold"
+            }
+        }
+        /// The sanctioned substitute's PostScript names
+        /// (FIX-133 — verified against the bundled files'
+        /// own name tables).
+        var manropePSName: String {
+            switch self {
+            case .regular: return "Manrope-Regular"
+            case .medium: return "Manrope-Medium"
+            case .semibold: return "Manrope-SemiBold"
+            case .bold: return "Manrope-Bold"
             }
         }
         var systemWeight: Font.Weight {
@@ -231,9 +253,23 @@ enum MUFont {
         return .system(size: size, weight: .heavy)
     }
 
+    /// The body face's PostScript name for the ACTIVE theme
+    /// (FIX-133): Manrope under the drawing United theme
+    /// only; the Outfit names everywhere else, so MU Wally
+    /// keeps resolving to the system fallback exactly as it
+    /// did before Manrope was bundled. Read from the same
+    /// UserDefaults key ThemeStore persists — the same read
+    /// MURawPalette.current makes, so fonts and colours can
+    /// never disagree about which MU theme is up.
+    static func bodyPSName(_ weight: BodyWeight) -> String {
+        UserDefaults.standard.string(forKey: "dabanh-theme") == AppThemeID.united.rawValue
+            ? weight.manropePSName : weight.psName
+    }
+
     static func body(_ size: CGFloat, _ weight: BodyWeight = .regular) -> Font {
-        if UIFont(name: weight.psName, size: size) != nil {
-            return .custom(weight.psName, size: size)
+        let name = bodyPSName(weight)
+        if UIFont(name: name, size: size) != nil {
+            return .custom(name, size: size)
         }
         return .system(size: size, weight: weight.systemWeight)
     }
@@ -246,7 +282,7 @@ enum MUFont {
     }
 
     static func uiBody(_ size: CGFloat, _ weight: BodyWeight = .regular) -> UIFont {
-        UIFont(name: weight.psName, size: size)
+        UIFont(name: bodyPSName(weight), size: size)
             ?? .systemFont(ofSize: size, weight: weight.uiWeight)
     }
 }

@@ -53,6 +53,10 @@ targets:
       - DaBanh/MUPlayerChrome.swift
       - DaBanh/MUBoardView.swift
       - DaBanh/Fonts/BarlowCondensed-ExtraBold.ttf
+      - DaBanh/Fonts/Manrope-Regular.ttf
+      - DaBanh/Fonts/Manrope-Medium.ttf
+      - DaBanh/Fonts/Manrope-SemiBold.ttf
+      - DaBanh/Fonts/Manrope-Bold.ttf
       - DaBanh/NuvioAddon.swift
       - DaBanh/Assets.xcassets
     settings:
@@ -67,17 +71,21 @@ targets:
         # This target's own settings pair (from 1.18): it previously
         # inherited the project base (1.5/6), which never matched
         # its info.properties pair — the pair the device shows.
-        MARKETING_VERSION: "1.32"
-        CURRENT_PROJECT_VERSION: "33"
+        MARKETING_VERSION: "1.33"
+        CURRENT_PROJECT_VERSION: "34"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.32"
-        CFBundleVersion: "33"
+        CFBundleShortVersionString: "1.33"
+        CFBundleVersion: "34"
         UIAppFonts:
           - BarlowCondensed-ExtraBold.ttf
+          - Manrope-Regular.ttf
+          - Manrope-Medium.ttf
+          - Manrope-SemiBold.ttf
+          - Manrope-Bold.ttf
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio

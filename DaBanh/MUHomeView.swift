@@ -51,6 +51,25 @@ func muBadgeText(_ name: String) -> String {
     return muInitials(name)
 }
 
+/// A quality chip only when the channel's own title
+/// carries a quality token — shown verbatim, never
+/// converted into a resolution the app did not measure.
+/// The ONE implementation of that rule (FIX-133, audit
+/// F13): the detail rows carried it as a private helper;
+/// the in-player board rows now read the same function, so
+/// the two surfaces can never drift apart on what counts
+/// as a real token.
+func muQualityToken(for channel: Channel) -> String? {
+    let title = MatchTitle.clean(channel.title).uppercased()
+    if title.contains("FHD") { return "FHD" }
+    if title.contains("UHD") || title.contains("4K") { return "4K" }
+    if title.contains("1080") { return "1080p" }
+    if title.contains("720") { return "720p" }
+    if title.contains("HD") { return "HD" }
+    if title.contains("SD") { return "SD" }
+    return nil
+}
+
 /// The design's big-score composition (spec TYPE, FIX-MU-3
 /// finding 2): the colon renders at .7em, raised 3 pt
 /// (the spec's "vertical-align 3"), with 4 pt of space on
@@ -250,11 +269,28 @@ struct MUHomeView: View {
                 if isENTab {
                     enList
                 } else {
-                    ScrollView(showsIndicators: false) {
-                        VStack(spacing: 0) {
-                            heading
-                            cardsBlock
-                            pagination
+                    // FIX-133 (DB-17): the pagination row is the
+                    // frame's footer, exactly as in the 844
+                    // drawing — the scroll content is stretched
+                    // to at least the viewport height and the
+                    // Spacer between the cards block and the
+                    // pagination absorbs precisely the surplus
+                    // (100 pt on the owner's 956 pt phone),
+                    // painted with the board background. At the
+                    // drawing's own height the spacer collapses
+                    // to zero and the layout is pixel-identical;
+                    // content taller than the viewport still
+                    // scrolls as before. No drawn row changes
+                    // height and the cards are never stretched.
+                    GeometryReader { geo in
+                        ScrollView(showsIndicators: false) {
+                            VStack(spacing: 0) {
+                                heading
+                                cardsBlock
+                                Spacer(minLength: 0)
+                                pagination
+                            }
+                            .frame(minHeight: geo.size.height, alignment: .top)
                         }
                     }
                 }
@@ -534,53 +570,74 @@ struct MUHomeView: View {
 
     // MARK: Pagination (42)
 
+    /// FIX-133 (DB-16 / audit H36, review §5 decision): the
+    /// drawn visuals are unchanged — chevron at the left
+    /// edge, the range text passive beside it, the page dots
+    /// centred in the free span, "Tiếp ›" at the right edge —
+    /// but the two controls' HIT regions now span the row's
+    /// end zones at the spec's 44 pt touch height: prev owns
+    /// everything from the content's left edge through the
+    /// range text (the text renders inside its label), next
+    /// owns the rest of the row to the right edge. Only the
+    /// missed taps go away; nothing the owner sees moves.
     private var pagination: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 0) {
             Button {
                 if page > 0 { page -= 1 }
             } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(page > 0 ? MUTokens.cream : MUTokens.secondary.opacity(0.4))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+                HStack(spacing: 0) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(page > 0 ? MUTokens.cream : MUTokens.secondary.opacity(0.4))
+                        .frame(width: 44, height: 44)
+                    // The drawn 10 pt gap to the range text,
+                    // inside prev's hit zone.
+                    Color.clear.frame(width: 10, height: 44)
+                    // The range text itself sits inside prev's
+                    // label (REVIEW-133 gate fix): as a passive
+                    // sibling between the two buttons it belonged
+                    // to neither hit zone — a dead strip. Inside
+                    // the label it renders at the same spot, in the
+                    // same font and colour, and prev's Rectangle
+                    // contentShape now covers it; next's zone is
+                    // the row remainder from the text's end.
+                    Text(tabEntries.isEmpty
+                         ? "0 / 0 trận"
+                         : "\(page * 3 + 1)–\(min(page * 3 + 3, tabEntries.count)) / \(tabEntries.count) trận")
+                        .font(MUFont.body(10))
+                        .foregroundStyle(MUTokens.secondary)
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(MUPressButtonStyle())
             .disabled(page == 0)
 
-            Text(tabEntries.isEmpty
-                 ? "0 / 0 trận"
-                 : "\(page * 3 + 1)–\(min(page * 3 + 3, tabEntries.count)) / \(tabEntries.count) trận")
-                .font(MUFont.body(10))
-                .foregroundStyle(MUTokens.secondary)
-
-            Spacer(minLength: 8)
-
-            if pageCount > 1 && pageCount <= 10 {
-                HStack(spacing: 5) {
-                    ForEach(0..<pageCount, id: \.self) { index in
-                        RoundedRectangle(cornerRadius: 2.5)
-                            .fill(index == page ? MUTokens.gold : MUTokens.border)
-                            .frame(width: index == page ? 17 : 5, height: 5)
-                    }
-                }
-            }
-
-            Spacer(minLength: 8)
-
             Button {
                 if page < pageCount - 1 { page += 1 }
             } label: {
-                HStack(spacing: 4) {
-                    Text("Tiếp")
-                        .font(MUFont.body(10))
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 0) {
+                    Spacer(minLength: 8)
+                    if pageCount > 1 && pageCount <= 10 {
+                        HStack(spacing: 5) {
+                            ForEach(0..<pageCount, id: \.self) { index in
+                                RoundedRectangle(cornerRadius: 2.5)
+                                    .fill(index == page ? MUTokens.gold : MUTokens.border)
+                                    .frame(width: index == page ? 17 : 5, height: 5)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    HStack(spacing: 4) {
+                        Text("Tiếp")
+                            .font(MUFont.body(10))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(page < pageCount - 1
+                                     ? MUTokens.cream
+                                     : MUTokens.secondary.opacity(0.4))
                 }
-                .foregroundStyle(page < pageCount - 1
-                                 ? MUTokens.cream
-                                 : MUTokens.secondary.opacity(0.4))
-                .frame(height: 44)
+                .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(MUPressButtonStyle())

@@ -303,6 +303,16 @@ struct PlayerView: View {
                         onPlayEN: switchToEN,
                         playingChannelURL: current?.url,
                         playingENMetaID: currentENMetaID)
+                        // FIX-133 (audit F17): the board's
+                        // sheet carries the MU sheet language's
+                        // presentation furniture — the same
+                        // detents / drag indicator / 24 radius
+                        // the detail source sheet presents
+                        // with. MU branch only; the classic
+                        // board's presentation is untouched.
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                        .presentationCornerRadius(24)
                 } else {
                     MatchBoardView(
                         entry: liveHeaderEntry,
@@ -1295,13 +1305,22 @@ final class LivePlayerViewController: UIViewController {
             return
         }
         controlsVisible.toggle()
-        UIView.animate(withDuration: 0.25) { self.controlsView.alpha = self.controlsVisible ? 1 : 0 }
+        UIView.animate(withDuration: chromeFadeDuration) { self.controlsView.alpha = self.controlsVisible ? 1 : 0 }
         if controlsVisible { scheduleControlsHide() } else { hideTimer?.invalidate() }
+    }
+
+    /// FIX-133 (audit C5 + C14): the chrome fade is the
+    /// design's 200 ms at every fade site below — and with
+    /// Reduce Motion on there is no fade at all: the alpha
+    /// lands instantly, the same gate the SwiftUI press
+    /// scale already honours (Theme.swift MUPressButtonStyle).
+    private var chromeFadeDuration: TimeInterval {
+        UIAccessibility.isReduceMotionEnabled ? 0 : 0.2
     }
 
     func showControls() {
         controlsVisible = true
-        UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 1 }
+        UIView.animate(withDuration: chromeFadeDuration) { self.controlsView.alpha = 1 }
         scheduleControlsHide()
     }
 
@@ -1311,7 +1330,7 @@ final class LivePlayerViewController: UIViewController {
         hideTimer?.invalidate()
         if !controlsVisible {
             controlsVisible = true
-            UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 1 }
+            UIView.animate(withDuration: chromeFadeDuration) { self.controlsView.alpha = 1 }
         }
     }
 
@@ -1337,7 +1356,7 @@ final class LivePlayerViewController: UIViewController {
             // pause that landed after arming keeps the chrome.
             guard self.player?.timeControlStatus == .playing else { return }
             self.controlsVisible = false
-            UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 0 }
+            UIView.animate(withDuration: chromeFadeDuration) { self.controlsView.alpha = 0 }
         }
     }
 
