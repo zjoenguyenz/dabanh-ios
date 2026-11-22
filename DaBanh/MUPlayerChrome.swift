@@ -153,11 +153,14 @@ extension LivePlayerViewController {
         // and radius are set in layoutMUChrome). FIX-MU-5
         // (#128): the transport glyph sizes are the spec's —
         // play 28, rewind 22, volume 23 — applied as the
-        // buttons' preferred symbol configuration, so the
-        // size survives the shared code's play/pause image
-        // swaps (a plain setImage would reset it).
+        // preferred symbol configuration of the buttons'
+        // IMAGE VIEWS, so the size survives the shared
+        // code's play/pause image swaps (a plain setImage
+        // would reset a configuration baked into the image).
+        // FIX-MU-6: the configuration lives on the image
+        // view — UIButton has no such member (run #84).
         playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
-        playPauseButton.preferredSymbolConfiguration =
+        playPauseButton.imageView?.preferredSymbolConfiguration =
             UIImage.SymbolConfiguration(pointSize: 28)
         playPauseButton.tintColor = MUUIColor.bg
         playPauseButton.backgroundColor = MUUIColor.cream
@@ -237,11 +240,13 @@ extension LivePlayerViewController {
         mu.volumeButton.addTarget(self, action: #selector(muVolumeTapped), for: .touchUpInside)
         // FIX-MU-5 (#128): the spec's transport glyph sizes
         // (rewind 22, volume 23) as preferred symbol
-        // configurations — they survive the shared code's
-        // mute/volume image swaps.
-        mu.rewindButton.preferredSymbolConfiguration =
+        // configurations on the buttons' image views
+        // (FIX-MU-6 — UIButton itself has no such member;
+        // the image view's configuration survives the
+        // shared code's mute/volume image swaps).
+        mu.rewindButton.imageView?.preferredSymbolConfiguration =
             UIImage.SymbolConfiguration(pointSize: 22)
-        mu.volumeButton.preferredSymbolConfiguration =
+        mu.volumeButton.imageView?.preferredSymbolConfiguration =
             UIImage.SymbolConfiguration(pointSize: 23)
 
         // Lower block: LIVE pill + league eyebrow, title,
