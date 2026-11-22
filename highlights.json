@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T23:12:54Z",
+  "generatedAt": "2026-11-22T23:22:08Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -10,40 +10,7 @@
       "scoreAway": 3,
       "matchDate": "2026-11-22T20:00:00Z",
       "espnEventId": "401882803",
-      "sources": [
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/8802b1c0-130a-4d86-bcd1-b121dce5f5f2/8802b1c0-130a-4d86-bcd1-b121dce5f5f2.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 70,
-          "addedAt": "2026-11-22T22:09:15Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/07333bb7-cc7c-407a-8de9-28171ed882f8/07333bb7-cc7c-407a-8de9-28171ed882f8.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 59,
-          "addedAt": "2026-11-22T22:09:15Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/bebda115-1c25-4480-9fa7-3ad1d8eeecae/bebda115-1c25-4480-9fa7-3ad1d8eeecae.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 24,
-          "addedAt": "2026-11-22T22:09:15Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/34b0ea68-711d-4ca9-96b5-878b0daa852b/34b0ea68-711d-4ca9-96b5-878b0daa852b.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 52,
-          "addedAt": "2026-11-22T22:09:15Z"
-        }
-      ]
+      "sources": []
     },
     {
       "competition": "la-liga",
@@ -61,22 +28,6 @@
           "official": true,
           "durationSec": 66,
           "addedAt": "2026-11-22T20:22:50Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/1732ef8d-6762-4d55-b8d9-f00ca95c7d84/1732ef8d-6762-4d55-b8d9-f00ca95c7d84.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 53,
-          "addedAt": "2026-11-22T20:22:50Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/06614a4e-6d22-4644-a3ee-048e57f50492/06614a4e-6d22-4644-a3ee-048e57f50492.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 27,
-          "addedAt": "2026-11-22T20:22:50Z"
         }
       ]
     },
@@ -89,14 +40,6 @@
       "matchDate": "2026-11-22T16:30:00Z",
       "espnEventId": "401878755",
       "sources": [
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1122/dm_261122_COM_SOC_Analysis_Nicol_Man_United_are_an_absolute_shambles_defensively_20261122_GLOBAL/dm_261122_COM_SOC_Analysis_Nicol_Man_United_are_an_absolute_shambles_defensively_20261122_GLOBAL.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 105,
-          "addedAt": "2026-11-22T20:22:00Z"
-        },
         {
           "kind": "youtube",
           "ref": "WyJJGWj09To",
@@ -130,38 +73,6 @@
           "label": "ESPN",
           "official": true,
           "durationSec": 71,
-          "addedAt": "2026-11-22T20:22:47Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/e5ad7fb8-7878-4e3d-8558-e90dc2b8f6d0/e5ad7fb8-7878-4e3d-8558-e90dc2b8f6d0.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 56,
-          "addedAt": "2026-11-22T20:22:47Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/68ce8e62-a2b2-433e-916e-0b2b60145807/68ce8e62-a2b2-433e-916e-0b2b60145807.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 59,
-          "addedAt": "2026-11-22T20:22:47Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/178df9df-9887-470a-8e1b-b0012a51cf81/178df9df-9887-470a-8e1b-b0012a51cf81.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 33,
-          "addedAt": "2026-11-22T20:22:47Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/79753708-41c1-49c3-bd44-5621365b0123/79753708-41c1-49c3-bd44-5621365b0123.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 48,
           "addedAt": "2026-11-22T20:22:47Z"
         }
       ]
@@ -203,70 +114,6 @@
       "espnEventId": "401882804",
       "sources": [
         {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/1678d5af-4b20-4eac-a806-f3835d24fb30/1678d5af-4b20-4eac-a806-f3835d24fb30.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 56,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/dc893386-312c-4285-b17c-095d6eef4418/dc893386-312c-4285-b17c-095d6eef4418.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 50,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/c9629ca0-cb27-4ea3-b1e0-963b01731b59/c9629ca0-cb27-4ea3-b1e0-963b01731b59.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 47,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/bcc4660a-ad5f-4256-ad76-1e8b870b489d/bcc4660a-ad5f-4256-ad76-1e8b870b489d.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 34,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/b8fe4e11-cb5d-4476-84f6-ff94638ee654/b8fe4e11-cb5d-4476-84f6-ff94638ee654.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 58,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/61c70901-6151-44d7-8ffe-e05038a87356/61c70901-6151-44d7-8ffe-e05038a87356.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 28,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/082cb369-a029-4416-9edb-fd3885d50070/082cb369-a029-4416-9edb-fd3885d50070.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 23,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1122/dm_261122_COM_SOC_Analysis_Garcia_Barcelonas_comeback_reflective_of_title_mentality_20261122_GLOBAL/dm_261122_COM_SOC_Analysis_Garcia_Barcelonas_comeback_reflective_of_title_mentality_20261122_GLOBAL.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 80,
-          "addedAt": "2026-11-22T20:22:43Z"
-        },
-        {
           "kind": "youtube",
           "ref": "Ngrd58fZSVA",
           "label": "LALIGA EA SPORTS",
@@ -284,48 +131,7 @@
       "scoreAway": 1,
       "matchDate": "2026-11-21T20:00:00Z",
       "espnEventId": "401882798",
-      "sources": [
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1121/dm_261121_Bellingham_Espi_rescue_Real_Madrid_after_Mbappes_missed_penalty/dm_261121_Bellingham_Espi_rescue_Real_Madrid_after_Mbappes_missed_penalty.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 115,
-          "addedAt": "2026-11-22T20:23:01Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/0e5d6cb3-39ac-483d-82b7-6dda08f3ba9a/0e5d6cb3-39ac-483d-82b7-6dda08f3ba9a.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 55,
-          "addedAt": "2026-11-22T20:23:01Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/520fc057-e94c-48b0-8de9-237dd4780be5/520fc057-e94c-48b0-8de9-237dd4780be5.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 29,
-          "addedAt": "2026-11-22T20:23:01Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/bd2d0da1-5c28-4c0e-8bfa-134dd59271c8/bd2d0da1-5c28-4c0e-8bfa-134dd59271c8.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 50,
-          "addedAt": "2026-11-22T20:23:01Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/cadd68b5-9324-4ad0-ba8f-84afea9f2e28/cadd68b5-9324-4ad0-ba8f-84afea9f2e28.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 72,
-          "addedAt": "2026-11-22T20:23:01Z"
-        }
-      ]
+      "sources": []
     },
     {
       "competition": "premier-league",
@@ -336,14 +142,6 @@
       "matchDate": "2026-11-21T17:30:00Z",
       "espnEventId": "401879232",
       "sources": [
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1121/dm_261121_COM_SOC_ANALYSIS_Does_Newcastle_draw_raise_first_doubts_over_Arsenals_title_defence_2026_11_21/dm_261121_COM_SOC_ANALYSIS_Does_Newcastle_draw_raise_first_doubts_over_Arsenals_title_defence_2026_11_21.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 95,
-          "addedAt": "2026-11-22T20:22:40Z"
-        },
         {
           "kind": "youtube",
           "ref": "I7ooFa4RCvQ",
@@ -370,14 +168,6 @@
           "official": true,
           "durationSec": 71,
           "addedAt": "2026-11-22T20:22:58Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/e2a6a74d-2bd0-4f7e-a88d-2df093bdeae3/e2a6a74d-2bd0-4f7e-a88d-2df093bdeae3.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 43,
-          "addedAt": "2026-11-22T20:22:58Z"
         }
       ]
     },
@@ -396,22 +186,6 @@
           "label": "ESPN",
           "official": true,
           "durationSec": 74,
-          "addedAt": "2026-11-22T20:22:55Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/9fdf0b49-2aae-4653-886b-4d8a614e026e/9fdf0b49-2aae-4653-886b-4d8a614e026e.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 30,
-          "addedAt": "2026-11-22T20:22:55Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/c6113601-5fcd-4cbf-9183-d657ea923c70/c6113601-5fcd-4cbf-9183-d657ea923c70.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 57,
           "addedAt": "2026-11-22T20:22:55Z"
         }
       ]
@@ -488,14 +262,6 @@
       "espnEventId": "401879236",
       "sources": [
         {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1121/dm_261121_Alonso_Chelsea_stopped_believing_after_Leeds_equaliser/dm_261121_Alonso_Chelsea_stopped_believing_after_Leeds_equaliser.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 38,
-          "addedAt": "2026-11-22T20:22:24Z"
-        },
-        {
           "kind": "youtube",
           "ref": "NCk_eUqcgEE",
           "label": "NBC Sports",
@@ -566,38 +332,6 @@
           "official": true,
           "durationSec": 68,
           "addedAt": "2026-11-22T20:22:53Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/70da46ed-b011-4630-9328-b2b03aa76b5b/70da46ed-b011-4630-9328-b2b03aa76b5b.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 54,
-          "addedAt": "2026-11-22T20:22:53Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/4f49aa5d-a29a-41f0-a2f6-10f46e0b05a4/4f49aa5d-a29a-41f0-a2f6-10f46e0b05a4.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 23,
-          "addedAt": "2026-11-22T20:22:53Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/04a6aa10-4166-4435-ba89-ba0bf20463c2/04a6aa10-4166-4435-ba89-ba0bf20463c2.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 67,
-          "addedAt": "2026-11-22T20:22:53Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/d436e08c-1b84-400d-99a9-6690039ec27c/d436e08c-1b84-400d-99a9-6690039ec27c.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 72,
-          "addedAt": "2026-11-22T20:22:53Z"
         }
       ]
     },
@@ -610,14 +344,6 @@
       "matchDate": "2026-11-21T12:30:00Z",
       "espnEventId": "401879233",
       "sources": [
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/2026/1121/dm_261121_Maresca_questions_Haalands_disallowed_goal_Not_a_foul/dm_261121_Maresca_questions_Haalands_disallowed_goal_Not_a_foul.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 51,
-          "addedAt": "2026-11-22T20:22:05Z"
-        },
         {
           "kind": "youtube",
           "ref": "DWlZvq3qtKU",
@@ -643,14 +369,6 @@
           "label": "ESPN",
           "official": true,
           "durationSec": 74,
-          "addedAt": "2026-11-22T20:23:03Z"
-        },
-        {
-          "kind": "espn-mp4",
-          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1120/32546b43-ec66-46e8-aac9-1e9f3a07b637/32546b43-ec66-46e8-aac9-1e9f3a07b637.mp4",
-          "label": "ESPN",
-          "official": true,
-          "durationSec": 65,
           "addedAt": "2026-11-22T20:23:03Z"
         }
       ]
