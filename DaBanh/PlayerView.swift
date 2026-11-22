@@ -8,8 +8,9 @@ import UIKit
 /// with the app's own control layer — embedded full-bleed, exactly
 /// like the JTV app's player. One chrome only: close, title,
 /// play/pause, AirPlay, PiP and the fit/fill toggle all live in one
-/// control layer that fades together after 3.5 s — but the fade
-/// only ever starts once playback is actually ready (DB-05):
+/// control layer that fades together after 3.0 s of playing
+/// (FIX-130 P-5, the web standard's delay, pause-aware) — but the
+/// fade only ever starts once playback is actually ready (DB-05):
 /// while a source is still loading, or the ladder is advancing
 /// to the next one, the chrome — the close button included —
 /// stays visible and tappable, so the viewer is never trapped
@@ -83,6 +84,15 @@ struct PlayerView: View {
     @EnvironmentObject private var store: PlaylistStore
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
+    /// FIX-130 (P-2): the rungs this page has already sat on.
+    /// advance() walks the session's race order (see
+    /// MatchPlaySession.advanceOrder) and must never hand the
+    /// player a rung it already left — with a race order the
+    /// walk is no longer monotonic in index, so the tried set
+    /// is tracked explicitly instead of being implied by the
+    /// index. Published rungs are append-only, so an index
+    /// keeps naming the same rung for the page's whole life.
+    @State private var triedRungs: Set<Int> = []
     @State private var switching = true
     /// The Đổi nguồn overlay (the fixture's link board in its
     /// in-player mode) is up over the playing surface.
@@ -230,6 +240,14 @@ struct PlayerView: View {
             DiagLog.log("player",
                         "open: '\(headerEntry.map { MatchTitle.clean($0.channel.title) } ?? current.map { MatchTitle.clean($0.title) } ?? session.key)' "
                         + "starting at source #\(index) (resolving=\(session.isResolving))")
+            // FIX-130: the presentation anchor — how much
+            // ladder the session already held at the moment
+            // this page appeared, so a future log can split
+            // tap→first-frame into presentation / head-choice /
+            // per-rung load legs (the 1.26-era 29 s gap shape
+            // becomes visible again if it ever returns).
+            DiagLog.log("player",
+                        "player presented: session has \(sources.count) source(s), starting #\(index)")
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
         }
         .task {
@@ -335,12 +353,12 @@ struct PlayerView: View {
     }
 
     private func advance() {
-        // Unconditional: index may move one past the last published
-        // source. Each surface fires onFail once per .id(index), so
-        // this cannot run away — with current == nil the body
-        // re-renders into the waiting branch while the session is
-        // still resolving, or the settledExhausted slate once it
-        // settles.
+        // Unconditional: the walk may land one past the last
+        // published source. Each surface fires onFail once per
+        // .id(index), so this cannot run away — with current
+        // == nil the body re-renders into the waiting branch
+        // while the session is still resolving, or the
+        // settledExhausted slate once it settles.
         if let channel = current {
             DiagLog.log("player",
                         "advance: leaving source #\(index) \(diagSourceTag(channel))")
@@ -348,7 +366,19 @@ struct PlayerView: View {
             DiagLog.log("player",
                         "advance: past the published ladder at #\(index)")
         }
-        index += 1
+        // FIX-130 (P-2): the next rung is the first UNTRIED
+        // rung in the session's failover order — the latency
+        // race's order once it has settled, plain ladder order
+        // before that (and for sessions that never race). The
+        // picked head always started first (D-2); the race
+        // orders only what is tried second, third, … When
+        // every published rung has been tried, the walk lands
+        // past the end, exactly where the old index+1 walk
+        // ended: the waiting branch, or the slate once the
+        // session settles.
+        triedRungs.insert(index)
+        let order = session.advanceOrder(in: sources)
+        index = order.first(where: { !triedRungs.contains($0) }) ?? sources.count
         // DB-07: a source pre-warming proved dead while an
         // earlier rung played is skipped in place — the ladder
         // steps over it instantly instead of spending a player
@@ -358,7 +388,8 @@ struct PlayerView: View {
         while let ch = current, session.isWarmedDead(ch.url) {
             DiagLog.log("player",
                         "advance: skipping pre-warm-dead source #\(index) \(diagSourceTag(ch))")
-            index += 1
+            triedRungs.insert(index)
+            index = order.first(where: { !triedRungs.contains($0) }) ?? sources.count
         }
         switching = true
     }
@@ -493,11 +524,28 @@ final class LivePlayerViewController: UIViewController {
     private var pipController: AVPictureInPictureController?
     private var statusToken: NSKeyValueObservation?
     private var timeControlToken: NSKeyValueObservation?
+    /// FIX-130 (P-3): the loadedTimeRanges observation feeding
+    /// the stall watchdog's progress clock.
+    private var progressToken: NSKeyValueObservation?
     private var failToken: NSObjectProtocol?
     private var firedFail = false
     private var firedReady = false
     private var firedPlaying = false
     private var hideTimer: Timer?
+    /// FIX-130 (P-3): the stall watchdog (DB-11). AVPlayer has
+    /// no stall event: a source that connects but never
+    /// delivers playable data — and never flips its item to
+    /// .failed — held this surface forever, at tap time and
+    /// mid-ladder alike. The watchdog is a plain timer armed
+    /// while timeControlStatus is .waitingToPlayAtSpecifiedRate
+    /// and disarmed on .playing / .paused / teardown; ANY
+    /// playback progress (loadedTimeRanges advancing, or the
+    /// status reaching .playing) resets its clock (leader
+    /// decision D-1). Thresholds: 6 s before the first frame,
+    /// 10 s mid-play — mid-play live stalls self-heal more
+    /// often, so they earn the longer leash.
+    private var stallTimer: Timer?
+    private var lastLoadedRangeEnd: TimeInterval = -1
     private var controlsVisible = true
     private var torn = false
 
@@ -533,6 +581,12 @@ final class LivePlayerViewController: UIViewController {
         observe(item: item, player: player)
         setupRemoteCommands(channel: channel)
         player.play()
+        // FIX-130 (P-3): arm the stall watchdog for the
+        // pre-frame wait right away — the status KVO below
+        // re-arms it on every entry into .waiting, but a load
+        // that never leaves the initial waiting state must be
+        // covered from the first second.
+        armStallWatchdog()
         // DB-05: NO hide timer here. The chrome starts visible and
         // stays visible until the item is ready to play — the
         // fade clock starts in the ready handler below, and
@@ -554,26 +608,33 @@ final class LivePlayerViewController: UIViewController {
         controlsView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(controlsView)
 
-        func roundButton(_ button: UIButton, _ systemName: String, _ action: Selector) {
+        func roundButton(_ button: UIButton, _ systemName: String, _ action: Selector,
+                         size: CGFloat = 40) {
             button.setImage(UIImage(systemName: systemName), for: .normal)
             button.tintColor = .white
             button.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-            button.layer.cornerRadius = 20
+            button.layer.cornerRadius = size / 2
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 40).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
+            button.widthAnchor.constraint(equalToConstant: size).isActive = true
+            button.heightAnchor.constraint(equalToConstant: size).isActive = true
             button.addTarget(self, action: action, for: .touchUpInside)
         }
 
-        roundButton(closeButton, "xmark", #selector(closeTapped))
+        // FIX-130 (P-5, leader decision D-3): the close button
+        // adopts the web standard exactly — TOP-RIGHT, 52 pt,
+        // safe-area respected (its constraints below anchor to
+        // safeAreaLayoutGuide). It was 40 pt at top-left.
+        roundButton(closeButton, "xmark", #selector(closeTapped), size: 52)
         controlsView.addSubview(closeButton)
 
-        // The Đổi nguồn button (1.22): top-right — the one zone
-        // the control map leaves free — in the close button's
+        // The Đổi nguồn button (1.22): in the close button's
         // exact chrome, inside controlsView so it inherits the
-        // 3.5 s fade and the tap-to-show behaviour. Only a
+        // 3 s fade and the tap-to-show behaviour. Only a
         // fixture playback has a board to switch among; the
-        // surface is told via showsSourceSwitch.
+        // surface is told via showsSourceSwitch. FIX-130 (P-5):
+        // it now sits immediately LEFT of the close button —
+        // the top-right corner belongs to close per the web
+        // standard.
         if showsSourceSwitch {
             roundButton(sourceSwitchButton, "arrow.triangle.2.circlepath", #selector(sourceSwitchTapped))
             sourceSwitchButton.accessibilityLabel = "Đổi nguồn"
@@ -627,9 +688,14 @@ final class LivePlayerViewController: UIViewController {
         controlsView.addSubview(bottomRow)
 
         NSLayoutConstraint.activate([
-            closeButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            // FIX-130 (P-5, D-3): close at top-RIGHT against
+            // the safe area (the web standard's placement);
+            // the title now runs from the safe area's leading
+            // edge and truncates before the close button (or
+            // the switch button beside it — see below).
+            closeButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            titleLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
             titleLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             playPauseButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             playPauseButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
@@ -638,15 +704,18 @@ final class LivePlayerViewController: UIViewController {
             bottomRow.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
         ])
         if showsSourceSwitch {
-            // The title truncates before the switch button,
-            // never under it.
+            // The switch button rides immediately left of the
+            // close button, and the title truncates before IT,
+            // never under either button.
             NSLayoutConstraint.activate([
-                sourceSwitchButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-                sourceSwitchButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+                sourceSwitchButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -10),
+                sourceSwitchButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
                 titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: sourceSwitchButton.leadingAnchor, constant: -12),
             ])
         } else {
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16).isActive = true
+            NSLayoutConstraint.activate([
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -12),
+            ])
         }
 
         spinner.color = .white
@@ -690,8 +759,11 @@ final class LivePlayerViewController: UIViewController {
                                         "source #\(sourceIndex) ready: \(diagSourceTag(channel))")
                         }
                         self.onReady?()
-                        // DB-05: the 3.5 s fade clock starts HERE —
-                        // only once playback is real.
+                        // DB-05: the fade clock starts only once
+                        // playback is real — scheduleControlsHide
+                        // arms it here, and FIX-130 (P-5) completes
+                        // the arming at the .playing transition if
+                        // the status has not flipped yet.
                         self.scheduleControlsHide()
                     }
                 case .failed:
@@ -711,6 +783,23 @@ final class LivePlayerViewController: UIViewController {
         timeControlToken = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             DispatchQueue.main.async { self?.refreshPlaybackUI(player) }
         }
+        // FIX-130 (P-3): loadedTimeRanges advancing IS
+        // playback progress — the watchdog's clock resets on
+        // it (D-1), so a slow-but-alive live edge is never
+        // advanced past while its buffer keeps growing.
+        progressToken = item.observe(\.loadedTimeRanges, options: [.new]) { [weak self] item, _ in
+            let ranges = item.loadedTimeRanges
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let end = ranges.map { $0.timeRangeValue.end.seconds }
+                    .filter { $0.isFinite }
+                    .max() ?? -1
+                if end > self.lastLoadedRangeEnd + 0.25 {
+                    self.lastLoadedRangeEnd = end
+                    self.notePlaybackProgress()
+                }
+            }
+        }
     }
 
     private func fireFailOnce() {
@@ -726,6 +815,7 @@ final class LivePlayerViewController: UIViewController {
     /// firedFail guard keeps it to a single line.
     private func noteFailure(_ error: Error?) {
         guard !firedFail else { return }
+        disarmStallWatchdog()
         if let channel {
             DiagLog.log("player",
                         "source #\(sourceIndex) failed: \(diagSourceTag(channel))"
@@ -799,10 +889,60 @@ final class LivePlayerViewController: UIViewController {
         return nil
     }
 
+    // MARK: - Stall watchdog (FIX-130 P-3 — DB-11)
+
+    /// Arm (or re-arm) the watchdog with the threshold for
+    /// this surface's phase: 6 s before the first frame has
+    /// ever played, 10 s once playback has flowed (D-1).
+    private func armStallWatchdog() {
+        stallTimer?.invalidate()
+        let threshold: TimeInterval = firedPlaying ? 10 : 6
+        stallTimer = Timer.scheduledTimer(withTimeInterval: threshold, repeats: false) { [weak self] _ in
+            self?.stallWatchdogFired(threshold: threshold)
+        }
+    }
+
+    private func disarmStallWatchdog() {
+        stallTimer?.invalidate()
+        stallTimer = nil
+    }
+
+    /// Playback progress (D-1): while the player is waiting,
+    /// progress restarts the watchdog's clock from zero. While
+    /// it is playing the watchdog is disarmed anyway, so
+    /// progress there needs no bookkeeping.
+    private func notePlaybackProgress() {
+        guard player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        else { return }
+        armStallWatchdog()
+    }
+
+    /// The watchdog expired: no playback progress inside the
+    /// threshold. Log the stall, run the same definitive-
+    /// classification attempt an explicit failure gets (a
+    /// stall whose access log carries a 403/404 still teaches
+    /// markPlayerDead), then fire the EXISTING fail path — so
+    /// advance, skip and slate logic are reused untouched.
+    private func stallWatchdogFired(threshold: TimeInterval) {
+        guard !firedFail, !torn else { return }
+        if let channel {
+            DiagLog.log("player",
+                        "stall: source #\(sourceIndex) \(diagSourceTag(channel)) "
+                        + "— no playback progress in \(Int(threshold))s, advancing")
+        }
+        if let reason = definitiveFailureReason(for: playerItem?.error) {
+            onDefinitiveFail?(reason)
+        }
+        fireFailOnce()
+    }
+
     private func refreshPlaybackUI(_ player: AVPlayer) {
         switch player.timeControlStatus {
         case .playing:
             spinner.stopAnimating()
+            // FIX-130 (P-3): reaching .playing IS progress —
+            // the watchdog's clock is moot while frames flow.
+            disarmStallWatchdog()
             playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
             if !firedPlaying {
                 firedPlaying = true
@@ -818,12 +958,24 @@ final class LivePlayerViewController: UIViewController {
             scheduleControlsHide()
         case .waitingToPlayAtSpecifiedRate:
             spinner.startAnimating()
+            // FIX-130 (P-3): entering a wait (re)arms the
+            // stall watchdog — pre-frame at 6 s, mid-play at
+            // 10 s (armStallWatchdog picks by firedPlaying).
+            armStallWatchdog()
             // DB-05: while the spinner runs — first load or a
             // mid-stream stall — the chrome stays up, close
             // button included; any pending fade is cancelled.
             keepControlsVisible()
         case .paused:
             spinner.stopAnimating()
+            // FIX-130 (P-3): a paused player is not stalling —
+            // the viewer chose the stillness.
+            disarmStallWatchdog()
+            // FIX-130 (P-5): pause forces the chrome visible
+            // and kills any pending fade (the web's rule) — a
+            // paused viewer keeps the controls, close included,
+            // for as long as the pause lasts.
+            keepControlsVisible()
             playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
         @unknown default:
             break
@@ -921,8 +1073,20 @@ final class LivePlayerViewController: UIViewController {
         // the close button must stay. Every caller (show, toggle,
         // stall recovery) funnels through this one guard.
         guard firedReady else { return }
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+        // FIX-130 (P-5): pause-aware arming, mirroring the web
+        // player's uiArmHide — the fade clock runs ONLY while
+        // playback is actually flowing. Arming while paused
+        // (e.g. showControls from a button tap on a paused
+        // player) is a no-op; the .playing transition re-arms
+        // through refreshPlaybackUI.
+        guard player?.timeControlStatus == .playing else { return }
+        // FIX-130 (P-5): 3.0 s, the web standard's hide delay
+        // (was 3.5 s).
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
             guard let self else { return }
+            // The web checks paused again at fire time; a
+            // pause that landed after arming keeps the chrome.
+            guard self.player?.timeControlStatus == .playing else { return }
             self.controlsVisible = false
             UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 0 }
         }
@@ -950,6 +1114,7 @@ final class LivePlayerViewController: UIViewController {
         guard !torn else { return }
         torn = true
         hideTimer?.invalidate()
+        disarmStallWatchdog()
         if pipController?.isPictureInPictureActive == true {
             pipController?.stopPictureInPicture()
         }
@@ -959,6 +1124,8 @@ final class LivePlayerViewController: UIViewController {
         statusToken = nil
         timeControlToken?.invalidate()
         timeControlToken = nil
+        progressToken?.invalidate()
+        progressToken = nil
         if let failToken {
             NotificationCenter.default.removeObserver(failToken)
             self.failToken = nil
@@ -1229,6 +1396,44 @@ private enum SourcePreflight {
     }
 }
 
+/// FIX-130 (P-2): one rung of the latency race — the web
+/// board's probeOrder ported to a platform that can read the
+/// answer. ONE bounded fetch of the playlist URL in
+/// pre-flight's request shape (the channel's declared headers,
+/// the registry's proxy headers), NO retries, NO Referer
+/// repair, NO body classification: the only question is how
+/// fast the host answers. Any HTTP response counts as an
+/// answer (even a 403 — the web's opaque no-cors probe counts
+/// it too, and ordering is all this lane produces; conviction
+/// stays pre-flight's job). Returns the response time in
+/// milliseconds, or nil when nothing answered inside the
+/// 3 s cap (the request's own timeout enforces it).
+/// Nonisolated, like SourcePreflight: it touches no actor
+/// state.
+private enum SourceRaceProbe {
+
+    static func probe(_ ch: Channel, session: URLSession) async -> Int? {
+        guard let url = ch.streamURL else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        for (field, value) in NuvioStreamHeaders.requestHeaders(for: ch, referrer: ch.referrer) {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        let started = Date()
+        do {
+            // bytes(for:) returns once the response headers are
+            // in — that arrival IS the measurement; the body is
+            // never read, and releasing the sequence cancels
+            // the transfer.
+            let (_, response) = try await session.bytes(for: request)
+            guard response is HTTPURLResponse else { return nil }
+            return Int(Date().timeIntervalSince(started) * 1000)
+        } catch {
+            return nil
+        }
+    }
+}
+
 /// One match's source-resolution session: verifies the store's
 /// ladder in parallel and publishes the playable order
 /// progressively — the client port of the Nuvio addon's progressive
@@ -1260,6 +1465,12 @@ final class MatchPlaySession: ObservableObject {
     /// the hub hands a tap its session before the cover reads
     /// sources, and the head must be publishable from the
     /// ladder itself, not from anything verification produced.
+    /// Publish-only state: run() verifies the ladder IT was
+    /// handed at begin() and never reads this snapshot. A tap
+    /// adopting this session in flight re-bases the snapshot
+    /// to its own (rotated) ladder — see rebaseSnapshot(to:) —
+    /// so the instant head is the tap's pick, not the head of
+    /// whoever started the session (REVIEW-130-LOOP2 B-1).
     private var ladderSnapshot: [Channel] = []
     /// DB-07: a tap published the head unverified (see
     /// publishHeadNow) — run()'s publications append behind
@@ -1287,6 +1498,16 @@ final class MatchPlaySession: ObservableObject {
     /// the cache entry's dead set, so the condemnation outlives
     /// the session through ResolveHub.provenDead.
     private var playerDeadURLs: Set<String> = []
+    /// FIX-130 (P-2): the latency race's result — the ladder's
+    /// URLs ordered fastest-responder first (non-responders
+    /// last, in ladder order), set once when the race settles.
+    /// It annotates ONLY the order PlayerView.advance() walks
+    /// (see advanceOrder(in:)): the picked head always starts
+    /// (leader decision D-2, the conservative form), and
+    /// run()'s publications are never re-ordered by it — the
+    /// published prefix never moves (R-2).
+    private var raceOrderURLs: [String]?
+    private var raceTask: Task<Void, Never>?
 
     nonisolated private static let quorum = 3
     nonisolated private static let softDeadline: TimeInterval = 6
@@ -1388,6 +1609,7 @@ final class MatchPlaySession: ObservableObject {
     /// published; a cancelled session never writes the cache.
     func cancel() {
         resolveTask?.cancel()
+        raceTask?.cancel()
     }
 
     /// Whether this session's resolve task has been cancelled.
@@ -1397,6 +1619,28 @@ final class MatchPlaySession: ObservableObject {
     /// forgets it itself.
     var isCancelled: Bool {
         resolveTask?.isCancelled ?? false
+    }
+
+    /// FIX-130B (REVIEW-130-LOOP2 B-1): re-base the snapshot
+    /// to a TAP's ladder when the hub hands this in-flight
+    /// session to that tap. FIX-130 (P-8) made the hub key
+    /// order-insensitive, so a rotated tap ladder now ADOPTS
+    /// the preresolve session instead of starting its own —
+    /// and the snapshot still held the preresolve (unrotated)
+    /// ladder, so publishHeadNow published the cluster's
+    /// first channel instead of the viewer's pick. The
+    /// snapshot is publishHeadNow-only state: run() captured
+    /// its own ladder at begin() and never reads it, so
+    /// re-basing moves no verification and no publication —
+    /// it only decides WHICH rung the instant head takes, and
+    /// the substitute / last-resort branches read the same
+    /// snapshot, so they inherit the tap's order too. The hub
+    /// calls this on the main actor immediately before
+    /// publishHeadNow(), with no suspension point in between,
+    /// so the pair is atomic against any other main-actor
+    /// work.
+    func rebaseSnapshot(to ladder: [Channel]) {
+        ladderSnapshot = ladder
     }
 
     /// DB-07 (plan D): publish the ladder's head the moment a
@@ -1422,10 +1666,11 @@ final class MatchPlaySession: ObservableObject {
     /// stays on the board, marked by the verdicts there; the
     /// session's own verification still re-checks every rung
     /// behind, so a revived source returns through run()'s
-    /// publications). When EVERY rung is known dead nothing
-    /// publishes here — the session settles on its own
-    /// evidence and the player shows its slate, instead of
-    /// replaying a death the app already knows.
+    /// publications). FIX-130 (P-4): when EVERY rung is known
+    /// dead, the pick still publishes — as the last-resort
+    /// rung, with its own log line (see the branch below):
+    /// a verdict is a demotion with a 30 s memory, never a
+    /// veto at play time.
     ///
     /// FIX-128B: the head publish also refuses once run()
     /// has made its final publication (didPublishFinal): a
@@ -1435,11 +1680,40 @@ final class MatchPlaySession: ObservableObject {
     /// noteResolved as if it were the run's own result —
     /// the same F-1 window adoptSeed is gated against.
     func publishHeadNow() {
-        guard isResolving, !didPublishFinal, sources.isEmpty,
+        guard isResolving, sources.isEmpty,
               let head = ladderSnapshot.first else { return }
+        // FIX-130 (P-4): the didPublishFinal refusal gets a
+        // voice. Together with the last-resort line below,
+        // EVERY publishHeadNow outcome now logs — the silent
+        // refusal (the 1.29 log's black waiting screen → slate,
+        // twice in one run, with nothing in the log to say why)
+        // is closed. The F-1 invariant itself is unchanged:
+        // after the final publish, nothing is injected (R-1).
+        guard !didPublishFinal else {
+            DiagLog.log("player",
+                        "instant head: refused — session already settled (final publish landed)")
+            return
+        }
         if isKnownDead(head) {
             guard let substitute = ladderSnapshot.first(where: { !isKnownDead($0) })
-            else { return }
+            else {
+                // FIX-130 (P-4): the all-dead branch stops
+                // being a silent veto. Web doctrine: a
+                // known-dead verdict is a DEMOTION, never an
+                // exclusion at play time — the pick publishes
+                // anyway as the last-resort rung (verdicts
+                // carry a 30 s TTL now, so "known dead" may
+                // already be stale), and verification keeps
+                // running behind it exactly as for any instant
+                // head. This is the branch that today returns
+                // BEFORE any publish, and didPublishFinal was
+                // refused above — the F-1 seam is preserved.
+                headPublished = true
+                sources = [head]
+                DiagLog.log("player",
+                            "instant head: all rungs previously convicted — starting at the pick as last resort")
+                return
+            }
             headPublished = true
             sources = [substitute]
             DiagLog.log("player",
@@ -1495,6 +1769,87 @@ final class MatchPlaySession: ObservableObject {
         SourcePrewarmStore.shared.isDead(url)
     }
 
+    /// FIX-130 (P-2): the order PlayerView.advance() should
+    /// walk `ladder` (the session's CURRENT published ladder)
+    /// in: the race order first — fastest responder first —
+    /// then any rung the race never ordered (a URL published
+    /// after the race settled, or every rung when no race has
+    /// completed), in ladder order. With no race result this
+    /// is plain ladder order, exactly the pre-1.30 walk. The
+    /// race annotates this order and nothing else: it never
+    /// re-orders, replaces or delays a publication (R-2).
+    func advanceOrder(in ladder: [Channel]) -> [Int] {
+        guard let raceOrderURLs else { return Array(ladder.indices) }
+        var order: [Int] = []
+        var used = Set<Int>()
+        for url in raceOrderURLs {
+            if let i = ladder.firstIndex(where: { $0.url == url }),
+               used.insert(i).inserted {
+                order.append(i)
+            }
+        }
+        for i in ladder.indices where !used.contains(i) {
+            order.append(i)
+        }
+        return order
+    }
+
+    /// FIX-130 (P-2): the latency race itself — every rung of
+    /// the ladder probed in parallel (SourceRaceProbe: one
+    /// light fetch each, 3 s cap), the results kept as this
+    /// session's failover order. Runs as a sibling task of
+    /// run()'s verification: it never gates, delays or alters
+    /// a publication, and it settles on its own even when
+    /// verification finished long before. One DiagLog line at
+    /// settle makes the order — and each rung's measured
+    /// latency — attributable per session.
+    private func runRace(ladder: [Channel]) async {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        var results: [Int: Int] = [:]
+        var answered = Set<Int>()
+        await withTaskGroup(of: (Int, Int?).self) { group in
+            for (i, ch) in ladder.enumerated() {
+                group.addTask {
+                    (i, await SourceRaceProbe.probe(ch, session: session))
+                }
+            }
+            for await (i, ms) in group {
+                if let ms {
+                    results[i] = ms
+                    answered.insert(i)
+                }
+            }
+        }
+        if Task.isCancelled { return }
+
+        let ordered = ladder.indices.sorted { a, b in
+            switch (results[a], results[b]) {
+            case let (x?, y?):
+                if x != y { return x < y }
+                return a < b
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return a < b
+            }
+        }
+        raceOrderURLs = ordered.map { ladder[$0].url }
+        let parts = ordered.map { i -> String in
+            let host = ladder[i].streamURL?.host
+                ?? URL(string: ladder[i].url)?.host ?? "?"
+            return answered.contains(i)
+                ? "\(host) \(results[i] ?? 0)ms"
+                : "\(host) —"
+        }
+        DiagLog.log("player",
+                    "probe: race order for "
+                    + "'\(ladder.first.map { MatchTitle.clean($0.title) } ?? "?")' "
+                    + "— \(parts.joined(separator: ", "))")
+    }
+
     /// FIX-129 (Item C): the player failed this source with a
     /// DEFINITIVE error (TLS/certificate invalid, HTTP 403/404
     /// — classified in LivePlayerViewController). Until now a
@@ -1503,10 +1858,11 @@ final class MatchPlaySession: ObservableObject {
     /// certificate at 21:35:20Z and the resolve's first batch
     /// one second later merged the SAME URL back in place, and
     /// a second pick re-tried the same host for seconds. The
-    /// mark lands in three places: this session's exclusion set
-    /// (run()'s merge honours it — see publish(final:)), the
-    /// hub's provenDead (so publishHeadNow filters the URL for
-    /// every later tap this run, and this session's settle
+    /// mark lands in three places: this session's exclusion
+    /// set (run()'s merge honours it — see publish(final:)),
+    /// the hub's provenDead (so publishHeadNow filters the
+    /// URL for later taps while the verdict is inside its
+    /// 30 s TTL — FIX-130 P-4 — and this session's settle
     /// writes it into the cache entry's dead set), and one
     /// DiagLog line per URL.
     func markPlayerDead(_ ch: Channel, reason: String) {
@@ -1523,6 +1879,18 @@ final class MatchPlaySession: ObservableObject {
         config.timeoutIntervalForRequest = 6
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
+
+        // FIX-130 (P-2): the latency race starts beside the
+        // verification — a sibling task, never awaited here,
+        // so publication timing is exactly what it was. A
+        // one-rung ladder has nothing to order and is not
+        // raced. (Born-complete cached sessions never run():
+        // their ladder is already resolved, no race needed.)
+        if total > 1 {
+            raceTask = Task { [weak self] in
+                await self?.runRace(ladder: ladder)
+            }
+        }
 
         var verified: [(Int, Channel, ParsedQuality?)] = []
         var kept: [(Int, Channel)] = []
@@ -1695,32 +2063,61 @@ final class MatchPlaySession: ObservableObject {
 /// is not a playlist / is a takedown slate); anything
 /// transient — 5xx, 401/403 (the Referer-repair question is
 /// pre-flight's, already settled for published sources),
-/// network errors — leaves the source merely unwarmed, never
-/// marked. The variant and segment fetches below the top
-/// playlist run for their warming value only and never
-/// judge: a source can lose its top variant, or its oldest
-/// segment to the sliding live window, while it still plays.
+/// network errors — never convicts. The variant and segment
+/// fetches below the top playlist run for their warming value
+/// only and never judge: a source can lose its top variant, or
+/// its oldest segment to the sliding live window, while it
+/// still plays.
 /// Nonisolated, like SourcePreflight: it touches no actor
 /// state.
 private enum SourcePrewarmer {
 
-    /// True only on definitive death.
-    static func warm(_ ch: Channel, session: URLSession) async -> Bool {
-        guard let url = ch.streamURL else { return true }
-        guard let head = await fetch(ch, url: url, limit: 16_384, session: session)
-        else { return false }
+    /// FIX-130 (P-1): the three honest warm outcomes. Until
+    /// now warm() answered a Bool — "not dead" — and the store
+    /// recorded every non-death as WARM and logged it "ready":
+    /// in the 1.29 device log two of the three launch-warm
+    /// "ready" verdicts were for v1.livestreambong.tv, the
+    /// host whose certificate the player then died on. A
+    /// network-level failure (TLS included) proves nothing
+    /// about the source either way, so it is now its own
+    /// outcome: the store records the source as merely COLD
+    /// (never warm, never dead) and a later warm() may retry
+    /// it. Only a playlist actually read earns `.verified`;
+    /// `.dead` keeps exactly the definitive standard above,
+    /// so `SourcePrewarmStore.isDead` semantics — and its
+    /// consumers in advance() and isKnownDead — are untouched.
+    enum Outcome: Sendable {
+        case verified
+        case unreachable(String)
+        case dead
+    }
+
+    static func warm(_ ch: Channel, session: URLSession) async -> Outcome {
+        guard let url = ch.streamURL else { return .dead }
+        let head: (status: Int, body: Data)
+        switch await fetch(ch, url: url, limit: 16_384, session: session) {
+        case .networkError(let errorClass):
+            return .unreachable(errorClass)
+        case .response(let status, let body):
+            head = (status, body)
+        }
         switch head.status {
-        case 404, 410: return true
+        case 404, 410: return .dead
         case 200: break
-        default: return false
+        default:
+            // An HTTP answer that is neither a playlist nor a
+            // definitive death (401/403/5xx): the playlist was
+            // NOT read, so this is not a verification — the
+            // source stays cold, exactly like a network error.
+            return .unreachable("HTTP \(head.status)")
         }
         let path = ch.url.split(separator: "?").first.map(String.init) ?? ch.url
         guard path.lowercased().hasSuffix(".m3u8") else {
             // Direct-media URL: nothing structured to prime.
-            return false
+            return .verified
         }
         let text = String(decoding: head.body, as: UTF8.self)
-        guard isPlaylist(text) else { return true }
+        guard isPlaylist(text) else { return .dead }
         var mediaText = text
         var mediaBase = url
         if text.contains("#EXT-X-STREAM-INF"),
@@ -1728,12 +2125,15 @@ private enum SourcePrewarmer {
             // The descent still runs — fetching the variant
             // playlist is most of the warming value — but its
             // answer never judges (see the death rule above):
-            // a failed descent just ends the warm here.
-            guard let media = await fetch(ch, url: variant, limit: 16_384, session: session),
-                  media.status == 200
-            else { return false }
-            let variantText = String(decoding: media.body, as: UTF8.self)
-            guard isPlaylist(variantText) else { return false }
+            // a failed descent just ends the warm here. The
+            // top playlist WAS read, so the warm is verified
+            // either way.
+            guard case .response(let mediaStatus, let mediaBody) =
+                    await fetch(ch, url: variant, limit: 16_384, session: session),
+                  mediaStatus == 200
+            else { return .verified }
+            let variantText = String(decoding: mediaBody, as: UTF8.self)
+            guard isPlaylist(variantText) else { return .verified }
             mediaText = variantText
             mediaBase = variant
         }
@@ -1745,7 +2145,7 @@ private enum SourcePrewarmer {
             // plays on.
             _ = await fetch(ch, url: segment, limit: 256 * 1024, session: session)
         }
-        return false
+        return .verified
     }
 
     private static func isPlaylist(_ text: String) -> Bool {
@@ -1756,9 +2156,18 @@ private enum SourcePrewarmer {
 
     /// One bounded fetch in pre-flight's shape: the channel's
     /// declared header set, a 4 s request timeout, at most
-    /// `limit` bytes of body read. Nil on a network-level error.
+    /// `limit` bytes of body read. FIX-130 (P-1): a
+    /// network-level failure is no longer collapsed into the
+    /// same nil as every other non-answer — it carries its
+    /// error class, so warm() can record the source as
+    /// unreachable (cold) instead of certifying it "ready".
+    private enum FetchOutcome {
+        case response(status: Int, body: Data)
+        case networkError(String)
+    }
+
     private static func fetch(_ ch: Channel, url: URL, limit: Int,
-                              session: URLSession) async -> (status: Int, body: Data)? {
+                              session: URLSession) async -> FetchOutcome {
         var request = URLRequest(url: url)
         request.timeoutInterval = 4
         for (field, value) in NuvioStreamHeaders.requestHeaders(for: ch, referrer: ch.referrer) {
@@ -1774,9 +2183,29 @@ private enum SourcePrewarmer {
                     if buffer.count > limit { break }
                 }
             }
-            return (status, buffer)
+            return .response(status: status, body: buffer)
         } catch {
-            return nil
+            return .networkError(errorClass(error))
+        }
+    }
+
+    /// A short, log-stable class for a network-level failure:
+    /// the TLS family by name (the verdict class the 1.29 log
+    /// needed — a certificate failure at warm time must read
+    /// differently from a timeout), the common NSURLError
+    /// shapes by name, anything else by domain + code.
+    private static func errorClass(_ error: Error) -> String {
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else {
+            return "\(ns.domain) \(ns.code)"
+        }
+        switch ns.code {
+        case -1206 ... -1200: return "TLS/certificate (NSURLError \(ns.code))"
+        case -1001: return "timeout (NSURLError \(ns.code))"
+        case -1003, -1004, -1006: return "host unreachable (NSURLError \(ns.code))"
+        case -1005: return "connection lost (NSURLError \(ns.code))"
+        case -1009: return "offline (NSURLError \(ns.code))"
+        default: return "network (NSURLError \(ns.code))"
         }
     }
 
@@ -1937,33 +2366,54 @@ final class SourcePrewarmStore {
             }
         }
 
-        await withTaskGroup(of: (String, Bool).self) { group in
+        await withTaskGroup(of: (String, SourcePrewarmer.Outcome).self) { group in
             var active = 0
             while active < 2, let ch = takeNext() {
                 group.addTask { (ch.url, await SourcePrewarmer.warm(ch, session: session)) }
                 active += 1
             }
-            for await (url, dead) in group {
+            for await (url, outcome) in group {
                 active -= 1
                 if !Task.isCancelled {
-                    states[url] = dead ? .dead : .warm
-                    if dead, let ch = channelsByURL[url] {
-                        DiagLog.log("player",
-                                    "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
-                    } else if let ch = channelsByURL[url] {
-                        // FIX-129 (Item B): the warm READY line
-                        // (host + elapsed, via diagSourceTag) —
-                        // the counterpart of the start line in
-                        // takeNext(). A warm that ends neither
-                        // dead nor cancelled lands here: the top
-                        // playlist (and, for a master, the best
-                        // variant + first segment head) was
-                        // fetched, so the host is warm.
-                        let ms = startedAt[url].map {
-                            Int(Date().timeIntervalSince($0) * 1000)
-                        } ?? -1
-                        DiagLog.log("player",
-                                    "prewarm: ready \(diagSourceTag(ch)) in \(ms)ms")
+                    switch outcome {
+                    case .dead:
+                        states[url] = .dead
+                        if let ch = channelsByURL[url] {
+                            DiagLog.log("player",
+                                        "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
+                        }
+                    case .verified:
+                        states[url] = .warm
+                        if let ch = channelsByURL[url] {
+                            // FIX-129 (Item B): the warm READY
+                            // line (host + elapsed, via
+                            // diagSourceTag) — the counterpart
+                            // of the start line in takeNext().
+                            // FIX-130 (P-1): it now fires ONLY
+                            // for a verified warm — the top
+                            // playlist was actually read. A
+                            // network/TLS failure lands in the
+                            // .unreachable branch below and can
+                            // never be certified "ready" again.
+                            let ms = startedAt[url].map {
+                                Int(Date().timeIntervalSince($0) * 1000)
+                            } ?? -1
+                            DiagLog.log("player",
+                                        "prewarm: ready \(diagSourceTag(ch)) in \(ms)ms")
+                        }
+                    case .unreachable(let errorClass):
+                        // FIX-130 (P-1): neither warm nor
+                        // dead — the state clears back to
+                        // cold, so a later warm() may retry
+                        // the source (warm()'s pending filter
+                        // admits only stateless URLs), and the
+                        // failure is on the log record with
+                        // its class.
+                        states[url] = nil
+                        if let ch = channelsByURL[url] {
+                            DiagLog.log("player",
+                                        "prewarm: unreachable \(diagSourceTag(ch)) — \(errorClass)")
+                        }
                     }
                 }
                 while active < 2, let ch = takeNext() {
@@ -2030,15 +2480,34 @@ final class ResolveHub {
     private var inFlight: [String: MatchPlaySession] = [:]
     /// URLs a settled resolve proved definitively dead this
     /// app run (pre-flight's standard only — see
-    /// MatchPlaySession.isKnownDead). Outlives cache entries:
+    /// MatchPlaySession.isKnownDead), each stamped with the
+    /// time of its latest verdict. Outlives cache entries:
     /// a verdict must survive the TTL of the entry that
     /// produced it, or an expired entry resurrects its dead.
-    private var provenDead: Set<String> = []
+    /// FIX-130 (P-4): a verdict now also EXPIRES — 30 s after
+    /// it was stamped (the web board's HEALTH_NEG_MS) the URL
+    /// is retestable: publishHeadNow stops filtering it, so a
+    /// host that recovered mid-run is not convicted until
+    /// relaunch the way the pre-1.30 lifetime set held it.
+    /// Expiry is lazy (on read, in isProvenDead) — no timers,
+    /// no sweeps.
+    private var provenDead: [String: Date] = [:]
+
+    /// The dead-verdict memory: 30 s, mirroring the web
+    /// board's health map.
+    private static let provenDeadTTL: TimeInterval = 30
 
     /// Whether a settled resolve has already proven this URL
-    /// dead during this app run.
+    /// dead during this app run — and the verdict is still
+    /// inside its 30 s TTL. An expired verdict is dropped on
+    /// the spot and the URL reads as never convicted.
     func isProvenDead(_ url: String) -> Bool {
-        provenDead.contains(url)
+        guard let stampedAt = provenDead[url] else { return false }
+        if Date().timeIntervalSince(stampedAt) > Self.provenDeadTTL {
+            provenDead[url] = nil
+            return false
+        }
+        return true
     }
 
     /// FIX-129 (Item C): a PLAYER-observed definitive failure
@@ -2048,8 +2517,10 @@ final class ResolveHub {
     /// including taps of other fixtures whose ladders carry
     /// the same URL. Session-scoped in effect (the set is
     /// in-memory, per app run, like every verdict here).
+    /// FIX-130 (P-4): the verdict is stamped, so it expires
+    /// on the same 30 s TTL as a resolve's verdict.
     func notePlayerDead(url: String) {
-        provenDead.insert(url)
+        provenDead[url] = Date()
     }
     private var preresolveTask: Task<Void, Never>?
     private var preresolveSessions: [MatchPlaySession] = []
@@ -2062,14 +2533,28 @@ final class ResolveHub {
 
     private init() {}
 
-    /// Cache identity of a ladder: its URLs, in order. Two
-    /// different fixtures never share an ordered URL list; a
-    /// refreshed playlist with different URLs is a different key
-    /// and resolves fresh.
+    /// Cache identity of a ladder: its URL MULTISET — the
+    /// URLs sorted, so ORDER plays no part. FIX-130 (P-8):
+    /// until now the key was the URLs in ladder order, so a
+    /// board pick whose rotation differed from the preresolve
+    /// ladder's order (the Castilla re-pick shape, PLAN-130
+    /// §4 G-8) missed both the cache and the in-flight table
+    /// and started a second session for the same fixture.
+    /// Audited before the change: key(for:) has exactly one
+    /// caller (session(for:isTap:) below); every other use of
+    /// a session's key treats it as opaque identity — the
+    /// noteResolved / forgetInFlight guards match on it, and
+    /// ContentView's .id("vn:" + session.key) view identity
+    /// changes value consistently for every caller at once.
+    /// Order itself lives in the entry, not the key:
+    /// tapSeedOrder re-derives the replay order from the
+    /// entry + the pick, so identity and order stay separate.
+    /// Two different fixtures never share a URL multiset; a
+    /// refreshed playlist with different URLs is a different
+    /// key and resolves fresh.
     static func key(for ladder: [Channel]) -> String {
-        ladder.map(\.url).joined(separator: "\n")
+        ladder.map(\.url).sorted().joined(separator: "\n")
     }
-
     /// The session for a ladder: the in-flight one if this fixture
     /// is already resolving (single-flight — a tap and a
     /// pre-resolve pass share it), else a born-complete session
@@ -2162,6 +2647,19 @@ final class ResolveHub {
                                     + "ladder — \(seed.count) source(s) replayed "
                                     + "instantly, verification continues behind")
                     }
+                    // FIX-130B (REVIEW-130-LOOP2 B-1): this
+                    // session may have been started by a
+                    // preresolve pass with ITS ladder — since
+                    // P-8 the tap's rotated ladder shares the
+                    // key and adopts it. Re-base the session's
+                    // snapshot to the TAP's ladder first, so
+                    // the instant head publishHeadNow is about
+                    // to make is the viewer's pick. (Inert when
+                    // a seed just landed or a batch already
+                    // published: publishHeadNow then no-ops
+                    // before ever reading the snapshot, and
+                    // nothing else reads it.)
+                    live.rebaseSnapshot(to: ladder)
                     // DB-07: the tap plays the head NOW, even
                     // while this shared session still verifies.
                     // (A no-op when the seed just landed: the
@@ -2281,7 +2779,13 @@ final class ResolveHub {
         // FIX-128: the resolve's death verdicts join the
         // app-run dead set BEFORE the entry is written, so
         // they outlive this entry's TTL (see provenDead).
-        provenDead.formUnion(deadURLs)
+        // FIX-130 (P-4): each verdict is stamped with this
+        // settle's time — the set's 30 s TTL runs from the
+        // latest verdict, so a re-conviction refreshes it.
+        let verdictStamp = Date()
+        for url in deadURLs {
+            provenDead[url] = verdictStamp
+        }
         let ttl: TimeInterval
         if sources.isEmpty {
             ttl = 30 // negative entry — see the type doc

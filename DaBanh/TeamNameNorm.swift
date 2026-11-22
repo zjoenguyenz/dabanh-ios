@@ -598,6 +598,38 @@ enum TeamNameNorm {
         "psg": "paris saint germain",
         "newcastle": "newcastle united",
         "olympique lyon": "lyon",
+        // FIX-130 (2026-11-21, DB-12) — legal-name forms that
+        // canonicalise AWAY from the short canon every source
+        // uses, so a legal-name spelling could never bind.
+        // Proven in the PLAN-130 survey (§5) with the frozen
+        // corpus127 harness: today's canon outputs are
+        // "rc strasbourg alsace", "stade brestois" and
+        // "real betis balompie" beside the feeds' "strasbourg",
+        // "brest" and "real betis". Notes on shape:
+        // - The accented "Balompié" folds to "balompie" inside
+        //   tn_norm before the lookup, so one entry covers both
+        //   spellings.
+        // - "Stade Brestois 29" reaches the table as
+        //   "stade brestois" (the 29 drops earlier in the
+        //   pipeline), so it needs no entry of its own.
+        // - Near-neighbours stay distinct: Dynamo Brest /
+        //   Dinamo Brest are different stems, Real Sociedad /
+        //   Real Madrid untouched, "stade brestois b" keeps its
+        //   reserve identity.
+        // - The last two are the survey's flagged neighbours of
+        //   the identical Stade/RC shape, folded in by the
+        //   leader's D-4 ruling: ESPN's frozen fra.1 payload
+        //   attests "Stade Rennais" while the other sources use
+        //   "Rennes"; "rc lens" diverges from "lens" the same
+        //   way "rc strasbourg" did from "strasbourg".
+        "rc strasbourg alsace": "strasbourg",
+        "rc strasbourg": "strasbourg",
+        "racing strasbourg": "strasbourg",
+        "stade brestois": "brest",
+        "stade brest": "brest",
+        "real betis balompie": "real betis",
+        "stade rennais": "rennes",
+        "rc lens": "lens",
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,
