@@ -810,29 +810,35 @@ extension LivePlayerViewController {
         guard !mu.miniScore.isHidden else { return }
         let pad: CGFloat = 7
         let gap: CGFloat = 7
-        var cx = x + pad
-        let crestY = y + (height - crest) / 2
+        // FIX-135 (DB-21): the five subviews are children of
+        // miniScore, so their frames are PLATE-LOCAL — cx starts
+        // at pad and every y is measured from the plate's own
+        // top. (Before, the frames were computed in controlsView
+        // coordinates, displacing the whole content row by the
+        // plate's own origin and leaving the plate empty.)
+        var cx = pad
+        let crestY = (height - crest) / 2
         mu.miniHomeCrest.frame = CGRect(x: cx, y: crestY, width: crest, height: crest)
         cx += crest + gap
         mu.miniHomeAbbr.font = MUFont.uiBody(fontSize, .semibold)
         let homeW = mu.miniHomeAbbr.intrinsicContentSize.width
-        mu.miniHomeAbbr.frame = CGRect(x: cx, y: y, width: homeW, height: height)
+        mu.miniHomeAbbr.frame = CGRect(x: cx, y: 0, width: homeW, height: height)
         cx += homeW + gap
         // FIX-MU-5 (#123): semibold (600), as at build.
         mu.miniScoreLabel.font = MUFont.uiBody(fontSize, .semibold)
         let scoreW = mu.miniScoreLabel.intrinsicContentSize.width + 12
-        mu.miniScoreLabel.frame = CGRect(x: cx, y: y + (height - 20) / 2, width: scoreW, height: 20)
+        mu.miniScoreLabel.frame = CGRect(x: cx, y: (height - 20) / 2, width: scoreW, height: 20)
         cx += scoreW + gap
         let awayW = mu.miniAwayAbbr.intrinsicContentSize.width
-        mu.miniAwayAbbr.frame = CGRect(x: cx, y: y, width: awayW, height: height)
+        mu.miniAwayAbbr.frame = CGRect(x: cx, y: 0, width: awayW, height: height)
         cx += awayW + gap
         // FIX-MU-5 (#122): no away crest segment — the clock
         // follows the away abbreviation directly.
         mu.miniClock.font = MUFont.uiBody(fontSize, .semibold)
         let clockW = mu.miniClock.intrinsicContentSize.width
-        mu.miniClock.frame = CGRect(x: cx, y: y, width: clockW, height: height)
+        mu.miniClock.frame = CGRect(x: cx, y: 0, width: clockW, height: height)
         cx += clockW + pad
-        mu.miniScore.frame = CGRect(x: x, y: y, width: cx - x, height: height)
+        mu.miniScore.frame = CGRect(x: x, y: y, width: cx, height: height)
     }
 
     private func layoutTransport(_ mu: MUChromeViews, centre: CGPoint,

@@ -208,7 +208,20 @@ enum HighlightDates {
         if let date = withFraction.date(from: raw) { return date }
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw)
+        if let date = plain.date(from: raw) { return date }
+        // FIX-135 (DB-22): DateFormatter fallbacks for shapes the
+        // ISO8601 formatter refuses — above all a MISSING seconds
+        // field (ESPN's raw kickoff format, "2026-11-22T20:00Z"),
+        // which zeroed the whole tab in 1.34 when every match in
+        // the file carried it. XXX accepts 'Z' and ±HH:mm alike.
+        // Fresh formatters per call, same as above.
+        for format in ["yyyy-MM-dd'T'HH:mm:ssXXX", "yyyy-MM-dd'T'HH:mmXXX"] {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = format
+            if let date = f.date(from: raw) { return date }
+        }
+        return nil
     }
 
     static func string(from date: Date) -> String {
