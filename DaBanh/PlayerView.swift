@@ -82,6 +82,11 @@ struct PlayerView: View {
     var onSwitchEN: ((NuvioMeta) -> Void)? = nil
     var onSwitchVN: ((Channel) -> Void)? = nil
     @EnvironmentObject private var store: PlaylistStore
+    /// The selected theme (theme-mu): the classic body below
+    /// is byte-identical in behaviour; the MU theme swaps the
+    /// slate/close chrome and hands the surface its MU chrome
+    /// inputs. Playback machinery is shared, untouched.
+    @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     /// FIX-130 (P-2): the rungs this page has already sat on.
@@ -138,15 +143,21 @@ struct PlayerView: View {
 
             if settledExhausted {
                 VStack {
-                    boardHeaderSlot
-                    noSignal
+                    if !themeStore.isMU {
+                        boardHeaderSlot
+                    }
+                    if themeStore.isMU {
+                        muNoSignal
+                    } else {
+                        noSignal
+                    }
                 }
                 .onAppear {
                     DiagLog.log("player",
                                 "no signal: ladder exhausted at #\(index) — "
                                 + "'\(headerEntry.map { MatchTitle.clean($0.channel.title) } ?? session.key)'")
                 }
-                closeButton
+                slateClose
             } else if let channel = current, channel.streamURL != nil {
                 LivePlayerSurface(
                     channel: channel, onFail: advance,
@@ -175,7 +186,14 @@ struct PlayerView: View {
                                     "source switch: board opened at source #\(index)")
                         sourceBoardPresented = true
                     },
-                    pipSuppressed: sourceBoardPresented)
+                    pipSuppressed: sourceBoardPresented,
+                    muEnabled: themeStore.isMU,
+                    muInfo: muPlayerInfo,
+                    muSourcesVN: muChipSourcesVN,
+                    muSourcesEN: enMetas,
+                    muPlayingENID: currentENMetaID,
+                    onMUSelectVN: { channel in switchToVN(channel) },
+                    onMUSelectEN: { meta in switchToEN(meta) })
                     .id(index)
                     .ignoresSafeArea()
                 if switching {
@@ -206,7 +224,9 @@ struct PlayerView: View {
                 // re-renders onto it at the same index; when the
                 // session settles empty, settledExhausted takes over.
                 VStack {
-                    boardHeaderSlot
+                    if !themeStore.isMU {
+                        boardHeaderSlot
+                    }
                     Spacer()
                     HStack {
                         Text(index == 0 ? "Đang tải…" : "Đang chuyển nguồn khác…")
@@ -233,7 +253,7 @@ struct PlayerView: View {
                                 + "#\(index), resolution still running — "
                                 + "holding for the next batch")
                 }
-                closeButton
+                slateClose
             }
         }
         .onAppear {
@@ -248,7 +268,15 @@ struct PlayerView: View {
             // becomes visible again if it ever returns).
             DiagLog.log("player",
                         "player presented: session has \(sources.count) source(s), starting #\(index)")
-            OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+            if themeStore.isMU {
+                // MU (theme-mu): the design carries a portrait
+                // page AND a landscape layout, so rotation
+                // stays free under MU; classic keeps its
+                // landscape lock exactly as before.
+                OrientationHelper.lock(.all)
+            } else {
+                OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+            }
         }
         .task {
             // The opened fixture is first in line for its FotMob
@@ -352,6 +380,128 @@ struct PlayerView: View {
         .padding(.top, 10)
     }
 
+
+    // MARK: - MU theme chrome inputs (theme-mu)
+
+    /// The close control for the waiting / no-signal slates:
+    /// classic keeps its 36 pt top-left disc; MU gets the
+    /// design's 48 pt gold-ring close, top-right (G-5).
+    @ViewBuilder
+    private var slateClose: some View {
+        if themeStore.isMU {
+            HStack {
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(MUTokens.cream)
+                        .frame(width: 48, height: 48)
+                        .background(Color.black.opacity(0.35), in: Circle())
+                        .overlay(Circle().stroke(MUTokens.gold, lineWidth: 1))
+                }
+                .accessibilityLabel("Đóng")
+            }
+            .padding(.trailing, 16)
+            .padding(.top, 10)
+        } else {
+            closeButton
+        }
+    }
+
+    /// The MU no-signal slate (the classic `noSignal` texts,
+    /// in the MU type system).
+    private var muNoSignal: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            Text("MẤT TÍN HIỆU")
+                .font(MUFont.display(30))
+                .muDisplayTracking(30)
+                .foregroundStyle(MUTokens.cream)
+            Text("Tất cả các nguồn của trận này đều không phát được.")
+                .font(MUFont.body(11))
+                .foregroundStyle(MUTokens.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// The MU chrome's data for the surface: the playing
+    /// channel's display name + commentary note, and the
+    /// fixture's teams / crests / score / clock when this
+    /// playback came from a fixture — all read from the same
+    /// live header entry the classic board header renders.
+    private var muPlayerInfo: MUPlayerInfo {
+        let entry = liveHeaderEntry
+        let isEN = currentENMetaID != nil
+        var name = current.map { MatchTitle.clean($0.title) } ?? session.key
+        if let entry, !isEN {
+            name = muCommentatorName(MatchTitle.clean(entry.channel.title),
+                                     group: entry.channel.group)
+        }
+        if isEN, let meta = enMetas.first(where: { $0.id == currentENMetaID }) {
+            name = meta.competitionString ?? meta.channelHint ?? meta.displayName
+        }
+        var home: String?
+        var away: String?
+        var score: String?
+        var clock: String?
+        var status: String?
+        if let entry {
+            if let teams = entry.teams {
+                home = teams.0
+                away = teams.1
+            }
+            if let state = entry.state {
+                if let h = state.scoreHome, let a = state.scoreAway {
+                    score = "\(h):\(a)"
+                }
+                clock = state.minuteText ?? state.badgeText
+                switch state.status {
+                case .live: status = "Đang diễn ra"
+                case .halfTime: status = "Nghỉ giữa hiệp"
+                case .fullTime: status = "Đã kết thúc"
+                case .pre: status = "Sắp diễn ra"
+                case .postponed, .cancelled: status = "Hoãn"
+                }
+            } else if entry.isLive {
+                clock = entry.liveBadgeText
+                status = "Đang diễn ra"
+            }
+        }
+        let title: String
+        if let home, let away {
+            title = "\(home) — \(away)"
+        } else {
+            title = name
+        }
+        return MUPlayerInfo(
+            channelName: name,
+            channelNote: "Tự động · Bình luận tiếng \(isEN ? "Anh" : "Việt")",
+            homeName: home, awayName: away,
+            homeCrest: entry?.crests?.0 ?? nil,
+            awayCrest: entry?.crests?.1 ?? nil,
+            scoreText: score, clockText: clock,
+            isLive: entry?.state?.status.isLiveish ?? entry?.isLive ?? true,
+            leagueText: entry?.competitionLabel,
+            titleText: title.uppercased(),
+            statusText: status)
+    }
+
+    /// The MU chip row's Vietnamese sources: the board's
+    /// ladder for a fixture playback (board order — the row
+    /// switches through switchToVN, in place when this
+    /// session carries the link, via the host otherwise);
+    /// the session's own published ladder for a direct
+    /// channel play, where every chip is servable in place.
+    private var muChipSourcesVN: [Channel] {
+        if let headerEntry {
+            return store.sources(for: headerEntry.channel)
+        }
+        return session.sources
+    }
+
     private func advance() {
         // Unconditional: the walk may land one past the last
         // published source. Each surface fires onFail once per
@@ -444,6 +594,16 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
     /// While the switch overlay is up, auto-PiP is suppressed
     /// so the picture cannot leave inline under the board.
     var pipSuppressed: Bool = false
+    /// MU theme chrome inputs (theme-mu): when muEnabled is
+    /// false every one of these is ignored and the surface is
+    /// the classic one, unchanged.
+    var muEnabled: Bool = false
+    var muInfo: MUPlayerInfo? = nil
+    var muSourcesVN: [Channel] = []
+    var muSourcesEN: [NuvioMeta] = []
+    var muPlayingENID: String? = nil
+    var onMUSelectVN: ((Channel) -> Void)? = nil
+    var onMUSelectEN: ((NuvioMeta) -> Void)? = nil
 
     func makeUIViewController(context: Context) -> LivePlayerViewController {
         let controller = LivePlayerViewController()
@@ -456,11 +616,25 @@ struct LivePlayerSurface: UIViewControllerRepresentable {
         controller.showsSourceSwitch = showsSourceSwitch
         controller.onSourceSwitch = onSourceSwitch
         controller.pipSuppressed = pipSuppressed
+        controller.isMUChrome = muEnabled
+        controller.muInfo = muInfo
+        controller.muSourcesVN = muSourcesVN
+        controller.muSourcesEN = muSourcesEN
+        controller.muPlayingENID = muPlayingENID
+        controller.onMUSelectVN = onMUSelectVN
+        controller.onMUSelectEN = onMUSelectEN
         return controller
     }
 
     func updateUIViewController(_ uiViewController: LivePlayerViewController, context: Context) {
         uiViewController.setPIPSuppressed(pipSuppressed)
+        if uiViewController.isMUChrome {
+            uiViewController.muInfo = muInfo
+            uiViewController.muSourcesVN = muSourcesVN
+            uiViewController.muSourcesEN = muSourcesEN
+            uiViewController.muPlayingENID = muPlayingENID
+            uiViewController.refreshMUChrome()
+        }
     }
 
     static func dismantleUIViewController(_ uiViewController: LivePlayerViewController, coordinator: ()) {
@@ -504,24 +678,38 @@ final class LivePlayerViewController: UIViewController {
     var showsSourceSwitch = false
     var onSourceSwitch: (() -> Void)?
     var pipSuppressed = false
+    /// MU theme chrome state (theme-mu): set by the surface
+    /// before the view loads when the MU theme is active; the
+    /// MU control layer itself lives in MUPlayerChrome.swift.
+    /// The classic chrome never reads any of it.
+    var isMUChrome = false
+    var muInfo: MUPlayerInfo?
+    var muSourcesVN: [Channel] = []
+    var muSourcesEN: [NuvioMeta] = []
+    var muPlayingENID: String?
+    var onMUSelectVN: ((Channel) -> Void)?
+    var onMUSelectEN: ((NuvioMeta) -> Void)?
+    var muChrome: MUChromeViews?
+    /// The MU quality chip's rendition cap (0 = Tự động).
+    var muQualityCap: Double = 0
 
-    private let videoView = PlayerLayerView()
-    private let controlsView = UIView()
-    private let closeButton = UIButton(type: .system)
+    let videoView = PlayerLayerView()
+    let controlsView = UIView()
+    let closeButton = UIButton(type: .system)
     private let sourceSwitchButton = UIButton(type: .system)
     private let titleLabel = UILabel()
-    private let playPauseButton = UIButton(type: .system)
-    private let spinner = UIActivityIndicatorView(style: .large)
-    private var pipButton = UIButton(type: .system)
-    private let fillButton = UIButton(type: .system)
+    let playPauseButton = UIButton(type: .system)
+    let spinner = UIActivityIndicatorView(style: .large)
+    var pipButton = UIButton(type: .system)
+    let fillButton = UIButton(type: .system)
     private let liveBadge = UILabel()
 
-    private var player: AVPlayer?
+    var player: AVPlayer?
     /// FIX-129 (Item C): the playing item, kept so its access
     /// log can be read at failure time (the HTTP status of the
     /// request that failed lives there, not in item.error).
-    private var playerItem: AVPlayerItem?
-    private var pipController: AVPictureInPictureController?
+    var playerItem: AVPlayerItem?
+    var pipController: AVPictureInPictureController?
     private var statusToken: NSKeyValueObservation?
     private var timeControlToken: NSKeyValueObservation?
     /// FIX-130 (P-3): the loadedTimeRanges observation feeding
@@ -577,7 +765,11 @@ final class LivePlayerViewController: UIViewController {
         videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(videoView)
 
-        buildControls(channel: channel)
+        if isMUChrome {
+            buildMUControls(channel: channel)
+        } else {
+            buildControls(channel: channel)
+        }
         observe(item: item, player: player)
         setupRemoteCommands(channel: channel)
         player.play()
@@ -599,6 +791,9 @@ final class LivePlayerViewController: UIViewController {
         super.viewDidLayoutSubviews()
         videoView.frame = view.bounds
         controlsView.frame = view.bounds
+        if isMUChrome {
+            layoutMUChrome()
+        }
     }
 
     // MARK: - Controls
@@ -984,7 +1179,7 @@ final class LivePlayerViewController: UIViewController {
 
     // MARK: - Actions
 
-    @objc private func closeTapped() { onClose?() }
+    @objc func closeTapped() { onClose?() }
 
     @objc private func sourceSwitchTapped() {
         onSourceSwitch?()
@@ -996,18 +1191,30 @@ final class LivePlayerViewController: UIViewController {
     /// The representable re-applies this on every update, so it
     /// tracks the overlay's presentation exactly.
     func setPIPSuppressed(_ suppressed: Bool) {
+        let changed = suppressed != pipSuppressed
         pipSuppressed = suppressed
         pipController?.canStartPictureInPictureAutomaticallyFromInline = !suppressed
+        // theme-mu (the P-3 standard, both themes): while a
+        // sheet is open over the player the chrome must not
+        // auto-hide under it; when the sheet closes the fade
+        // re-arms through the usual guards (ready + playing).
+        if changed {
+            if suppressed {
+                keepControlsVisible()
+            } else {
+                scheduleControlsHide()
+            }
+        }
     }
 
-    @objc private func togglePlayPause() {
+    @objc func togglePlayPause() {
         guard let player else { return }
         if player.timeControlStatus == .paused { player.play() } else { player.pause() }
         refreshPlaybackUI(player)
         showControls()
     }
 
-    @objc private func togglePiP() {
+    @objc func togglePiP() {
         guard let pipController else { return }
         if pipController.isPictureInPictureActive {
             pipController.stopPictureInPicture()
@@ -1017,7 +1224,7 @@ final class LivePlayerViewController: UIViewController {
         showControls()
     }
 
-    @objc private func toggleFill() {
+    @objc func toggleFill() {
         let layer = videoView.playerLayer
         layer.videoGravity = layer.videoGravity == .resizeAspect ? .resizeAspectFill : .resizeAspect
         showControls()
@@ -1025,7 +1232,7 @@ final class LivePlayerViewController: UIViewController {
 
     /// Spread (scale > 1) fills the screen, pinch (scale < 1)
     /// returns to fit — the owner's thresholds from the AVKit era.
-    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+    @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
         guard gesture.state == .changed || gesture.state == .ended else { return }
         let layer = videoView.playerLayer
         if gesture.scale > 1.12, layer.videoGravity != .resizeAspectFill {
@@ -1035,7 +1242,7 @@ final class LivePlayerViewController: UIViewController {
         }
     }
 
-    @objc private func toggleControls() {
+    @objc func toggleControls() {
         // N-1 (REVIEW-125-LOOP1): before the first ready a tap
         // must never hide the chrome — the close button has to
         // stay reachable for the whole wait, even when the item
@@ -1050,7 +1257,7 @@ final class LivePlayerViewController: UIViewController {
         if controlsVisible { scheduleControlsHide() } else { hideTimer?.invalidate() }
     }
 
-    private func showControls() {
+    func showControls() {
         controlsVisible = true
         UIView.animate(withDuration: 0.25) { self.controlsView.alpha = 1 }
         scheduleControlsHide()
@@ -1058,7 +1265,7 @@ final class LivePlayerViewController: UIViewController {
 
     /// DB-05: pin the chrome on screen — used whenever the
     /// player is waiting for signal (the spinner is running).
-    private func keepControlsVisible() {
+    func keepControlsVisible() {
         hideTimer?.invalidate()
         if !controlsVisible {
             controlsVisible = true
@@ -1066,7 +1273,7 @@ final class LivePlayerViewController: UIViewController {
         }
     }
 
-    private func scheduleControlsHide() {
+    func scheduleControlsHide() {
         hideTimer?.invalidate()
         // DB-05: the fade NEVER starts before the first ready —
         // before that the viewer is still waiting for signal and

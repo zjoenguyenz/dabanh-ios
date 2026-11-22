@@ -1,0 +1,908 @@
+import AVFoundation
+import AVKit
+import UIKit
+
+/// The data the MU player chrome paints (theme-mu): the
+/// playing channel's name + commentary note, and — for a
+/// fixture playback — the fixture's teams, crests, score and
+/// clock, all from the SAME MatchState the boards show.
+/// Computed by PlayerView from its live header entry; nil
+/// fields simply hide their element (a 24/7 channel play has
+/// no score chip, an unscored fixture shows "VS").
+struct MUPlayerInfo {
+    var channelName: String
+    var channelNote: String
+    var homeName: String?
+    var awayName: String?
+    var homeCrest: URL?
+    var awayCrest: URL?
+    var scoreText: String?
+    var clockText: String?
+    var isLive: Bool
+    var leagueText: String?
+    var titleText: String
+    var statusText: String?
+}
+
+/// sRGB colour from a 0xRRGGBB token (the UIKit twin of
+/// MatchViews.boardColor).
+private func muUIColor(_ hex: UInt32, alpha: CGFloat = 1) -> UIColor {
+    UIColor(red: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: alpha)
+}
+
+private enum MUUIColor {
+    static let bg = muUIColor(0x0B0E13)
+    static let card = muUIColor(0x171B22)
+    static let red = muUIColor(0xDA291C)
+    static let gold = muUIColor(0xC9A86A)
+    static let cream = muUIColor(0xF2E6C8)
+    static let scoreBright = muUIColor(0xFFF4E7)
+    static let secondary = muUIColor(0xA9ADB7)
+    static let border = muUIColor(0x30343D)
+    static let selectedFill = muUIColor(0x3A211F)
+    static let panelAlt = muUIColor(0x20252E)
+}
+
+/// The MU chrome's view refs, held by the view controller in
+/// one box (extensions cannot add stored properties).
+final class MUChromeViews {
+    let nameLabel = UILabel()
+    let noteLabel = UILabel()
+    let miniScore = UIView()
+    let miniHomeCrest = UIImageView()
+    let miniAwayCrest = UIImageView()
+    let miniHomeAbbr = UILabel()
+    let miniAwayAbbr = UILabel()
+    let miniScoreLabel = UILabel()
+    let miniClock = UILabel()
+    var homeCrestURL: URL?
+    var awayCrestURL: URL?
+    let rewindButton = UIButton(type: .system)
+    let volumeButton = UIButton(type: .system)
+    let livePill = UIView()
+    let livePillLabel = UILabel()
+    let leagueLabel = UILabel()
+    let titleLabel = UILabel()
+    let statusLabel = UILabel()
+    let timeLabel = UILabel()
+    let liveStateLabel = UILabel()
+    let progressTrack = UIView()
+    let progressFill = UIView()
+    let progressKnob = UIView()
+    let qualityButton = UIButton(type: .system)
+    let audioButton = UIButton(type: .system)
+    let fillButton = UIButton(type: .system)
+    let moreButton = UIButton(type: .system)
+    let sourceLabel = UILabel()
+    let allSourcesButton = UIButton(type: .system)
+    let chipsScroll = UIScrollView()
+    let chipsStack = UIStackView()
+    /// The portrait page's footer hint (FIX-MU-3, finding
+    /// 7): plain 9 pt text under the chips row, min-height
+    /// 30. Portrait only — hidden in the landscape layout.
+    let footerLabel = UILabel()
+    /// The orientation the chips were last built for
+    /// (FIX-MU-3, finding 9): chip font is 11 portrait /
+    /// 10 landscape, so a rotation rebuilds the chips.
+    var landscape = false
+    let scrimTop = UIView()
+    let scrimBottom = UIView()
+    var chipButtons: [UIButton] = []
+}
+
+/// The Manchester United player chrome (theme-mu): the
+/// design's player pages, built inside the EXISTING live
+/// player view controller when the MU theme is active. The
+/// portrait layout is the design's page (channel header,
+/// mini-score chip, the video block, then the title / time /
+/// toolbar / source block below it); the landscape layout is
+/// the design's full-bleed cover. ALL playback machinery —
+/// the player, its observations, the stall watchdog, the
+/// failover callbacks, the 3.0 s pause-aware auto-hide — is
+/// the classic surface's own, shared untouched: this file
+/// only builds and lays out a different control layer inside
+/// the same fading controlsView.
+extension LivePlayerViewController {
+
+    // MARK: - Build
+
+    func buildMUControls(channel: Channel) {
+        // The MU portrait page paints on ink, not pure black
+        // (the landscape page is covered by the video itself).
+        view.backgroundColor = MUUIColor.bg
+        controlsView.frame = view.bounds
+        controlsView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(controlsView)
+
+        let mu = MUChromeViews()
+        muChrome = mu
+
+        // Close: 48×48 circle, gold 1 pt ring, ALWAYS top
+        // right (deviation G-5 — the MU spec's size; classic
+        // keeps its 52 pt button on its own path).
+        closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
+        closeButton.tintColor = MUUIColor.cream
+        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        closeButton.layer.cornerRadius = 24
+        closeButton.layer.borderWidth = 1
+        closeButton.layer.borderColor = MUUIColor.gold.cgColor
+        closeButton.accessibilityLabel = "Đóng"
+        closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        controlsView.addSubview(closeButton)
+
+        // Centre play/pause: the design's cream disc with an
+        // ink glyph (64 portrait / 56 landscape — the frame
+        // and radius are set in layoutMUChrome).
+        playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+        playPauseButton.tintColor = MUUIColor.bg
+        playPauseButton.backgroundColor = MUUIColor.cream
+        playPauseButton.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
+        controlsView.addSubview(playPauseButton)
+
+        // Landscape scrims (hidden in the portrait layout).
+        for scrim in [mu.scrimTop, mu.scrimBottom] {
+            scrim.isUserInteractionEnabled = false
+            controlsView.addSubview(scrim)
+        }
+        let topGradient = CAGradientLayer()
+        topGradient.colors = [UIColor.black.withAlphaComponent(0.55).cgColor,
+                              UIColor.clear.cgColor]
+        topGradient.name = "muScrimTop"
+        mu.scrimTop.layer.addSublayer(topGradient)
+        let bottomGradient = CAGradientLayer()
+        bottomGradient.colors = [UIColor.clear.cgColor,
+                                 UIColor.black.withAlphaComponent(0.65).cgColor]
+        bottomGradient.name = "muScrimBottom"
+        mu.scrimBottom.layer.addSublayer(bottomGradient)
+
+        // Header: channel name + the quality/commentary note.
+        mu.nameLabel.font = MUFont.uiBody(17, .semibold)
+        mu.nameLabel.textColor = MUUIColor.cream
+        mu.nameLabel.lineBreakMode = .byTruncatingTail
+        controlsView.addSubview(mu.nameLabel)
+        mu.noteLabel.font = MUFont.uiBody(10)
+        mu.noteLabel.textColor = MUUIColor.secondary
+        mu.noteLabel.lineBreakMode = .byTruncatingTail
+        controlsView.addSubview(mu.noteLabel)
+
+        // Mini-score chip.
+        mu.miniScore.backgroundColor = MUUIColor.card
+        mu.miniScore.layer.cornerRadius = 6
+        mu.miniScore.layer.borderWidth = 1
+        mu.miniScore.layer.borderColor = MUUIColor.border.cgColor
+        controlsView.addSubview(mu.miniScore)
+        for crest in [mu.miniHomeCrest, mu.miniAwayCrest] {
+            crest.contentMode = .scaleAspectFit
+            mu.miniScore.addSubview(crest)
+        }
+        for abbr in [mu.miniHomeAbbr, mu.miniAwayAbbr] {
+            abbr.font = MUFont.uiBody(11, .semibold)
+            abbr.textColor = MUUIColor.cream
+            mu.miniScore.addSubview(abbr)
+        }
+        mu.miniScoreLabel.font = MUFont.uiBody(11, .bold)
+        mu.miniScoreLabel.textColor = MUUIColor.bg
+        mu.miniScoreLabel.backgroundColor = MUUIColor.cream
+        mu.miniScoreLabel.textAlignment = .center
+        mu.miniScoreLabel.layer.cornerRadius = 3
+        mu.miniScoreLabel.clipsToBounds = true
+        mu.miniScore.addSubview(mu.miniScoreLabel)
+        mu.miniClock.font = MUFont.uiBody(11, .semibold)
+        mu.miniClock.textColor = MUUIColor.gold
+        mu.miniScore.addSubview(mu.miniClock)
+
+        // Transport side buttons: dark translucent discs.
+        for (button, icon, label) in [
+            (mu.rewindButton, "gobackward.10", "Tua lại 10 giây"),
+            (mu.volumeButton, "speaker.wave.2.fill", "Tắt / bật tiếng"),
+        ] {
+            button.setImage(UIImage(systemName: icon), for: .normal)
+            button.tintColor = .white
+            button.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+            button.layer.cornerRadius = 22
+            button.accessibilityLabel = label
+            controlsView.addSubview(button)
+        }
+        mu.rewindButton.addTarget(self, action: #selector(muRewindTapped), for: .touchUpInside)
+        mu.volumeButton.addTarget(self, action: #selector(muVolumeTapped), for: .touchUpInside)
+
+        // Lower block: LIVE pill + league eyebrow, title,
+        // status, time row, progress, toolbar, sources.
+        mu.livePill.backgroundColor = MUUIColor.red
+        mu.livePill.layer.cornerRadius = 6
+        controlsView.addSubview(mu.livePill)
+        mu.livePillLabel.font = MUFont.uiBody(10, .bold)
+        mu.livePillLabel.textColor = MUUIColor.cream
+        mu.livePillLabel.text = "● LIVE"
+        mu.livePill.addSubview(mu.livePillLabel)
+        mu.leagueLabel.font = MUFont.uiBody(10, .semibold)
+        mu.leagueLabel.textColor = MUUIColor.gold
+        controlsView.addSubview(mu.leagueLabel)
+        mu.titleLabel.font = MUFont.uiDisplay(32)
+        mu.titleLabel.textColor = MUUIColor.scoreBright
+        mu.titleLabel.lineBreakMode = .byTruncatingTail
+        mu.titleLabel.adjustsFontSizeToFitWidth = true
+        mu.titleLabel.minimumScaleFactor = 0.6
+        controlsView.addSubview(mu.titleLabel)
+        mu.statusLabel.font = MUFont.uiBody(11)
+        mu.statusLabel.textColor = MUUIColor.secondary
+        mu.statusLabel.lineBreakMode = .byTruncatingTail
+        controlsView.addSubview(mu.statusLabel)
+        mu.timeLabel.font = MUFont.uiBody(10)
+        mu.timeLabel.textColor = MUUIColor.secondary
+        controlsView.addSubview(mu.timeLabel)
+        mu.liveStateLabel.font = MUFont.uiBody(10, .medium)
+        mu.liveStateLabel.textColor = MUUIColor.cream
+        controlsView.addSubview(mu.liveStateLabel)
+        mu.progressTrack.backgroundColor = MUUIColor.border
+        mu.progressTrack.layer.cornerRadius = 2
+        controlsView.addSubview(mu.progressTrack)
+        mu.progressFill.backgroundColor = MUUIColor.red
+        mu.progressFill.layer.cornerRadius = 2
+        controlsView.addSubview(mu.progressFill)
+        mu.progressKnob.backgroundColor = MUUIColor.red
+        mu.progressKnob.layer.cornerRadius = 6
+        controlsView.addSubview(mu.progressKnob)
+
+        configureMUChip(mu.qualityButton, icon: "slider.horizontal.3", title: "Tự động")
+        mu.qualityButton.addTarget(self, action: #selector(muQualityTapped), for: .touchUpInside)
+        controlsView.addSubview(mu.qualityButton)
+        configureMUChip(mu.audioButton, icon: "captions.bubble", title: "Âm thanh")
+        mu.audioButton.addTarget(self, action: #selector(muAudioTapped), for: .touchUpInside)
+        controlsView.addSubview(mu.audioButton)
+        configureMUChip(mu.fillButton, icon: "arrow.up.left.and.arrow.down.right", title: nil)
+        mu.fillButton.accessibilityLabel = "Tràn viền / vừa khung"
+        mu.fillButton.addTarget(self, action: #selector(toggleFill), for: .touchUpInside)
+        controlsView.addSubview(mu.fillButton)
+        configureMUChip(mu.moreButton, icon: "ellipsis", title: nil)
+        mu.moreButton.accessibilityLabel = "Hình trong hình"
+        mu.moreButton.addTarget(self, action: #selector(togglePiP), for: .touchUpInside)
+        controlsView.addSubview(mu.moreButton)
+
+        mu.sourceLabel.font = MUFont.uiBody(11)
+        mu.sourceLabel.textColor = MUUIColor.secondary
+        mu.sourceLabel.text = "Nguồn phát · Việt trước"
+        controlsView.addSubview(mu.sourceLabel)
+        mu.allSourcesButton.setTitle("Tất cả nguồn ›", for: .normal)
+        mu.allSourcesButton.titleLabel?.font = MUFont.uiBody(11, .medium)
+        mu.allSourcesButton.setTitleColor(MUUIColor.gold, for: .normal)
+        mu.allSourcesButton.addTarget(self, action: #selector(muAllSourcesTapped), for: .touchUpInside)
+        mu.allSourcesButton.isHidden = !showsSourceSwitch
+        controlsView.addSubview(mu.allSourcesButton)
+
+        mu.chipsScroll.showsHorizontalScrollIndicator = false
+        controlsView.addSubview(mu.chipsScroll)
+        mu.chipsStack.axis = .horizontal
+        mu.chipsStack.spacing = 8
+        mu.chipsStack.alignment = .fill
+        mu.chipsScroll.addSubview(mu.chipsStack)
+
+        // Footer hint (portrait page only): the design's
+        // plain explanatory line under the source chips.
+        // The mock's right-side illustration notice is NOT
+        // carried over (mock notices stay out of the app).
+        mu.footerLabel.font = MUFont.uiBody(9)
+        mu.footerLabel.textColor = MUUIColor.secondary
+        mu.footerLabel.text = "Chạm để hiện · Tự ẩn sau 3 giây"
+        mu.footerLabel.lineBreakMode = .byTruncatingTail
+        controlsView.addSubview(mu.footerLabel)
+
+        spinner.color = .white
+        view.addSubview(spinner)
+        spinner.startAnimating()
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(toggleControls))
+        view.addGestureRecognizer(tap)
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        view.addGestureRecognizer(pinch)
+
+        if AVPictureInPictureController.isPictureInPictureSupported() {
+            pipController = AVPictureInPictureController(playerLayer: videoView.playerLayer)
+            pipController?.delegate = self
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = !pipSuppressed
+        }
+
+        refreshMUChrome()
+    }
+
+    /// One toolbar chip (h44, radius 10, panel-alt fill).
+    private func configureMUChip(_ button: UIButton, icon: String, title: String?) {
+        var config = UIButton.Configuration.filled()
+        config.image = UIImage(systemName: icon)
+        config.imagePadding = 6
+        config.baseForegroundColor = MUUIColor.cream
+        config.baseBackgroundColor = MUUIColor.panelAlt
+        config.cornerStyle = .fixed
+        config.background.cornerRadius = 10
+        config.background.strokeColor = MUUIColor.border
+        config.background.strokeWidth = 1
+        if let title {
+            config.title = title
+            config.titleTextAttributesTransformer =
+                UIConfigurationTextAttributesTransformer { attributes in
+                    var out = attributes
+                    out.font = MUFont.uiBody(12, .medium)
+                    return out
+                }
+        }
+        button.configuration = config
+    }
+
+    // MARK: - Data refresh
+
+    /// Re-paint the chrome's data from the surface's current
+    /// MU inputs (called at build and on every representable
+    /// update — the fixture's state moves while the player
+    /// sits open, and the chrome follows it).
+    func refreshMUChrome() {
+        guard let mu = muChrome, let info = muInfo else { return }
+        mu.nameLabel.text = info.channelName
+        mu.noteLabel.text = info.channelNote
+        if let home = info.homeName, let away = info.awayName {
+            mu.miniScore.isHidden = false
+            mu.miniHomeAbbr.text = Self.abbreviation(home)
+            mu.miniAwayAbbr.text = Self.abbreviation(away)
+            mu.miniScoreLabel.text = info.scoreText ?? "VS"
+            mu.miniClock.text = info.clockText ?? ""
+            loadMUCrest(info.homeCrest, into: mu.miniHomeCrest, slot: \.homeCrestURL)
+            loadMUCrest(info.awayCrest, into: mu.miniAwayCrest, slot: \.awayCrestURL)
+        } else {
+            mu.miniScore.isHidden = true
+        }
+        mu.livePill.isHidden = !info.isLive
+        mu.leagueLabel.text = info.leagueText
+        // Spec TYPE (FIX-MU-3, finding 10): the eyebrow
+        // carries .15em tracking. Its font never changes
+        // after build, so the kern is applied here, where
+        // its text lands.
+        applyMUKern(mu.leagueLabel, factor: 0.15)
+        mu.titleLabel.text = info.titleText
+        mu.statusLabel.text = info.statusText
+        mu.timeLabel.text = info.clockText ?? ""
+        mu.liveStateLabel.text = info.isLive ? "Đang ở LIVE" : ""
+        updateMUQualityTitle()
+        rebuildMUChips()
+        view.setNeedsLayout()
+    }
+
+    /// A team's 3-letter chip abbreviation, derived from its
+    /// display name: one word → its first 3 letters; several
+    /// words → the first word's initial + the last word's
+    /// first two (Man Utd → MUN, Real Madrid → RMA).
+    static func abbreviation(_ name: String) -> String {
+        let words = name.split(separator: " ").filter { !$0.isEmpty }
+        guard let first = words.first else { return "" }
+        if words.count == 1 {
+            return String(first.prefix(3)).uppercased()
+        }
+        let last = words[words.count - 1]
+        return (String(first.prefix(1)) + String(last.prefix(2))).uppercased()
+    }
+
+    private func loadMUCrest(_ url: URL?, into imageView: UIImageView,
+                             slot: ReferenceWritableKeyPath<MUChromeViews, URL?>) {
+        guard let mu = muChrome else { return }
+        guard mu[keyPath: slot] != url else { return }
+        mu[keyPath: slot] = url
+        imageView.image = nil
+        guard let url else { return }
+        URLSession.shared.dataTask(with: url) { [weak self, weak imageView] data, _, _ in
+            guard let data, let image = UIImage(data: data) else { return }
+            DispatchQueue.main.async {
+                guard let self, let imageView,
+                      self.muChrome?[keyPath: slot] == url else { return }
+                imageView.image = image
+            }
+        }.resume()
+    }
+
+    /// Letter tracking for the UIKit chrome (spec TYPE,
+    /// FIX-MU-3 finding 10): display titles kern −.015em,
+    /// the league eyebrow +.15em — the same tracking the
+    /// SwiftUI surfaces apply via `.tracking`. The kern is
+    /// baked into an attributed string built from the
+    /// label's CURRENT font and colour, so callers invoke
+    /// this AFTER setting the label's font (the layouts do
+    /// for the title, whose size differs per orientation;
+    /// refreshMUChrome does for the eyebrow, whose font is
+    /// fixed at build). Rebuilt on every call, so text
+    /// updates never lose the tracking: the plain string is
+    /// read back off the label itself.
+    private func applyMUKern(_ label: UILabel, factor: CGFloat) {
+        guard let text = label.text, !text.isEmpty else {
+            label.attributedText = nil
+            return
+        }
+        let font = label.font ?? MUFont.uiBody(10)
+        label.attributedText = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: label.textColor ?? MUUIColor.cream,
+                .kern: factor * font.pointSize,
+            ])
+    }
+
+    private func updateMUQualityTitle() {
+        guard let mu = muChrome else { return }
+        let title = muQualityCap == 0 ? "Tự động" : (muQualityCap >= 5_000_000 ? "1080p" : "720p")
+        var config = mu.qualityButton.configuration
+        config?.title = title
+        mu.qualityButton.configuration = config
+    }
+
+    /// The source chip row: Vietnamese sources first (the
+    /// session's board ladder, in board order), English
+    /// after — the playing one in the design's selected
+    /// state (maroon fill, gold border, check).
+    private func rebuildMUChips() {
+        guard let mu = muChrome else { return }
+        for button in mu.chipButtons {
+            mu.chipsStack.removeArrangedSubview(button)
+            button.removeFromSuperview()
+        }
+        mu.chipButtons = []
+        var tag = 0
+        for channel in muSourcesVN {
+            let name = muCommentatorName(MatchTitle.clean(channel.title), group: channel.group)
+            let selected = channel.url == self.channel?.url
+            let button = makeMUChip(title: "\(name) · Việt", selected: selected, tag: tag)
+            tag += 1
+            mu.chipsStack.addArrangedSubview(button)
+            mu.chipButtons.append(button)
+        }
+        for meta in muSourcesEN {
+            let name = meta.competitionString ?? meta.channelHint ?? meta.displayName
+            let selected = muPlayingENID != nil && meta.id == muPlayingENID
+            let button = makeMUChip(title: "\(name) · Anh", selected: selected, tag: 1000 + tag)
+            tag += 1
+            mu.chipsStack.addArrangedSubview(button)
+            mu.chipButtons.append(button)
+        }
+        view.setNeedsLayout()
+    }
+
+    private func makeMUChip(title: String, selected: Bool, tag: Int) -> UIButton {
+        let button = UIButton(type: .system)
+        // Spec TYPE (FIX-MU-3, finding 9): player sources
+        // 11 portrait / 10 landscape, weight 400.
+        let chipFontSize: CGFloat = muChrome?.landscape == true ? 10 : 11
+        var config = UIButton.Configuration.filled()
+        config.title = (selected ? "✓ " : "") + title
+        config.baseForegroundColor = selected ? MUUIColor.cream : MUUIColor.secondary
+        config.baseBackgroundColor = selected ? MUUIColor.selectedFill : MUUIColor.panelAlt
+        config.cornerStyle = .fixed
+        config.background.cornerRadius = 10
+        config.background.strokeColor = selected ? MUUIColor.gold : MUUIColor.border
+        config.background.strokeWidth = 1
+        config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 11, bottom: 0, trailing: 11)
+        config.titleTextAttributesTransformer =
+            UIConfigurationTextAttributesTransformer { attributes in
+                var out = attributes
+                out.font = MUFont.uiBody(chipFontSize)
+                return out
+            }
+        button.configuration = config
+        button.tag = tag
+        button.addTarget(self, action: #selector(muChipTapped(_:)), for: .touchUpInside)
+        return button
+    }
+
+    // MARK: - Layout
+
+    /// Frame layout for both MU player pages. The video
+    /// layer's frame is set here (portrait: the design's
+    /// video block; landscape: full-bleed) — viewDidLayoutSubviews
+    /// routes here whenever the MU chrome is active, so a
+    /// rotation reflows between the two pages live.
+    func layoutMUChrome() {
+        guard let mu = muChrome else { return }
+        let bounds = view.bounds
+        let safe = view.safeAreaInsets
+        // FIX-MU-3 (finding 9): the chip font differs per
+        // orientation — when a rotation flips the page,
+        // rebuild the chips so they pick up the new size.
+        let isLandscape = bounds.width > bounds.height
+        if mu.landscape != isLandscape {
+            mu.landscape = isLandscape
+            rebuildMUChips()
+        }
+        if bounds.height >= bounds.width {
+            layoutMUPortrait(mu, bounds: bounds, safe: safe)
+        } else {
+            layoutMULandscape(mu, bounds: bounds, safe: safe)
+        }
+        spinner.center = CGPoint(x: videoView.frame.midX, y: videoView.frame.midY)
+    }
+
+    private func layoutMUPortrait(_ mu: MUChromeViews, bounds: CGRect, safe: UIEdgeInsets) {
+        mu.scrimTop.isHidden = true
+        mu.scrimBottom.isHidden = true
+        mu.footerLabel.isHidden = false
+        let w = bounds.width
+        let pad: CGFloat = 16
+        let top = safe.top
+
+        // Header row (56): name + note left, close top-right.
+        mu.nameLabel.frame = CGRect(x: pad, y: top + 4, width: w - pad - 48 - 24, height: 22)
+        mu.nameLabel.font = MUFont.uiBody(17, .semibold)
+        mu.noteLabel.frame = CGRect(x: pad, y: top + 28, width: w - pad - 48 - 24, height: 14)
+        mu.noteLabel.font = MUFont.uiBody(10)
+        closeButton.frame = CGRect(x: w - pad - 48, y: top + 4, width: 48, height: 48)
+
+        // Mini-score chip under the header (absent for a
+        // direct channel play — the video then moves up).
+        let chipH: CGFloat = mu.miniScore.isHidden ? 0 : 32
+        let chipY = top + 56 + 16
+        layoutMiniScore(mu, x: pad, y: chipY, height: 32, crest: 23, fontSize: 11)
+
+        // Video block: the spec's 390×276 at y159 on the
+        // reference screen — top = chip bottom + 8, height
+        // keeps the design's ratio.
+        let videoY = chipY + chipH + (mu.miniScore.isHidden ? 0 : 8)
+        var videoH = w * 276.0 / 390.0
+        // F-1 (REVIEW-MU2-LOOP2): the fixed stack below the
+        // video (block heights 279 + inter-block gaps 86,
+        // summed from the walk below — FIX-MU-3 findings
+        // 6+7 folded in: the source-area margin is the
+        // spec's 8, and the stack now ends with the footer's
+        // 30) overflows short viewports — on a 375×667 screen
+        // the source header lands at y≈634 and the chips row
+        // at y≈686–730, off-screen and unreachable (the page
+        // has no scroll container). When the full stack would
+        // pass the bottom safe edge, compress: cap the video
+        // height first, then tighten the inter-block gaps.
+        // At the 390×844 reference the stack ends at y800
+        // against a limit of 810, so nothing compresses and
+        // the spec geometry (videoY 159, height 276, every
+        // gap) is reproduced exactly.
+        var gapScale: CGFloat = 1
+        let lowerFixed: CGFloat = 20 + 40 + 15 + 14 + 28 + 44 + 44 + 44 + 30
+        let lowerGaps: CGFloat = 19 + 9 + 8 + 12 + 6 + 8 + 8 + 8 + 8
+        let bottomLimit = bounds.height - safe.bottom
+        let stackOverflow = videoY + videoH + lowerFixed + lowerGaps - bottomLimit
+        if stackOverflow > 0 {
+            // Cap the video, keeping 8 pt of air above the
+            // bottom edge; the video height floors at 120.
+            let cut = max(0, min(stackOverflow + 8, videoH - 120))
+            videoH -= cut
+            let remaining = videoY + videoH + lowerFixed + lowerGaps - bottomLimit
+            if remaining > 0 {
+                gapScale = max(0.35, (lowerGaps - remaining) / lowerGaps)
+            }
+        }
+        videoView.frame = CGRect(x: 0, y: videoY, width: w, height: videoH)
+        layoutTransport(mu, centre: CGPoint(x: w / 2, y: videoY + videoH / 2),
+                        playSize: 64, sideSize: 44, gap: 32)
+
+        // Lower block (gaps scale only under the F-1
+        // compression above; at gapScale 1 the advances are
+        // the original literals).
+        var y = videoY + videoH + 19 * gapScale
+        layoutEyebrowRow(mu, x: pad, y: y, width: w - pad * 2, titleSize: 32)
+        y += 20 + 9 * gapScale
+        mu.titleLabel.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: 40)
+        mu.titleLabel.font = MUFont.uiDisplay(32)
+        applyMUKern(mu.titleLabel, factor: -0.015)
+        y += 40 + 8 * gapScale
+        mu.statusLabel.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: 15)
+        y += 15 + 12 * gapScale
+        layoutTimeRow(mu, x: pad, y: y, width: w - pad * 2)
+        y += 14 + 6 * gapScale
+        layoutProgress(mu, x: pad, y: y, width: w - pad * 2)
+        y += 28 + 8 * gapScale
+        layoutToolbar(mu, x: pad, y: y, width: w - pad * 2)
+        // FIX-MU-3 (finding 6): the source area's margin-top
+        // is the spec's 8, not 14.
+        y += 44 + 8 * gapScale
+        layoutSourceHeader(mu, x: pad, y: y, width: w - pad * 2)
+        y += 44 + 8 * gapScale
+        layoutChips(mu, x: pad, y: y, width: w - pad * 2)
+        // FIX-MU-3 (finding 7): the footer hint under the
+        // chips — plain 9 pt text, min-height 30.
+        y += 44 + 8 * gapScale
+        mu.footerLabel.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: 30)
+    }
+
+    private func layoutMULandscape(_ mu: MUChromeViews, bounds: CGRect, safe: UIEdgeInsets) {
+        mu.scrimTop.isHidden = false
+        mu.scrimBottom.isHidden = false
+        // Spec: no portrait footer in the landscape page.
+        mu.footerLabel.isHidden = true
+        let w = bounds.width
+        let h = bounds.height
+        let insetX = safe.left + 12
+        let contentW = w - insetX * 2
+
+        videoView.frame = bounds
+        mu.scrimTop.frame = CGRect(x: 0, y: 0, width: w, height: 110)
+        mu.scrimBottom.frame = CGRect(x: 0, y: h - 170, width: w, height: 170)
+        for scrim in [mu.scrimTop, mu.scrimBottom] {
+            scrim.layer.sublayers?.first?.frame = scrim.bounds
+        }
+
+        // Header top-left; close top-right (spec: y12).
+        mu.nameLabel.frame = CGRect(x: insetX, y: 12, width: w - insetX * 2 - 60, height: 19)
+        mu.nameLabel.font = MUFont.uiBody(14, .semibold)
+        mu.noteLabel.frame = CGRect(x: insetX, y: 33, width: w - insetX * 2 - 60, height: 12)
+        mu.noteLabel.font = MUFont.uiBody(9)
+        closeButton.frame = CGRect(x: w - insetX - 48, y: 12, width: 48, height: 48)
+
+        layoutMiniScore(mu, x: insetX, y: 73, height: 28, crest: 20, fontSize: 11)
+        // Spec (FIX-MU-3, finding 8): transport top 109 —
+        // play 56, so the transport centre sits at y 137.
+        layoutTransport(mu, centre: CGPoint(x: w / 2, y: 109 + 28),
+                        playSize: 56, sideSize: 44, gap: 36)
+
+        // Bottom block, built up from the bottom edge:
+        // sources row, progress row, then title | toolbar.
+        let bottom = h - safe.bottom - 7
+        let chipsY = bottom - 44
+        layoutChips(mu, x: insetX + 106, y: chipsY, width: contentW - 106)
+        mu.allSourcesButton.frame = CGRect(x: insetX, y: chipsY, width: 94, height: 44)
+        mu.sourceLabel.isHidden = true
+        let progressY = chipsY - 12 - 28
+        layoutProgress(mu, x: insetX, y: progressY, width: contentW)
+        let timeY = progressY - 4 - 14
+        layoutTimeRow(mu, x: insetX, y: timeY, width: contentW)
+        let rowY = timeY - 10 - 62
+        // Title block (left half).
+        layoutEyebrowRow(mu, x: insetX, y: rowY, width: contentW / 2 - 12, titleSize: 25)
+        mu.titleLabel.frame = CGRect(x: insetX, y: rowY + 26, width: contentW / 2 - 12, height: 30)
+        mu.titleLabel.font = MUFont.uiDisplay(25)
+        applyMUKern(mu.titleLabel, factor: -0.015)
+        mu.statusLabel.frame = CGRect(x: insetX, y: rowY + 58, width: contentW / 2 - 12, height: 12)
+        mu.statusLabel.font = MUFont.uiBody(9)
+        // Toolbar (right half, right-aligned).
+        layoutToolbar(mu, x: insetX + contentW / 2 + 12, y: rowY + 9, width: contentW / 2 - 12)
+    }
+
+    private func layoutMiniScore(_ mu: MUChromeViews, x: CGFloat, y: CGFloat,
+                                 height: CGFloat, crest: CGFloat, fontSize: CGFloat) {
+        guard !mu.miniScore.isHidden else { return }
+        let pad: CGFloat = 7
+        let gap: CGFloat = 7
+        var cx = x + pad
+        let crestY = y + (height - crest) / 2
+        mu.miniHomeCrest.frame = CGRect(x: cx, y: crestY, width: crest, height: crest)
+        cx += crest + gap
+        mu.miniHomeAbbr.font = MUFont.uiBody(fontSize, .semibold)
+        let homeW = mu.miniHomeAbbr.intrinsicContentSize.width
+        mu.miniHomeAbbr.frame = CGRect(x: cx, y: y, width: homeW, height: height)
+        cx += homeW + gap
+        mu.miniScoreLabel.font = MUFont.uiBody(fontSize, .bold)
+        let scoreW = mu.miniScoreLabel.intrinsicContentSize.width + 12
+        mu.miniScoreLabel.frame = CGRect(x: cx, y: y + (height - 20) / 2, width: scoreW, height: 20)
+        cx += scoreW + gap
+        let awayW = mu.miniAwayAbbr.intrinsicContentSize.width
+        mu.miniAwayAbbr.frame = CGRect(x: cx, y: y, width: awayW, height: height)
+        cx += awayW + gap
+        mu.miniAwayCrest.frame = CGRect(x: cx, y: crestY, width: crest, height: crest)
+        cx += crest + gap
+        mu.miniClock.font = MUFont.uiBody(fontSize, .semibold)
+        let clockW = mu.miniClock.intrinsicContentSize.width
+        mu.miniClock.frame = CGRect(x: cx, y: y, width: clockW, height: height)
+        cx += clockW + pad
+        mu.miniScore.frame = CGRect(x: x, y: y, width: cx - x, height: height)
+    }
+
+    private func layoutTransport(_ mu: MUChromeViews, centre: CGPoint,
+                                 playSize: CGFloat, sideSize: CGFloat, gap: CGFloat) {
+        playPauseButton.frame = CGRect(x: centre.x - playSize / 2, y: centre.y - playSize / 2,
+                                       width: playSize, height: playSize)
+        playPauseButton.layer.cornerRadius = playSize / 2
+        let sideY = centre.y - sideSize / 2
+        mu.rewindButton.frame = CGRect(x: centre.x - playSize / 2 - gap - sideSize,
+                                       y: sideY, width: sideSize, height: sideSize)
+        mu.volumeButton.frame = CGRect(x: centre.x + playSize / 2 + gap,
+                                       y: sideY, width: sideSize, height: sideSize)
+    }
+
+    private func layoutEyebrowRow(_ mu: MUChromeViews, x: CGFloat, y: CGFloat,
+                                  width: CGFloat, titleSize: CGFloat) {
+        let pillW = mu.livePillLabel.intrinsicContentSize.width + 16
+        mu.livePill.frame = CGRect(x: x, y: y, width: mu.livePill.isHidden ? 0 : pillW, height: 20)
+        mu.livePillLabel.frame = CGRect(x: 8, y: 0, width: pillW - 16, height: 20)
+        let leagueX = x + (mu.livePill.isHidden ? 0 : pillW + 8)
+        mu.leagueLabel.frame = CGRect(x: leagueX, y: y, width: max(0, x + width - leagueX), height: 20)
+    }
+
+    private func layoutTimeRow(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
+        let liveW = mu.liveStateLabel.intrinsicContentSize.width
+        mu.timeLabel.frame = CGRect(x: x, y: y, width: width - liveW - 10, height: 14)
+        mu.liveStateLabel.frame = CGRect(x: x + width - liveW, y: y, width: liveW, height: 14)
+    }
+
+    /// The progress bar: these are live streams with no
+    /// seekable position, so the bar renders the live edge —
+    /// the red fill runs to the end, knob at the edge.
+    private func layoutProgress(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
+        let barY = y + 12
+        mu.progressTrack.frame = CGRect(x: x, y: barY, width: width, height: 4)
+        mu.progressFill.frame = CGRect(x: x, y: barY, width: width, height: 4)
+        mu.progressKnob.frame = CGRect(x: x + width - 12, y: barY - 4, width: 12, height: 12)
+    }
+
+    private func layoutToolbar(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
+        let h: CGFloat = 44
+        let iconW: CGFloat = 44
+        let gap: CGFloat = 7
+        let flexW = (width - iconW * 2 - gap * 3) / 2
+        mu.qualityButton.frame = CGRect(x: x, y: y, width: flexW, height: h)
+        mu.audioButton.frame = CGRect(x: x + flexW + gap, y: y, width: flexW, height: h)
+        mu.fillButton.frame = CGRect(x: x + flexW * 2 + gap * 2, y: y, width: iconW, height: h)
+        mu.moreButton.frame = CGRect(x: x + flexW * 2 + gap * 2 + iconW + gap, y: y, width: iconW, height: h)
+    }
+
+    private func layoutSourceHeader(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
+        mu.sourceLabel.isHidden = false
+        mu.sourceLabel.frame = CGRect(x: x, y: y, width: width - 120, height: 44)
+        mu.allSourcesButton.frame = CGRect(x: x + width - 120, y: y, width: 120, height: 44)
+    }
+
+    private func layoutChips(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
+        mu.chipsScroll.frame = CGRect(x: x, y: y, width: width, height: 44)
+        var totalW: CGFloat = 0
+        for button in mu.chipButtons {
+            let w = button.intrinsicContentSize.width
+            button.frame = CGRect(x: 0, y: 0, width: w, height: 44)
+            totalW += w + 8
+        }
+        mu.chipsStack.frame = CGRect(x: 0, y: 0, width: max(0, totalW - 8), height: 44)
+        mu.chipsScroll.contentSize = CGSize(width: max(0, totalW - 8), height: 44)
+    }
+
+    // MARK: - Actions
+
+    @objc func muChipTapped(_ sender: UIButton) {
+        // Tags (see rebuildMUChips): VN chips carry their
+        // ladder index; EN chips carry 1000 + the shared
+        // build counter, which had already counted the VN
+        // chips — so the EN index subtracts both back out.
+        if sender.tag < 1000 {
+            guard muSourcesVN.indices.contains(sender.tag) else { return }
+            onMUSelectVN?(muSourcesVN[sender.tag])
+        } else {
+            let enIndex = sender.tag - 1000 - muSourcesVN.count
+            guard muSourcesEN.indices.contains(enIndex) else { return }
+            onMUSelectEN?(muSourcesEN[enIndex])
+        }
+        showControls()
+    }
+
+    @objc func muAllSourcesTapped() {
+        onSourceSwitch?()
+        showControls()
+    }
+
+    @objc func muRewindTapped() {
+        guard let item = playerItem,
+              let range = item.seekableTimeRanges.last?.timeRangeValue else {
+            showControls()
+            return
+        }
+        let current = item.currentTime()
+        let target = CMTimeMaximum(range.start,
+                                   CMTimeSubtract(current, CMTime(seconds: 10, preferredTimescale: 600)))
+        if CMTimeCompare(target, current) < 0 {
+            player?.seek(to: target)
+        }
+        showControls()
+    }
+
+    @objc func muVolumeTapped() {
+        guard let player else { return }
+        player.isMuted.toggle()
+        muChrome?.volumeButton.setImage(
+            UIImage(systemName: player.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"),
+            for: .normal)
+        showControls()
+    }
+
+    /// Quality: a real rendition cap on the player item
+    /// (AVPlayerItem.preferredPeakBitRate) — Tự động lifts
+    /// it, 1080p / 720p cap the peak bit rate.
+    @objc func muQualityTapped() {
+        keepControlsVisible()
+        let sheet = UIAlertController(title: "Chất lượng", message: nil, preferredStyle: .actionSheet)
+        let options: [(String, Double)] = [("Tự động", 0), ("1080p", 6_000_000), ("720p", 2_200_000)]
+        for (label, cap) in options {
+            let action = UIAlertAction(
+                title: muQualityCap == cap ? "✓ \(label)" : label,
+                style: .default
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.muQualityCap = cap
+                self.playerItem?.preferredPeakBitRate = cap
+                self.updateMUQualityTitle()
+                self.showControls()
+            }
+            sheet.addAction(action)
+        }
+        sheet.addAction(UIAlertAction(title: "Huỷ", style: .cancel) { [weak self] _ in
+            self?.showControls()
+        })
+        sheet.popoverPresentationController?.sourceView = muChrome?.qualityButton
+        // F-2: an iPad outside-tap dismissal runs no action
+        // handler — the presentation delegate below releases
+        // the keepControlsVisible pin on that path too.
+        sheet.popoverPresentationController?.delegate = self
+        present(sheet, animated: true)
+    }
+
+    /// Audio / subtitles: the item's own media selection
+    /// groups, when the stream carries them (many live
+    /// streams carry a single audio and no subtitles — the
+    /// sheet then says so instead of inventing options).
+    @objc func muAudioTapped() {
+        guard let item = playerItem else { return }
+        keepControlsVisible()
+        let asset = item.asset
+        let sheet = UIAlertController(title: "Âm thanh / Phụ đề", message: nil, preferredStyle: .actionSheet)
+        var added = false
+        if let group = asset.mediaSelectionGroup(for: .audible), !group.options.isEmpty {
+            for option in group.options {
+                let selected = item.currentMediaSelection.selectedMediaOption(in: group) == option
+                sheet.addAction(UIAlertAction(
+                    title: (selected ? "✓ " : "") + "Tiếng: \(option.displayName)",
+                    style: .default
+                ) { [weak self] _ in
+                    item.select(option, in: group)
+                    self?.showControls()
+                })
+                added = true
+            }
+        }
+        if let group = asset.mediaSelectionGroup(for: .legible), !group.options.isEmpty {
+            sheet.addAction(UIAlertAction(title: "Phụ đề: Tắt", style: .default) { [weak self] _ in
+                item.select(nil, in: group)
+                self?.showControls()
+            })
+            for option in group.options {
+                let selected = item.currentMediaSelection.selectedMediaOption(in: group) == option
+                sheet.addAction(UIAlertAction(
+                    title: (selected ? "✓ " : "") + "Phụ đề: \(option.displayName)",
+                    style: .default
+                ) { [weak self] _ in
+                    item.select(option, in: group)
+                    self?.showControls()
+                })
+                added = true
+            }
+        }
+        if !added {
+            sheet.message = "Luồng này không có tuỳ chọn âm thanh / phụ đề."
+        }
+        sheet.addAction(UIAlertAction(title: "Huỷ", style: .cancel) { [weak self] _ in
+            self?.showControls()
+        })
+        sheet.popoverPresentationController?.sourceView = muChrome?.audioButton
+        // F-2: same popover-dismissal pin release as the
+        // quality sheet (see muQualityTapped).
+        sheet.popoverPresentationController?.delegate = self
+        present(sheet, animated: true)
+    }
+}
+
+/// F-2 (REVIEW-MU2-LOOP2): the MU quality/audio sheets pin
+/// the chrome via keepControlsVisible() while they are
+/// open, and on iPhone every exit runs an action handler
+/// that calls showControls() to re-arm the fade. On iPad
+/// the sheets are popovers, and an outside tap dismisses
+/// them WITHOUT running any action handler — the pin
+/// would hold the chrome over the playing video until the
+/// next unrelated interaction. This dismissal hook
+/// releases the pin on the interactive-dismissal path
+/// too, through the very same re-arm the iPhone exits
+/// use: showControls() funnels into scheduleControlsHide,
+/// whose firedReady / .playing guards make a redundant
+/// call (e.g. after an action handler already re-armed)
+/// a no-op.
+extension LivePlayerViewController: UIPopoverPresentationControllerDelegate {
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        showControls()
+    }
+}

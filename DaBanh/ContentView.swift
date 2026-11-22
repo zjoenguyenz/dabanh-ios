@@ -15,6 +15,11 @@ import SwiftUI
 /// full-screen with the store's source ladder.
 struct ContentView: View {
     @EnvironmentObject private var store: PlaylistStore
+    /// The selected theme (theme-mu): classic below is the
+    /// default and unchanged; the MU theme swaps the home for
+    /// MUHomeView and the board for the MU match detail. All
+    /// routing / presentation machinery is shared.
+    @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.scenePhase) private var scenePhase
     /// FIX-127 (owner order 2026-11-20 — "làm 1 lần hoàn
     /// tất ngay"): ONE presentation route for the link board
@@ -52,6 +57,19 @@ struct ContentView: View {
     @State private var playerEntry: FixtureEntry?
     /// The diagnostic-log sheet (1.24, LOG RETRIEVAL LAW).
     @State private var showDiagLog = false
+    /// The theme picker sheet (theme-mu), presented from the
+    /// header pill (classic home) and the MU home's theme
+    /// pill — both live in the root hierarchy, so the single
+    /// body-level sheet attachment hosts them.
+    @State private var showThemePicker = false
+    /// The theme picker as opened from inside the board
+    /// cover (the MU detail's theme button). FIX-MU-1 (F-1):
+    /// the cover is a separate presentation context, so it
+    /// carries its OWN state and its own sheet attachment in
+    /// muDetailPanel — one binding must never feed two hosts,
+    /// or the covered root host can queue a second
+    /// presentation of the picker over the home.
+    @State private var showThemePickerInCover = false
 
     private var liveChannels: [Channel] {
         store.channels.filter { LeagueClassifier.isLive($0) }
@@ -163,6 +181,31 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
 
+            if themeStore.isMU {
+                MUHomeView(
+                    nuvio: nuvio,
+                    onOpenFixture: { entry in
+                        present(.board(entry))
+                    },
+                    onPlayVNChannel: { channel in
+                        DiagLog.log("player",
+                                    "tap: channel '\(MatchTitle.clean(channel.title))' — direct play")
+                        playerEntry = nil
+                        let session = ResolveHub.shared.session(for: store.sources(for: channel))
+                        DiagLog.log("player",
+                                    "route set: player — VN direct '\(MatchTitle.clean(channel.title))'")
+                        present(.playVN(session: session, channel: channel))
+                    },
+                    onPlayENMeta: { meta in
+                        playerEntry = nil
+                        let session = nuvio.session(for: meta)
+                        DiagLog.log("player",
+                                    "route set: player — EN direct '\(meta.name)'")
+                        present(.playEN(session: session, meta: meta))
+                    },
+                    onOpenThemePicker: { showThemePicker = true },
+                    onShowLog: { showDiagLog = true })
+            } else {
             VStack(spacing: 0) {
                 header
                 if let message = store.statusMessage, !store.channels.isEmpty {
@@ -178,6 +221,7 @@ struct ContentView: View {
                 leagueChips
                 leagueList
             }
+            }
 
             if store.channels.isEmpty {
                 loadingOverlay
@@ -186,6 +230,9 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .task {
             await store.start()
+            // theme-mu: warm the shared wallpaper list early;
+            // the MU surfaces read it, classic never paints it.
+            Task { await MUWallpapers.refreshRemote() }
             // Pre-resolve the fixtures the first screen leads with
             // (the featured rail), so the likeliest first tap opens
             // on already-verified sources. ResolveHub bounds the
@@ -258,11 +305,23 @@ struct ContentView: View {
             // appear/disappear ordering of the swapped
             // PlayerView instances.
             if key != nil {
-                OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+                if themeStore.isMU {
+                    // MU carries portrait + landscape player
+                    // pages — rotation stays free (theme-mu).
+                    OrientationHelper.lock(.all)
+                } else {
+                    OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+                }
             }
         }
         .sheet(isPresented: $showDiagLog) {
             DiagLogView()
+        }
+        .sheet(isPresented: $showThemePicker) {
+            ThemePickerView()
+                .presentationDetents([.height(400)])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
         }
     }
 
@@ -279,7 +338,11 @@ struct ContentView: View {
     private var routeContent: some View {
         switch route {
         case .board(let entry):
-            boardPanel(entry)
+            if themeStore.isMU {
+                muDetailPanel(entry)
+            } else {
+                boardPanel(entry)
+            }
         case .playVN(let session, _):
             PlayerView(
                 session: session, headerEntry: playerEntry,
@@ -362,6 +425,72 @@ struct ContentView: View {
         }
     }
 
+
+    /// The MU match detail wearing the board route (theme-mu):
+    /// a full page in the cover (not the classic dimmed panel),
+    /// with the board's own play closures — the same DiagLog
+    /// lines, the same sessions, the same route flips — and
+    /// the board-open pre-resolve the classic panel performs.
+    private func muDetailPanel(_ entry: FixtureEntry) -> some View {
+        MUMatchDetailView(
+            entry: entry,
+            enMetas: enMetas(for: entry),
+            onPlayVN: { channel in
+                DiagLog.log("player",
+                            "tap: board pick '\(MatchTitle.clean(channel.title))' "
+                            + "host=\(channel.streamURL?.host ?? "?")")
+                playerEntry = entry
+                let session = ResolveHub.shared.session(
+                    for: store.rotatedSources(for: entry, chosen: channel))
+                DiagLog.log("player",
+                            "route set: player — VN '\(MatchTitle.clean(channel.title))'")
+                present(.playVN(session: session, channel: channel))
+            },
+            onPlayEN: { meta in
+                DiagLog.log("player",
+                            "tap: board pick EN '\(meta.name)'")
+                playerEntry = entry
+                let session = nuvio.session(for: meta)
+                DiagLog.log("player",
+                            "route set: player — EN '\(meta.name)'")
+                present(.playEN(session: session, meta: meta))
+            },
+            onOpenThemePicker: { showThemePickerInCover = true })
+        .sheet(isPresented: $showThemePickerInCover) {
+            ThemePickerView()
+                .presentationDetents([.height(400)])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+        }
+        .onAppear {
+            ResolveHub.shared.preresolve(
+                ladders: [store.sources(for: entry.channel)])
+        }
+    }
+
+    /// The theme pill (theme-mu): palette icon + the current
+    /// theme's name, in the header's mini-button chrome beside
+    /// Log — the classic home's entry to the picker. (The MU
+    /// home carries the design's own theme pill.)
+    private var headerThemeButton: some View {
+        Button {
+            showThemePicker = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "paintpalette")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(themeStore.themeID.pillName)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(BoardPalette.buttonText)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Capsule().fill(BoardPalette.buttonBG))
+            .overlay(Capsule().stroke(BoardPalette.buttonBorder, lineWidth: 1))
+        }
+        .accessibilityLabel("Đổi giao diện")
+    }
+
     // MARK: - Header
 
     /// The compact header (spec §0/§5.1-6): small logo +
@@ -399,6 +528,7 @@ struct ContentView: View {
             headerRefreshButton
             headerCheckButton
             headerLogButton
+            headerThemeButton
         }
     }
 
@@ -411,6 +541,7 @@ struct ContentView: View {
                 Spacer(minLength: 4)
                 headerClock
                 headerLogButton
+                headerThemeButton
             }
             HStack(alignment: .center, spacing: 8) {
                 headerSiteLink

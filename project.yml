@@ -46,6 +46,12 @@ targets:
       - DaBanh/ContentView.swift
       - DaBanh/MatchViews.swift
       - DaBanh/PlayerView.swift
+      - DaBanh/Theme.swift
+      - DaBanh/Wallpapers.swift
+      - DaBanh/MUHomeView.swift
+      - DaBanh/MUMatchDetailView.swift
+      - DaBanh/MUPlayerChrome.swift
+      - DaBanh/Fonts/BarlowCondensed-ExtraBold.ttf
       - DaBanh/NuvioAddon.swift
       - DaBanh/Assets.xcassets
     settings:
@@ -60,15 +66,17 @@ targets:
         # This target's own settings pair (from 1.18): it previously
         # inherited the project base (1.5/6), which never matched
         # its info.properties pair — the pair the device shows.
-        MARKETING_VERSION: "1.30"
-        CURRENT_PROJECT_VERSION: "31"
+        MARKETING_VERSION: "1.31"
+        CURRENT_PROJECT_VERSION: "32"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.30"
-        CFBundleVersion: "31"
+        CFBundleShortVersionString: "1.31"
+        CFBundleVersion: "32"
+        UIAppFonts:
+          - BarlowCondensed-ExtraBold.ttf
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio

@@ -5,11 +5,17 @@ import UIKit
 struct DaBanhApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = PlaylistStore()
+    /// The selected theme (theme-mu): classic by default,
+    /// persisted in UserDefaults; injected app-wide so the
+    /// header pill, the MU surfaces and the player all read
+    /// the one selection.
+    @StateObject private var themeStore = ThemeStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(themeStore)
                 .preferredColorScheme(.dark)
         }
     }
