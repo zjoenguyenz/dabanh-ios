@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T23:37:20Z",
+  "generatedAt": "2026-11-22T23:39:38Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -367,6 +367,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-22T23:36:26Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "run-LP5uCGw",
+          "label": "USA Sports",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:38:44Z"
         }
       ]
     },
