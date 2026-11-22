@@ -398,7 +398,7 @@ extension LivePlayerViewController {
             mu.miniAwayAbbr.text = Self.abbreviation(away)
             mu.miniScoreLabel.text = info.scoreText ?? "VS"
             mu.miniClock.text = info.clockText ?? ""
-            loadMUCrest(info.homeCrest, into: mu.miniHomeCrest, slot: \.homeCrestURL)
+            loadMUCrest(info.homeCrest, into: mu.miniHomeCrest)
         } else {
             mu.miniScore.isHidden = true
         }
@@ -453,18 +453,29 @@ extension LivePlayerViewController {
         return (String(first.prefix(1)) + String(last.prefix(2))).uppercased()
     }
 
-    private func loadMUCrest(_ url: URL?, into imageView: UIImageView,
-                             slot: ReferenceWritableKeyPath<MUChromeViews, URL?>) {
+    /// FIX-MU-7 (run #85, FL-395 third variant): the crest
+    /// slot is no longer passed as a key path — a
+    /// ReferenceWritableKeyPath into the @MainActor
+    /// MUChromeViews is not Sendable, so capturing it in
+    /// the dataTask completion and re-using it inside the
+    /// main-actor closure was a Swift 6 sending error
+    /// ("sending 'slot' risks causing data races"). The
+    /// function has exactly one call site (the mini home
+    /// crest; the away crest was removed in FIX-MU-5
+    /// #122), so it addresses homeCrestURL directly and
+    /// no key path ever crosses an isolation boundary.
+    /// Dedupe + staleness semantics are unchanged.
+    private func loadMUCrest(_ url: URL?, into imageView: UIImageView) {
         guard let mu = muChrome else { return }
-        guard mu[keyPath: slot] != url else { return }
-        mu[keyPath: slot] = url
+        guard mu.homeCrestURL != url else { return }
+        mu.homeCrestURL = url
         imageView.image = nil
         guard let url else { return }
         URLSession.shared.dataTask(with: url) { [weak self, weak imageView] data, _, _ in
             guard let data, let image = UIImage(data: data) else { return }
             DispatchQueue.main.async {
                 guard let self, let imageView,
-                      self.muChrome?[keyPath: slot] == url else { return }
+                      self.muChrome?.homeCrestURL == url else { return }
                 imageView.image = image
             }
         }.resume()
