@@ -785,7 +785,7 @@ struct HighlightPlayerView: View {
                 )
                 .contentShape(Circle())
         }
-        .buttonStyle(isMU ? AnyButtonStyle(MUPressButtonStyle()) : AnyButtonStyle(PlainButtonStyle()))
+        .modifier(HighlightCardButtonStyle(isMU: isMU))
         .accessibilityLabel("Đóng")
     }
 
@@ -889,7 +889,7 @@ struct HighlightPlayerView: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
-        .buttonStyle(isMU ? AnyButtonStyle(MUPressButtonStyle()) : AnyButtonStyle(PlainButtonStyle()))
+        .modifier(HighlightCardButtonStyle(isMU: isMU))
     }
 
     private func chipFill(selected: Bool) -> Color {
@@ -934,7 +934,7 @@ struct HighlightPlayerView: View {
                     )
                     .contentShape(RoundedRectangle(cornerRadius: 10))
                 }
-                .buttonStyle(isMU ? AnyButtonStyle(MUPressButtonStyle()) : AnyButtonStyle(PlainButtonStyle()))
+                .modifier(HighlightCardButtonStyle(isMU: isMU))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -972,15 +972,21 @@ struct HighlightPlayerView: View {
     }
 }
 
-/// A ButtonStyle type-eraser for the themed branches above
-/// (the two themes use different concrete styles).
-private struct AnyButtonStyle: ButtonStyle {
-    private let make: (Configuration) -> AnyView
-    init<S: ButtonStyle>(_ style: S) {
-        make = { AnyView(style.makeBody(configuration: $0)) }
-    }
-    func makeBody(configuration: Configuration) -> some View {
-        make(configuration)
+/// Applies the themed button style for the player chrome
+/// above: the MU press style under the MU family, the plain
+/// style otherwise. A branch modifier, NOT a type-eraser:
+/// each branch keeps its concrete style — the plain style
+/// is a PrimitiveButtonStyle, which no ButtonStyle eraser
+/// can wrap (CI run #89; FL-403: check the protocol FAMILY
+/// before type-erasing a style).
+private struct HighlightCardButtonStyle: ViewModifier {
+    let isMU: Bool
+    func body(content: Content) -> some View {
+        if isMU {
+            content.buttonStyle(MUPressButtonStyle())
+        } else {
+            content.buttonStyle(.plain)
+        }
     }
 }
 
