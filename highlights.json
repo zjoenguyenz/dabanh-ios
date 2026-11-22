@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T22:39:37Z",
+  "generatedAt": "2026-11-22T23:09:27Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -467,6 +467,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-22T20:22:21Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "pIpEIUUys9A",
+          "label": "NBC Sports",
+          "official": true,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:08:50Z"
         }
       ]
     },
