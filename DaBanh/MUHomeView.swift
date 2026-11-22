@@ -210,16 +210,27 @@ struct MUHomeView: View {
             // its mask fading to transparent at the bottom.
             // No art loaded → the flat bg alone, as before.
             if let artURL {
-                AsyncImage(url: artURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        Color.clear
-                    }
-                }
+                // FIX-131 (DB-14/FL-396): the image lives in the
+                // BACKGROUND of a sized clear base. Background
+                // content is sized BY the base and can never
+                // report a size back, so the remote image's
+                // intrinsic size stays out of layout negotiation
+                // (the bare AsyncImage's aspect-fill size —
+                // 3840×(380/2160) ≈ 676 pt — was widening this
+                // root ZStack past the portrait screen).
+                Color.clear
                 .frame(maxWidth: .infinity)
                 .frame(height: 380)
+                .background {
+                    AsyncImage(url: artURL) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                        default:
+                            Color.clear
+                        }
+                    }
+                }
                 .clipped()
                 .opacity(0.15)
                 .mask(
@@ -790,14 +801,22 @@ struct MUFixtureCard: View {
         ZStack {
             MUTokens.featuredBase
             if let artURL {
-                AsyncImage(url: artURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        Color.clear
+                // FIX-131 (DB-14/FL-396): same inert pattern as
+                // the board backdrop — the image sits in the
+                // background of a clear layer sized by this
+                // ZStack, so its intrinsic size cannot inflate
+                // the card.
+                Color.clear
+                    .background {
+                        AsyncImage(url: artURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().scaledToFill()
+                            default:
+                                Color.clear
+                            }
+                        }
                     }
-                }
             }
             LinearGradient(
                 colors: [MUTokens.featuredGradientTop, MUTokens.featuredGradientBottom],

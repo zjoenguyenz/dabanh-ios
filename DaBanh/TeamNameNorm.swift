@@ -656,6 +656,33 @@ enum TeamNameNorm {
         "ksc": "karlsruher",
         "sarpsborg ff": "sarpsborg",
         "man united": "manchester united",
+        // FIX-131 (2026-11-22, DB-15 / FL-397) — measured on
+        // the live playlist of 2026-11-22 (DIAG-131): one
+        // Indonesian Super League fixture (Isenmulang Kalteng
+        // vs Borneo FC Samarinda, 15:30 22/11) is written
+        // FIVE ways across its 12 listings — "Borneo",
+        // "Borneo FC", "Borneo Samarinda", "Borneo FC
+        // Samarinda", "Pusamania Borneo" / "Pusamania Borneo
+        // FC" — and keyed as three fixtures with divergent
+        // states. "Borneo" and "Borneo FC" already land on
+        // the bare stem (the fc drops as filler); the two
+        // entries below close the remaining spellings onto
+        // it. Pusamania is the club's own former name
+        // (Pusamania Borneo FC), not a second club; FotMob
+        // itself files the club as "Borneo Samarinda".
+        // - "asan mugunghwa" → "chungnam asan": the same
+        //   playlist carries one K League 2 fixture (Seoul
+        //   E-Land vs Asan, 14:30 22/11) under both the
+        //   club's pre-2020 name (the Iron Man listing) and
+        //   its current name "Chungnam Asan" (the TOM
+        //   listings), and every feed files it under the
+        //   current name — the old-name group could bind no
+        //   state and rendered "VS" under a LIVE pill. The
+        //   bare token "asan" is deliberately NOT aliased:
+        //   only the full old name maps.
+        "borneo samarinda": "borneo",
+        "pusamania borneo": "borneo",
+        "asan mugunghwa": "chungnam asan",
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,

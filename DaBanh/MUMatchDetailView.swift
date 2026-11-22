@@ -255,14 +255,22 @@ struct MUMatchDetailView: View {
         ZStack {
             MUTokens.featuredBase
             if let artURL {
-                AsyncImage(url: artURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        Color.clear
+                // FIX-131 (DB-14/FL-396): same inert pattern as
+                // the board backdrop — the image sits in the
+                // background of a clear layer sized by this
+                // ZStack, so its intrinsic size cannot inflate
+                // the hero.
+                Color.clear
+                    .background {
+                        AsyncImage(url: artURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().scaledToFill()
+                            default:
+                                Color.clear
+                            }
+                        }
                     }
-                }
             }
             LinearGradient(
                 colors: [MUTokens.bg.opacity(0.25), MUTokens.bg.opacity(0.88)],
