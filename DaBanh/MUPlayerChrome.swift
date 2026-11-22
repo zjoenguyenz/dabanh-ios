@@ -33,33 +33,46 @@ private func muUIColor(_ hex: UInt32, alpha: CGFloat = 1) -> UIColor {
             alpha: alpha)
 }
 
+/// The UIKit rendering of MURawPalette.current (FIX-MU-5,
+/// item G): the same raw table MUTokens renders, so the
+/// player chrome follows the active MU palette (drawing /
+/// MU Wally) exactly as the SwiftUI surfaces do. Computed
+/// per access; the chrome is built once per presentation
+/// and the theme cannot change while it is up.
 private enum MUUIColor {
-    static let bg = muUIColor(0x0B0E13)
-    static let card = muUIColor(0x171B22)
-    static let red = muUIColor(0xDA291C)
-    static let gold = muUIColor(0xC9A86A)
-    static let cream = muUIColor(0xF2E6C8)
-    static let scoreBright = muUIColor(0xFFF4E7)
-    static let secondary = muUIColor(0xA9ADB7)
-    static let border = muUIColor(0x30343D)
-    static let selectedFill = muUIColor(0x3A211F)
-    static let panelAlt = muUIColor(0x20252E)
+    static var bg: UIColor { muUIColor(MURawPalette.current.bg) }
+    static var card: UIColor { muUIColor(MURawPalette.current.card) }
+    static var red: UIColor { muUIColor(MURawPalette.current.red) }
+    static var gold: UIColor { muUIColor(MURawPalette.current.gold) }
+    static var cream: UIColor { muUIColor(MURawPalette.current.cream) }
+    static var scoreBright: UIColor { muUIColor(MURawPalette.current.scoreBright) }
+    static var secondary: UIColor { muUIColor(MURawPalette.current.secondary) }
+    static var border: UIColor {
+        muUIColor(MURawPalette.current.border,
+                  alpha: CGFloat(MURawPalette.current.borderAlpha))
+    }
+    static var selectedFill: UIColor { muUIColor(MURawPalette.current.selectedFill) }
+    static var panelAlt: UIColor { muUIColor(MURawPalette.current.panelAlt) }
 }
 
 /// The MU chrome's view refs, held by the view controller in
 /// one box (extensions cannot add stored properties).
+/// @MainActor (FIX-MU-4): every stored view is created by a
+/// main-actor-isolated UIKit initializer, so the box itself
+/// is main-actor isolated — it is built and touched only
+/// from LivePlayerViewController (a UIViewController, hence
+/// main-actor) methods and handlers.
+@MainActor
 final class MUChromeViews {
     let nameLabel = UILabel()
     let noteLabel = UILabel()
     let miniScore = UIView()
     let miniHomeCrest = UIImageView()
-    let miniAwayCrest = UIImageView()
     let miniHomeAbbr = UILabel()
     let miniAwayAbbr = UILabel()
     let miniScoreLabel = UILabel()
     let miniClock = UILabel()
     var homeCrestURL: URL?
-    var awayCrestURL: URL?
     let rewindButton = UIButton(type: .system)
     let volumeButton = UIButton(type: .system)
     let livePill = UIView()
@@ -69,6 +82,8 @@ final class MUChromeViews {
     let statusLabel = UILabel()
     let timeLabel = UILabel()
     let liveStateLabel = UILabel()
+    /// The broadcast glyph before "Đang ở LIVE" (#137).
+    let liveStateIcon = UIImageView()
     let progressTrack = UIView()
     let progressFill = UIView()
     let progressKnob = UIView()
@@ -135,8 +150,15 @@ extension LivePlayerViewController {
 
         // Centre play/pause: the design's cream disc with an
         // ink glyph (64 portrait / 56 landscape — the frame
-        // and radius are set in layoutMUChrome).
+        // and radius are set in layoutMUChrome). FIX-MU-5
+        // (#128): the transport glyph sizes are the spec's —
+        // play 28, rewind 22, volume 23 — applied as the
+        // buttons' preferred symbol configuration, so the
+        // size survives the shared code's play/pause image
+        // swaps (a plain setImage would reset it).
         playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+        playPauseButton.preferredSymbolConfiguration =
+            UIImage.SymbolConfiguration(pointSize: 28)
         playPauseButton.tintColor = MUUIColor.bg
         playPauseButton.backgroundColor = MUUIColor.cream
         playPauseButton.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
@@ -164,7 +186,9 @@ extension LivePlayerViewController {
         mu.nameLabel.lineBreakMode = .byTruncatingTail
         controlsView.addSubview(mu.nameLabel)
         mu.noteLabel.font = MUFont.uiBody(10)
-        mu.noteLabel.textColor = MUUIColor.secondary
+        // FIX-MU-5 (#118): the note wears gold (the audit's
+        // reading of the drawing), in both orientations.
+        mu.noteLabel.textColor = MUUIColor.gold
         mu.noteLabel.lineBreakMode = .byTruncatingTail
         controlsView.addSubview(mu.noteLabel)
 
@@ -174,7 +198,9 @@ extension LivePlayerViewController {
         mu.miniScore.layer.borderWidth = 1
         mu.miniScore.layer.borderColor = MUUIColor.border.cgColor
         controlsView.addSubview(mu.miniScore)
-        for crest in [mu.miniHomeCrest, mu.miniAwayCrest] {
+        // FIX-MU-5 (#122): the mini-score chip carries the
+        // HOME crest only — the away crest is not drawn.
+        for crest in [mu.miniHomeCrest] {
             crest.contentMode = .scaleAspectFit
             mu.miniScore.addSubview(crest)
         }
@@ -183,7 +209,8 @@ extension LivePlayerViewController {
             abbr.textColor = MUUIColor.cream
             mu.miniScore.addSubview(abbr)
         }
-        mu.miniScoreLabel.font = MUFont.uiBody(11, .bold)
+        // FIX-MU-5 (#123): the score label is semibold (600).
+        mu.miniScoreLabel.font = MUFont.uiBody(11, .semibold)
         mu.miniScoreLabel.textColor = MUUIColor.bg
         mu.miniScoreLabel.backgroundColor = MUUIColor.cream
         mu.miniScoreLabel.textAlignment = .center
@@ -208,6 +235,14 @@ extension LivePlayerViewController {
         }
         mu.rewindButton.addTarget(self, action: #selector(muRewindTapped), for: .touchUpInside)
         mu.volumeButton.addTarget(self, action: #selector(muVolumeTapped), for: .touchUpInside)
+        // FIX-MU-5 (#128): the spec's transport glyph sizes
+        // (rewind 22, volume 23) as preferred symbol
+        // configurations — they survive the shared code's
+        // mute/volume image swaps.
+        mu.rewindButton.preferredSymbolConfiguration =
+            UIImage.SymbolConfiguration(pointSize: 22)
+        mu.volumeButton.preferredSymbolConfiguration =
+            UIImage.SymbolConfiguration(pointSize: 23)
 
         // Lower block: LIVE pill + league eyebrow, title,
         // status, time row, progress, toolbar, sources.
@@ -237,6 +272,14 @@ extension LivePlayerViewController {
         mu.liveStateLabel.font = MUFont.uiBody(10, .medium)
         mu.liveStateLabel.textColor = MUUIColor.cream
         controlsView.addSubview(mu.liveStateLabel)
+        // FIX-MU-5 (#137): the broadcast glyph sits before
+        // "Đang ở LIVE", tinted with the label.
+        mu.liveStateIcon.image = UIImage(
+            systemName: "antenna.radiowaves.left.and.right")
+        mu.liveStateIcon.tintColor = MUUIColor.cream
+        mu.liveStateIcon.contentMode = .scaleAspectFit
+        mu.liveStateIcon.isHidden = true
+        controlsView.addSubview(mu.liveStateIcon)
         mu.progressTrack.backgroundColor = MUUIColor.border
         mu.progressTrack.layer.cornerRadius = 2
         controlsView.addSubview(mu.progressTrack)
@@ -258,8 +301,11 @@ extension LivePlayerViewController {
         mu.fillButton.addTarget(self, action: #selector(toggleFill), for: .touchUpInside)
         controlsView.addSubview(mu.fillButton)
         configureMUChip(mu.moreButton, icon: "ellipsis", title: nil)
-        mu.moreButton.accessibilityLabel = "Hình trong hình"
-        mu.moreButton.addTarget(self, action: #selector(togglePiP), for: .touchUpInside)
+        // FIX-MU-5 (#141): the ••• button opens the MU More
+        // sheet (its old direct-PiP action lives on inside
+        // the sheet as one of its rows).
+        mu.moreButton.accessibilityLabel = "Thêm"
+        mu.moreButton.addTarget(self, action: #selector(muMoreTapped), for: .touchUpInside)
         controlsView.addSubview(mu.moreButton)
 
         mu.sourceLabel.font = MUFont.uiBody(11)
@@ -348,11 +394,16 @@ extension LivePlayerViewController {
             mu.miniScoreLabel.text = info.scoreText ?? "VS"
             mu.miniClock.text = info.clockText ?? ""
             loadMUCrest(info.homeCrest, into: mu.miniHomeCrest, slot: \.homeCrestURL)
-            loadMUCrest(info.awayCrest, into: mu.miniAwayCrest, slot: \.awayCrestURL)
         } else {
             mu.miniScore.isHidden = true
         }
         mu.livePill.isHidden = !info.isLive
+        // FIX-MU-5 (#132): the pill carries the live minute
+        // when the refresh data has one — the clock text IS
+        // the minute string ("67'") for a live fixture; any
+        // other clock wording (half-time, a badge) keeps the
+        // plain LIVE form.
+        mu.livePillLabel.text = Self.livePillText(clock: info.clockText)
         mu.leagueLabel.text = info.leagueText
         // Spec TYPE (FIX-MU-3, finding 10): the eyebrow
         // carries .15em tracking. Its font never changes
@@ -363,9 +414,24 @@ extension LivePlayerViewController {
         mu.statusLabel.text = info.statusText
         mu.timeLabel.text = info.clockText ?? ""
         mu.liveStateLabel.text = info.isLive ? "Đang ở LIVE" : ""
+        // FIX-MU-5 (#137): the broadcast glyph rides with
+        // the live-state label; layoutTimeRow reserves its
+        // width only while it is visible.
+        mu.liveStateIcon.isHidden = !info.isLive
         updateMUQualityTitle()
         rebuildMUChips()
         view.setNeedsLayout()
+    }
+
+    /// FIX-MU-5 (#132): "LIVE · 67'" when the clock text is
+    /// a live minute (digits + the trailing apostrophe the
+    /// feeds render), else the plain "● LIVE".
+    private static func livePillText(clock: String?) -> String {
+        if let clock, clock.hasSuffix("'"),
+           clock.contains(where: \.isNumber) {
+            return "LIVE · \(clock)"
+        }
+        return "● LIVE"
     }
 
     /// A team's 3-letter chip abbreviation, derived from its
@@ -673,15 +739,16 @@ extension LivePlayerViewController {
         let homeW = mu.miniHomeAbbr.intrinsicContentSize.width
         mu.miniHomeAbbr.frame = CGRect(x: cx, y: y, width: homeW, height: height)
         cx += homeW + gap
-        mu.miniScoreLabel.font = MUFont.uiBody(fontSize, .bold)
+        // FIX-MU-5 (#123): semibold (600), as at build.
+        mu.miniScoreLabel.font = MUFont.uiBody(fontSize, .semibold)
         let scoreW = mu.miniScoreLabel.intrinsicContentSize.width + 12
         mu.miniScoreLabel.frame = CGRect(x: cx, y: y + (height - 20) / 2, width: scoreW, height: 20)
         cx += scoreW + gap
         let awayW = mu.miniAwayAbbr.intrinsicContentSize.width
         mu.miniAwayAbbr.frame = CGRect(x: cx, y: y, width: awayW, height: height)
         cx += awayW + gap
-        mu.miniAwayCrest.frame = CGRect(x: cx, y: crestY, width: crest, height: crest)
-        cx += crest + gap
+        // FIX-MU-5 (#122): no away crest segment — the clock
+        // follows the away abbreviation directly.
         mu.miniClock.font = MUFont.uiBody(fontSize, .semibold)
         let clockW = mu.miniClock.intrinsicContentSize.width
         mu.miniClock.frame = CGRect(x: cx, y: y, width: clockW, height: height)
@@ -712,8 +779,15 @@ extension LivePlayerViewController {
 
     private func layoutTimeRow(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
         let liveW = mu.liveStateLabel.intrinsicContentSize.width
-        mu.timeLabel.frame = CGRect(x: x, y: y, width: width - liveW - 10, height: 14)
-        mu.liveStateLabel.frame = CGRect(x: x + width - liveW, y: y, width: liveW, height: 14)
+        // FIX-MU-5 (#137): the broadcast glyph (14 + a 5 gap)
+        // is reserved in front of the label only while it is
+        // visible — hidden, the row is byte-for-byte the old
+        // accounting.
+        let iconW: CGFloat = mu.liveStateIcon.isHidden ? 0 : 14 + 5
+        mu.timeLabel.frame = CGRect(x: x, y: y, width: width - liveW - iconW - 10, height: 14)
+        let liveX = x + width - liveW - iconW
+        mu.liveStateIcon.frame = CGRect(x: liveX, y: y, width: 14, height: 14)
+        mu.liveStateLabel.frame = CGRect(x: liveX + iconW, y: y, width: liveW, height: 14)
     }
 
     /// The progress bar: these are live streams with no
@@ -805,6 +879,46 @@ extension LivePlayerViewController {
     /// Quality: a real rendition cap on the player item
     /// (AVPlayerItem.preferredPeakBitRate) — Tự động lifts
     /// it, 1080p / 720p cap the peak bit rate.
+    /// FIX-MU-5 (#141): the ••• button's More sheet — the
+    /// design's overflow menu, following the quality/audio
+    /// pattern (action sheet, controls pinned while it is
+    /// up, the popover delegate re-arms on an iPad
+    /// outside-tap dismissal). Every row rehoused here runs
+    /// the same action its own control runs — including PiP,
+    /// which the ••• button used to toggle directly.
+    @objc func muMoreTapped() {
+        keepControlsVisible()
+        let sheet = UIAlertController(title: nil, message: nil,
+                                      preferredStyle: .actionSheet)
+        if showsSourceSwitch {
+            sheet.addAction(UIAlertAction(title: "Nguồn phát", style: .default) { [weak self] _ in
+                self?.onSourceSwitch?()
+                self?.showControls()
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Chất lượng", style: .default) { [weak self] _ in
+            self?.muQualityTapped()
+        })
+        sheet.addAction(UIAlertAction(title: "Âm thanh & phụ đề", style: .default) { [weak self] _ in
+            self?.muAudioTapped()
+        })
+        sheet.addAction(UIAlertAction(title: "Toàn màn hình", style: .default) { [weak self] _ in
+            self?.toggleFill()
+        })
+        sheet.addAction(UIAlertAction(title: "Hình trong hình", style: .default) { [weak self] _ in
+            self?.togglePiP()
+        })
+        sheet.addAction(UIAlertAction(title: "Huỷ", style: .cancel) { [weak self] _ in
+            self?.showControls()
+        })
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = muChrome?.moreButton ?? closeButton
+            popover.sourceRect = (muChrome?.moreButton ?? closeButton).bounds
+            popover.delegate = self
+        }
+        present(sheet, animated: true)
+    }
+
     @objc func muQualityTapped() {
         keepControlsVisible()
         let sheet = UIAlertController(title: "Chất lượng", message: nil, preferredStyle: .actionSheet)
@@ -843,7 +957,7 @@ extension LivePlayerViewController {
         let asset = item.asset
         let sheet = UIAlertController(title: "Âm thanh / Phụ đề", message: nil, preferredStyle: .actionSheet)
         var added = false
-        if let group = asset.mediaSelectionGroup(for: .audible), !group.options.isEmpty {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .audible), !group.options.isEmpty {
             for option in group.options {
                 let selected = item.currentMediaSelection.selectedMediaOption(in: group) == option
                 sheet.addAction(UIAlertAction(
@@ -856,7 +970,7 @@ extension LivePlayerViewController {
                 added = true
             }
         }
-        if let group = asset.mediaSelectionGroup(for: .legible), !group.options.isEmpty {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible), !group.options.isEmpty {
             sheet.addAction(UIAlertAction(title: "Phụ đề: Tắt", style: .default) { [weak self] _ in
                 item.select(nil, in: group)
                 self?.showControls()

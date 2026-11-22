@@ -630,6 +630,32 @@ enum TeamNameNorm {
         "real betis balompie": "real betis",
         "stade rennais": "rennes",
         "rc lens": "lens",
+        // FIX-MU-5 (item F, 2026-11-22) — the tvOS 1.7.3 alias
+        // set (REGRESSION-20261122-ANALYSIS.md), diffed against
+        // this table: all 20 were missing here. Same clubs,
+        // same whole-name shape; the corpus127 harness verdict
+        // for this exact table state is in
+        // theme-mu/FIX-MU-5-REPORT.md.
+        "ai cap": "egypt",
+        "den haag": "ado den haag",
+        "remo belem": "remo",
+        "atletico paranaense": "athletico",
+        "athletico paranaense": "athletico",
+        "celta vigo b": "celta fortuna",
+        "rc celta fortuna": "celta fortuna",
+        "erzurum bb": "erzurumspor",
+        "sassuolo calcio": "sassuolo",
+        "u sassuolo calcio": "sassuolo",
+        "hamburger sv": "hamburger",
+        "hamburg sv": "hamburger",
+        "juventus f c": "juventus",
+        "venezia f c": "venezia",
+        "sg dynamo dresden": "dynamo dresden",
+        "kamatamare": "kamatamare sanuki",
+        "union saint gilloise": "union st gilloise",
+        "ksc": "karlsruher",
+        "sarpsborg ff": "sarpsborg",
+        "man united": "manchester united",
     ]
 
     /// Trailing city qualifiers (step 7 — measured 2026-11-20,

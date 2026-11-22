@@ -318,8 +318,8 @@ struct ContentView: View {
             DiagLogView()
         }
         .sheet(isPresented: $showThemePicker) {
-            ThemePickerView()
-                .presentationDetents([.height(400)])
+            MUSettingsView()
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
         }
@@ -457,8 +457,8 @@ struct ContentView: View {
             },
             onOpenThemePicker: { showThemePickerInCover = true })
         .sheet(isPresented: $showThemePickerInCover) {
-            ThemePickerView()
-                .presentationDetents([.height(400)])
+            MUSettingsView()
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
         }

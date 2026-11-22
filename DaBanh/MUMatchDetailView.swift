@@ -1,10 +1,13 @@
 import SwiftUI
 
 /// The Manchester United match detail (theme-mu): the
-/// approved design's source-first page — title bar, the
-/// score block over stadium artwork, "CHỌN NGUỒN PHÁT" with
-/// the Vietnamese group above the English group, and the
-/// fixed bottom CTA.
+/// approved design's page — title bar, the score block over
+/// stadium artwork, and the fixed bottom CTA. Source
+/// selection follows the owner's 2026-11-22 01:50 ruling
+/// (FIX-MU-5, item B): ONE small button under the hero
+/// opens the source list as a sheet — the drawing's list
+/// itself (Vietnamese group above English, rows as drawn)
+/// lives in that sheet, not on the page.
 ///
 /// Behaviour follows leader decision D-6 (the 1.30 one-tap
 /// law outranks the mock's two-step): tapping a source row
@@ -18,6 +21,7 @@ import SwiftUI
 /// NEVER filtered out of its group.
 struct MUMatchDetailView: View {
     @EnvironmentObject private var store: PlaylistStore
+    @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.dismiss) private var dismiss
     let entry: FixtureEntry
     let enMetas: [NuvioMeta]
@@ -34,6 +38,10 @@ struct MUMatchDetailView: View {
         case en(String)   // meta id
     }
     @State private var selected: SourceID?
+    /// FIX-MU-5 (item B): the source list lives behind the
+    /// one small button now (owner ruling 2026-11-22 01:50
+    /// CST) — this presents it as a sheet.
+    @State private var showSourceSheet = false
 
     private var ladder: [Channel] { store.sources(for: entry.channel) }
 
@@ -58,6 +66,19 @@ struct MUMatchDetailView: View {
     /// not outrank a playable EN one — VN failover cannot
     /// cross into the Nuvio EN ladder.)
     private var defaultSelection: SourceID? {
+        // FIX-MU-5 (item A, Phát lại): the preferred
+        // commentary language's group is tried FIRST for the
+        // default selection only — the groups' DISPLAY order
+        // (VN above EN) never changes, and the D-6 order
+        // within each language is untouched.
+        if MUPlaybackPrefs.lang == "en" {
+            if let first = enMetas.first { return .en(first.id) }
+            if let first = ladder.first(where: { !isUnavailable($0) }) {
+                return .vn(first.url)
+            }
+            if let first = ladder.first { return .vn(first.url) }
+            return nil
+        }
         if let first = ladder.first(where: { !isUnavailable($0) }) {
             return .vn(first.url)
         }
@@ -91,13 +112,24 @@ struct MUMatchDetailView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         hero
-                        sourceSection
+                        sourceButton
                     }
                 }
                 footer
             }
         }
+        .sheet(isPresented: $showSourceSheet) {
+            sourceSheet
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+        }
         .preferredColorScheme(.dark)
+        // FIX-MU-5 (item A): a Hình nền pick in Settings
+        // re-reads the hero the moment it lands.
+        .onChange(of: themeStore.wallpaperChoice) { _, _ in
+            artURL = MUWallpapers.heroImage()
+        }
         .task {
             if await MUWallpapers.refreshRemote() {
                 artURL = MUWallpapers.heroImage()
@@ -318,9 +350,78 @@ struct MUMatchDetailView: View {
         return nil
     }
 
-    // MARK: Source section
+    // MARK: Source button + sheet (FIX-MU-5, item B)
 
-    private var sourceSection: some View {
+    /// The count pill the button and the sheet header share
+    /// ("n NGUỒN", quality-style 9/400, gold, theme border).
+    private var countChip: some View {
+        Text("\(totalSources) NGUỒN")
+            .font(MUFont.body(9))
+            .foregroundStyle(MUTokens.gold)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(MUTokens.themeBorder, lineWidth: 1)
+            )
+    }
+
+    /// The ONE small source button (owner ruling 2026-11-22
+    /// 01:50 CST — it supersedes the drawing's on-page list
+    /// for this screen): height 52, radius 12, card fill,
+    /// border 1; gold list icon; "Nguồn: <selected channel>"
+    /// (or "Chọn nguồn phát" when nothing is selected / there
+    /// are no sources); the count chip + chevron at the
+    /// right. Disabled when there are no sources. It sits in
+    /// the slot the source section occupied (top 12, h16).
+    private var sourceButton: some View {
+        Button {
+            showSourceSheet = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(MUTokens.gold)
+                Text(effectiveSelection == nil
+                     ? "Chọn nguồn phát"
+                     : "Nguồn: \(selectionName)")
+                    .font(MUFont.body(13, .semibold))
+                    .foregroundStyle(MUTokens.cream)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 8)
+                countChip
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(MUTokens.secondary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 52)
+            .background(
+                MUPressedBackground(RoundedRectangle(cornerRadius: 12), MUTokens.card)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(MUTokens.border, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(MUPressButtonStyle())
+        .disabled(totalSources == 0)
+        .opacity(totalSources == 0 ? 0.45 : 1)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    /// The source list as a sheet, in the MU sheet language
+    /// (ground card, padding 20, sheetBorder stroke, radius
+    /// 24 at the presentation site): the drawing's section —
+    /// heading + count pill, the one-line description, the
+    /// VN group above the EN group, the rows exactly as
+    /// drawn (the row/group code below is the page's own,
+    /// moved here unchanged). A row tap selects + plays at
+    /// once (D-6) and dismisses the sheet.
+    private var sourceSheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
                 Text("CHỌN NGUỒN PHÁT")
@@ -328,43 +429,42 @@ struct MUMatchDetailView: View {
                     .muDisplayTracking(24)
                     .foregroundStyle(MUTokens.cream)
                 Spacer(minLength: 8)
-                Text("\(totalSources) NGUỒN")
-                    .font(MUFont.body(9))
-                    .foregroundStyle(MUTokens.gold)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(MUTokens.themeBorder, lineWidth: 1)
-                    )
+                countChip
             }
-            Text("Chạm vào một nguồn để phát ngay — nguồn đã chết vẫn hiện ở đây, app tự bỏ qua khi phát.")
+            Text("Chạm vào một nguồn để phát ngay.")
                 .font(MUFont.body(11))
                 .foregroundStyle(MUTokens.secondary)
                 .padding(.top, 7)
-                .padding(.bottom, 17)
-
-            if !ladder.isEmpty {
-                groupHeader("Tiếng Việt", right: "Ưu tiên · \(ladder.count) nguồn")
-                VStack(spacing: 8) {
-                    ForEach(Array(ladder.enumerated()), id: \.element.id) { index, channel in
-                        vnRow(channel, isFirst: index == 0)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !ladder.isEmpty {
+                        groupHeader("Tiếng Việt", right: "Ưu tiên · \(ladder.count) nguồn")
+                        VStack(spacing: 8) {
+                            ForEach(Array(ladder.enumerated()), id: \.element.id) { index, channel in
+                                vnRow(channel, isFirst: index == 0)
+                            }
+                        }
+                    }
+                    if !enMetas.isEmpty {
+                        groupHeader("Tiếng Anh", right: "English · \(enMetas.count) nguồn")
+                        VStack(spacing: 8) {
+                            ForEach(enMetas) { meta in
+                                enRow(meta)
+                            }
+                        }
                     }
                 }
-            }
-
-            if !enMetas.isEmpty {
-                groupHeader("Tiếng Anh", right: "English · \(enMetas.count) nguồn")
-                VStack(spacing: 8) {
-                    ForEach(enMetas) { meta in
-                        enRow(meta)
-                    }
-                }
+                .padding(.bottom, 4)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 20)
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(MUTokens.card.ignoresSafeArea())
+        .overlay(
+            RoundedRectangle(cornerRadius: 24)
+                .strokeBorder(MUTokens.sheetBorder, lineWidth: 1)
+        )
+        .preferredColorScheme(.dark)
     }
 
     private func groupHeader(_ title: String, right: String) -> some View {
@@ -387,13 +487,28 @@ struct MUMatchDetailView: View {
         let unavailable = isUnavailable(channel)
         let isSelected = effectiveSelection == .vn(channel.url)
         let name = muCommentatorName(MatchTitle.clean(channel.title), group: channel.group)
-        let note = unavailable
-            ? "Tạm không khả dụng"
-            : (isFirst ? "Đề xuất · bình luận tiếng Việt" : "bình luận tiếng Việt")
+        // Row notes (audit #102 — the drawing's strings):
+        // the selected VN row leads with "Đang chọn ·", the
+        // recommended head keeps its "Đề xuất ·", the rest
+        // are the backup line; unavailable keeps its note.
+        let note: String
+        if unavailable {
+            note = "Tạm không khả dụng"
+        } else if isSelected {
+            note = isFirst
+                ? "Đang chọn · Đề xuất · bình luận tiếng Việt"
+                : "Đang chọn · bình luận tiếng Việt"
+        } else if isFirst {
+            note = "Đề xuất · bình luận tiếng Việt"
+        } else {
+            note = "Nguồn dự phòng · tiếng Việt"
+        }
         return Button {
-            // D-6: a tap selects AND plays, in one motion.
+            // D-6: a tap selects AND plays, in one motion —
+            // and dismisses the source sheet it lives in now.
             selected = .vn(channel.url)
             onPlayVN(channel)
+            showSourceSheet = false
         } label: {
             sourceRow(name: name, note: note,
                       quality: qualityToken(for: channel),
@@ -406,12 +521,14 @@ struct MUMatchDetailView: View {
     private func enRow(_ meta: NuvioMeta) -> some View {
         let isSelected = effectiveSelection == .en(meta.id)
         // The classic board's EN row anatomy: the competition
-        // string leads when the addon provides one.
+        // string leads when the addon provides one. The note
+        // is the drawing's (#102): "Bình luận tiếng Anh".
         let name = meta.competitionString ?? meta.channelHint ?? meta.displayName
-        let note = meta.competitionString != nil ? meta.displayName : "bình luận tiếng Anh"
+        let note = "Bình luận tiếng Anh"
         return Button {
             selected = .en(meta.id)
             onPlayEN(meta)
+            showSourceSheet = false
         } label: {
             sourceRow(name: name, note: note, quality: nil,
                       isSelected: isSelected, unavailable: false)

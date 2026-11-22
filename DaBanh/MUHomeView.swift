@@ -105,6 +105,7 @@ func muVietnameseDateLine(_ date: Date = Date()) -> String {
 /// spec allows.
 struct MUHomeView: View {
     @EnvironmentObject private var store: PlaylistStore
+    @EnvironmentObject private var themeStore: ThemeStore
     @ObservedObject var nuvio: NuvioAddonStore
     /// A fixture tap opens its match detail (the host's board
     /// route — the same route the classic home presents).
@@ -253,6 +254,11 @@ struct MUHomeView: View {
                 artURL = MUWallpapers.heroImage()
             }
         }
+        // FIX-MU-5 (item A): a Hình nền pick in Settings
+        // re-reads the hero the moment it lands.
+        .onChange(of: themeStore.wallpaperChoice) { _, _ in
+            artURL = MUWallpapers.heroImage()
+        }
         .onChange(of: store.selectedLeague) { _, _ in
             page = 0
         }
@@ -280,7 +286,8 @@ struct MUHomeView: View {
                 Text("MANCHESTER UNITED EDITION")
                     .font(MUFont.body(8))
                     .tracking(0.16 * 8)
-                    .foregroundStyle(MUTokens.gold.opacity(0.85))
+                    // FIX-MU-5 (#35): gold at FULL opacity.
+                    .foregroundStyle(MUTokens.gold)
             }
             Spacer(minLength: 8)
             themePill
@@ -321,7 +328,7 @@ struct MUHomeView: View {
             HStack(spacing: 7) {
                 Image(systemName: "paintpalette")
                     .font(.system(size: 14))
-                Text("MU")
+                Text(themeStore.themeID.pillName)
                     .font(MUFont.body(12, .semibold))
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 12))
@@ -467,10 +474,19 @@ struct MUHomeView: View {
     private var cardsBlock: some View {
         VStack(spacing: 12) {
             if pageEntries.isEmpty {
-                Text("Chưa có trận nào trong mục này.")
-                    .font(MUFont.body(12))
-                    .foregroundStyle(MUTokens.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 196)
+                if store.isLoading {
+                    // FIX-MU-5 (#72): the first load paints
+                    // the design's three skeleton cards (the
+                    // page's own geometry) instead of the
+                    // empty-state line; the true empty state
+                    // (loaded, nothing here) keeps its text.
+                    skeletonCards
+                } else {
+                    Text("Chưa có trận nào trong mục này.")
+                        .font(MUFont.body(12))
+                        .foregroundStyle(MUTokens.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 196)
+                }
             } else {
                 ForEach(Array(pageEntries.enumerated()), id: \.element.id) { index, entry in
                     Button {
@@ -485,14 +501,24 @@ struct MUHomeView: View {
                     .buttonStyle(MUPressButtonStyle())
                 }
             }
-            if let message = store.statusMessage, !store.channels.isEmpty {
-                Text(message)
-                    .font(MUFont.body(10))
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            // FIX-MU-5 (#73): the store's orange status line
+            // is NOT drawn on the MU board (audit — it is not
+            // part of the design).
         }
         .padding(.horizontal, 16)
+    }
+
+    /// The loading skeleton (#72): three cards at the page's
+    /// own heights (featured 196, standard 142 ×2) in card
+    /// fill + border, with muted placeholder blocks holding
+    /// the card geometry. The pulse is motion — with Reduce
+    /// Motion on the blocks rest at full strength.
+    private var skeletonCards: some View {
+        VStack(spacing: 12) {
+            MUSkeletonCard(featured: true)
+            MUSkeletonCard(featured: false)
+            MUSkeletonCard(featured: false)
+        }
     }
 
     // MARK: Pagination (42)
@@ -936,5 +962,66 @@ struct MUFixtureCard: View {
             }
             .foregroundStyle(MUTokens.secondary)
         }
+    }
+}
+
+/// One loading skeleton card (FIX-MU-5, #72): the fixture
+/// card's own frame (featured 196 / standard 142, radius
+/// 18, card fill, border) with muted blocks where the
+/// crests, score and lines will land. The gentle pulse is
+/// motion, so it runs only when Reduce Motion is off.
+struct MUSkeletonCard: View {
+    let featured: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                block(width: featured ? 54 : 36, height: featured ? 54 : 36, circle: true)
+                VStack(spacing: 6) {
+                    block(width: 92, height: 12)
+                    block(width: 64, height: 10)
+                }
+                Spacer(minLength: 0)
+                block(width: featured ? 76 : 56, height: featured ? 44 : 32)
+                Spacer(minLength: 0)
+                VStack(spacing: 6) {
+                    block(width: 92, height: 12)
+                    block(width: 64, height: 10)
+                }
+                block(width: featured ? 54 : 36, height: featured ? 54 : 36, circle: true)
+            }
+            Spacer(minLength: 0)
+            block(width: 150, height: 10)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .frame(height: featured ? 196 : 142)
+        .background(
+            RoundedRectangle(cornerRadius: 18).fill(MUTokens.card)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(MUTokens.border, lineWidth: 1)
+        )
+        .opacity(dimmed ? 0.55 : 1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                dimmed = true
+            }
+        }
+    }
+
+    private func block(width: CGFloat, height: CGFloat, circle: Bool = false) -> some View {
+        Group {
+            if circle {
+                Circle().fill(MUTokens.border)
+            } else {
+                RoundedRectangle(cornerRadius: 4).fill(MUTokens.border)
+            }
+        }
+        .frame(width: width, height: height)
     }
 }

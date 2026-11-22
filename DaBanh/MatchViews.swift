@@ -905,6 +905,13 @@ struct MatchBoardView: View {
     var inPlayerMode: Bool = false
     var playingChannelURL: String? = nil
     var playingENMetaID: String? = nil
+    /// FIX-MU-5 (item B2): in the DETAIL presentation
+    /// (inPlayerMode == false — the panel from ContentView's
+    /// .board route) the source list lives behind the one
+    /// small button, per the owner's 2026-11-22 02:06 ruling;
+    /// this presents it as a sheet. The in-player
+    /// presentation keeps the full list as it is.
+    @State private var showSourceList = false
 
     /// The entry re-read with the freshest state: the sheet may
     /// sit open across a poll.
@@ -936,50 +943,24 @@ struct MatchBoardView: View {
                     }
                     BoardHeaderView(entry: liveEntry)
 
-                    sectionTitle("LINK TIẾNG VIỆT")
-                    let ladder = store.sources(for: entry.channel)
-                    VStack(spacing: 8) {
-                        ForEach(Array(ladder.enumerated()), id: \.element.id) { index, channel in
-                            let isPlaying = inPlayerMode
-                                && channel.url == playingChannelURL
-                            Button {
-                                onPlayVN(channel)
-                            } label: {
-                                boardRow(
-                                    title: MatchTitle.clean(channel.title),
-                                    highlighted: inPlayerMode ? isPlaying : index == 0,
-                                    highlightTag: inPlayerMode
-                                        ? (isPlaying ? "ĐANG PHÁT" : nil)
-                                        : (index == 0 ? "MẶC ĐỊNH" : nil))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    if !enMetas.isEmpty {
-                        sectionTitle("LINK TIẾNG ANH · BLV ANH")
-                        VStack(spacing: 8) {
-                            ForEach(enMetas) { meta in
-                                let isPlaying = inPlayerMode
-                                    && meta.id == playingENMetaID
-                                Button {
-                                    onPlayEN(meta)
-                                } label: {
-                                    boardRow(
-                                        title: meta.competitionString ?? meta.channelHint ?? meta.displayName,
-                                        subtitle: meta.competitionString != nil ? meta.displayName : nil,
-                                        highlighted: isPlaying,
-                                        highlightTag: isPlaying ? "ĐANG PHÁT" : nil)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
+                    if inPlayerMode {
+                        sourceSections(afterPlay: {})
+                    } else {
+                        // FIX-MU-5 (item B2): the detail
+                        // presentation shows the one small
+                        // button; the list opens as a sheet.
+                        detailSourceButton
                     }
                 }
                 .padding(16)
             }
         }
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showSourceList) {
+            detailSourceSheet
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .onAppear {
             // DB-07: the board-open anchor of the tap→play
             // timeline (the fixture tap, this opening, the row
@@ -1016,6 +997,166 @@ struct MatchBoardView: View {
             // incidents of its fixture (spec §1.2).
             await store.liveStates.ensureDetails(for: entry.channel)
         }
+    }
+
+    /// The board's two source groups (VN above EN), rows
+    /// exactly as the board has always built them — shared
+    /// by the in-player body and, since FIX-MU-5 (item B2),
+    /// the detail presentation's source sheet. `afterPlay`
+    /// runs right after a row's play callback (the detail
+    /// sheet uses it to dismiss itself; the in-player body
+    /// passes a no-op — its host closes that sheet).
+    @ViewBuilder
+    private func sourceSections(afterPlay: @escaping () -> Void) -> some View {
+        sectionTitle("LINK TIẾNG VIỆT")
+        let ladder = store.sources(for: entry.channel)
+        VStack(spacing: 8) {
+            ForEach(Array(ladder.enumerated()), id: \.element.id) { index, channel in
+                let isPlaying = inPlayerMode
+                    && channel.url == playingChannelURL
+                Button {
+                    onPlayVN(channel)
+                    afterPlay()
+                } label: {
+                    boardRow(
+                        title: MatchTitle.clean(channel.title),
+                        highlighted: inPlayerMode ? isPlaying : index == 0,
+                        highlightTag: inPlayerMode
+                            ? (isPlaying ? "ĐANG PHÁT" : nil)
+                            : (index == 0 ? "MẶC ĐỊNH" : nil))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        if !enMetas.isEmpty {
+            sectionTitle("LINK TIẾNG ANH · BLV ANH")
+            VStack(spacing: 8) {
+                ForEach(enMetas) { meta in
+                    let isPlaying = inPlayerMode
+                        && meta.id == playingENMetaID
+                    Button {
+                        onPlayEN(meta)
+                        afterPlay()
+                    } label: {
+                        boardRow(
+                            title: meta.competitionString ?? meta.channelHint ?? meta.displayName,
+                            subtitle: meta.competitionString != nil ? meta.displayName : nil,
+                            highlighted: isPlaying,
+                            highlightTag: isPlaying ? "ĐANG PHÁT" : nil)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    // MARK: Detail small-button + sheet (FIX-MU-5, item B2)
+
+    private var detailLadder: [Channel] { store.sources(for: entry.channel) }
+
+    private func boardIsProvenDead(_ channel: Channel) -> Bool {
+        ResolveHub.shared.isProvenDead(channel.url)
+            || SourcePrewarmStore.shared.isDead(channel.url)
+    }
+
+    /// The default pick's row label, in the MU detail's
+    /// default order (the owner's ruling, both themes):
+    /// first available VN → else first EN → else first VN.
+    private var detailDefaultPickName: String {
+        let ladder = detailLadder
+        if let channel = ladder.first(where: { !boardIsProvenDead($0) }) {
+            return MatchTitle.clean(channel.title)
+        }
+        if let meta = enMetas.first {
+            return meta.competitionString ?? meta.channelHint ?? meta.displayName
+        }
+        if let channel = ladder.first {
+            return MatchTitle.clean(channel.title)
+        }
+        return "—"
+    }
+
+    /// The ONE small button in the detail presentation
+    /// (BoardPalette language — the boardRow face): the
+    /// default pick's name, the total source count chip, a
+    /// chevron. Tapping opens the source list as a sheet.
+    private var detailSourceButton: some View {
+        let total = detailLadder.count + enMetas.count
+        return Button {
+            showSourceList = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(BoardPalette.sky)
+                Text(total == 0 ? "Chọn nguồn phát" : "Nguồn: \(detailDefaultPickName)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(BoardPalette.teamText)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                Text("\(total) NGUỒN")
+                    .font(.caption2.bold())
+                    .foregroundStyle(BoardPalette.sky)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(BoardPalette.tabBorder, lineWidth: 1)
+                    )
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(BoardPalette.dimText)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(BoardPalette.tabBG)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(BoardPalette.tabBorder, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .disabled(total == 0)
+        .opacity(total == 0 ? 0.45 : 1)
+    }
+
+    /// The detail presentation's source list, as a sheet in
+    /// the board's own language: the SAME groups and rows
+    /// (sourceSections), a row tap plays at once (the
+    /// board's existing behaviour) and dismisses.
+    private var detailSourceSheet: some View {
+        ZStack {
+            BoardPalette.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("CHỌN NGUỒN")
+                            .font(.headline)
+                            .foregroundStyle(BoardPalette.teamText)
+                        Spacer()
+                        Button {
+                            showSourceList = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(BoardPalette.buttonText)
+                                .frame(width: 32, height: 32)
+                                .background(Circle().fill(BoardPalette.buttonBG))
+                        }
+                        .accessibilityLabel("Đóng")
+                    }
+                    sourceSections(afterPlay: { showSourceList = false })
+                }
+                .padding(16)
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 
     private func sectionTitle(_ text: String) -> some View {

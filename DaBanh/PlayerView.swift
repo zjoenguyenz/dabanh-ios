@@ -290,16 +290,29 @@ struct PlayerView: View {
             // board in its in-player mode — same rows, same
             // arrangement, the playing row marked. Its row
             // callbacks are the switches below, never a fresh
-            // entry into the player.
+            // entry into the player. FIX-MU-5 (item E): under
+            // an MU-family theme the board wears the MU sheet
+            // language (MUBoardView) — same entries, same
+            // selection, same callbacks; presentation only.
             if let liveHeaderEntry {
-                MatchBoardView(
-                    entry: liveHeaderEntry,
-                    enMetas: enMetas,
-                    onPlayVN: switchToVN,
-                    onPlayEN: switchToEN,
-                    inPlayerMode: true,
-                    playingChannelURL: current?.url,
-                    playingENMetaID: currentENMetaID)
+                if themeStore.isMU {
+                    MUBoardView(
+                        entry: liveHeaderEntry,
+                        enMetas: enMetas,
+                        onPlayVN: switchToVN,
+                        onPlayEN: switchToEN,
+                        playingChannelURL: current?.url,
+                        playingENMetaID: currentENMetaID)
+                } else {
+                    MatchBoardView(
+                        entry: liveHeaderEntry,
+                        enMetas: enMetas,
+                        onPlayVN: switchToVN,
+                        onPlayEN: switchToEN,
+                        inPlayerMode: true,
+                        playingChannelURL: current?.url,
+                        playingENMetaID: currentENMetaID)
+                }
             }
         }
         .onDisappear {
@@ -503,6 +516,27 @@ struct PlayerView: View {
     }
 
     private func advance() {
+        // FIX-MU-5 (item A, Phát lại): the settings'
+        // auto-backup switch gates ONLY this automatic walk.
+        // Every AUTO failover funnels through advance() —
+        // the item-failure path and the stall watchdog both
+        // end in onFail, and the unparseable-URL branch calls
+        // it directly — while manual switches (board picks,
+        // the MU chips) set the index themselves and never
+        // come through here. OFF: no walk — the index steps
+        // past the ladder, landing on the waiting branch
+        // while the session resolves and on the no-signal
+        // slate once it settles, exactly as an exhausted
+        // ladder does; the suppression is logged.
+        guard MUPlaybackPrefs.autoBackup else {
+            DiagLog.log("player",
+                        "advance: suppressed — auto-backup OFF in settings; "
+                        + "no failover walk from source #\(index)")
+            triedRungs.insert(index)
+            index = sources.count
+            switching = true
+            return
+        }
         // Unconditional: the walk may land one past the last
         // published source. Each surface fires onFail once per
         // .id(index), so this cannot run away — with current
@@ -766,6 +800,14 @@ final class LivePlayerViewController: UIViewController {
         view.addSubview(videoView)
 
         if isMUChrome {
+            // FIX-MU-5 (item A, Phát lại): the settings'
+            // default quality is the MU player's STARTING
+            // cap — the same bit-rate values the in-player
+            // quality sheet applies (muQualityTapped); Tự
+            // động (cap 0) leaves the item uncapped. The
+            // in-player sheet can still change it live.
+            muQualityCap = MUPlaybackPrefs.qualityCap
+            item.preferredPeakBitRate = muQualityCap
             buildMUControls(channel: channel)
         } else {
             buildControls(channel: channel)
@@ -1902,6 +1944,22 @@ final class MatchPlaySession: ObservableObject {
             return
         }
         if isKnownDead(head) {
+            // FIX-MU-5 (item A, Phát lại): with auto-backup
+            // OFF there is no tap-time promotion either —
+            // the viewer's pick publishes exactly as picked
+            // (it then stands or falls on its own, and
+            // advance() is gated the same way), and the
+            // suppression is logged. Verification continues
+            // behind it as for any instant head.
+            if !MUPlaybackPrefs.autoBackup {
+                headPublished = true
+                sources = [head]
+                DiagLog.log("player",
+                            "instant head: picked source \(diagSourceTag(head)) "
+                            + "already proven dead this run — auto-backup OFF, "
+                            + "publishing the pick as chosen (no promotion)")
+                return
+            }
             guard let substitute = ladderSnapshot.first(where: { !isKnownDead($0) })
             else {
                 // FIX-130 (P-4): the all-dead branch stops

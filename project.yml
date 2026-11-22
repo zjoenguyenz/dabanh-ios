@@ -51,6 +51,7 @@ targets:
       - DaBanh/MUHomeView.swift
       - DaBanh/MUMatchDetailView.swift
       - DaBanh/MUPlayerChrome.swift
+      - DaBanh/MUBoardView.swift
       - DaBanh/Fonts/BarlowCondensed-ExtraBold.ttf
       - DaBanh/NuvioAddon.swift
       - DaBanh/Assets.xcassets

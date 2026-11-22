@@ -97,12 +97,19 @@ enum MUWallpapers {
     }
 
     /// The artwork the MU surfaces lead with (the featured
-    /// card + the match-detail hero): the shared list's first
+    /// card + the match-detail hero): the viewer's persisted
+    /// Hình nền choice (FIX-MU-5, item A — UserDefaults
+    /// `dabanh-mu-wallpaper`) when it is set AND still
+    /// present in the list, else the shared list's first
     /// image. Nil when no list has loaded yet — the surfaces
     /// then paint the design's fallback (featured base
     /// #261A1C + the featured gradient).
     static func heroImage() -> URL? {
-        urls.first
+        if let raw = UserDefaults.standard.string(forKey: "dabanh-mu-wallpaper"),
+           let chosen = URL(string: raw), urls.contains(chosen) {
+            return chosen
+        }
+        return urls.first
     }
 
     /// Fetch the mirror's wallpapers.json; when it differs from
