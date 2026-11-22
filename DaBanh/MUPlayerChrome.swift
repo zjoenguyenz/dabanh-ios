@@ -118,6 +118,25 @@ final class MUChromeViews {
     var chipButtons: [UIButton] = []
 }
 
+/// DB-20 (FIX-134): whether the MU player is currently in
+/// its button-driven fullscreen state — entered via the
+/// fullscreen action below, which narrows the orientation
+/// lock to landscape until the user exits fullscreen again.
+/// The MU baseline stays free rotation (lock .all); this
+/// flag is the ONLY record of the temporary narrowing, and
+/// ContentView reads it on a player-route change so an
+/// in-place Đổi nguồn swap re-asserts the landscape lock
+/// instead of silently dropping it back to .all.
+/// @MainActor, like MUChromeViews and OrientationHelper:
+/// it is written only from the player view controller's
+/// handlers and read/written only from ContentView's
+/// main-actor SwiftUI closures — no cross-actor access, so
+/// no data race is possible under Swift 6.
+@MainActor
+enum MUFullscreenState {
+    static var isActive = false
+}
+
 /// The Manchester United player chrome (theme-mu): the
 /// design's player pages, built inside the EXISTING live
 /// player view controller when the MU theme is active. The
@@ -326,8 +345,12 @@ extension LivePlayerViewController {
         mu.audioButton.addTarget(self, action: #selector(muAudioTapped), for: .touchUpInside)
         controlsView.addSubview(mu.audioButton)
         configureMUChip(mu.fillButton, icon: "arrow.up.left.and.arrow.down.right", title: nil)
-        mu.fillButton.accessibilityLabel = "Tràn viền / vừa khung"
-        mu.fillButton.addTarget(self, action: #selector(toggleFill), for: .touchUpInside)
+        // DB-20 (FIX-134): this expand icon is a fullscreen
+        // (rotate) control now, not the classic fill/fit
+        // toggle — fill/fit stays reachable by pinch
+        // (PlayerView.swift handlePinch), untouched.
+        mu.fillButton.accessibilityLabel = "Toàn màn hình"
+        mu.fillButton.addTarget(self, action: #selector(muToggleFullscreen), for: .touchUpInside)
         controlsView.addSubview(mu.fillButton)
         configureMUChip(mu.moreButton, icon: "ellipsis", title: nil)
         // FIX-MU-5 (#141): the ••• button opens the MU More
@@ -960,6 +983,33 @@ extension LivePlayerViewController {
         showControls()
     }
 
+    /// DB-20 (FIX-134): the MU fullscreen action — rotate by
+    /// orientation lock, the step the MU branch never had
+    /// (DIAG-133 §3–§4: both MU "fullscreen" entries used to
+    /// run the classic fill/fit toggle, which never rotates
+    /// the portrait page). Entering (currently portrait)
+    /// narrows the lock to landscape with the exact call the
+    /// classic branch uses; the geometry update rotates the
+    /// UI and layoutMUChrome reflows to the landscape page
+    /// on the new bounds. Exiting (currently landscape)
+    /// rotates back to the portrait page AND reopens the
+    /// lock to MU's free-rotation baseline. The current side
+    /// comes from the same tracked flag layoutMUChrome keeps
+    /// (mu.landscape), falling back to its own bounds test —
+    /// no new persistent state beyond MUFullscreenState,
+    /// which ContentView needs for its route-change guard.
+    @objc func muToggleFullscreen() {
+        let isLandscape = muChrome?.landscape ?? (view.bounds.width > view.bounds.height)
+        if isLandscape {
+            MUFullscreenState.isActive = false
+            OrientationHelper.lock(.all, rotateTo: .portrait)
+        } else {
+            MUFullscreenState.isActive = true
+            OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+        }
+        showControls()
+    }
+
     /// Quality: a real rendition cap on the player item
     /// (AVPlayerItem.preferredPeakBitRate) — Tự động lifts
     /// it, 1080p / 720p cap the peak bit rate.
@@ -987,7 +1037,7 @@ extension LivePlayerViewController {
             self?.muAudioTapped()
         })
         sheet.addAction(UIAlertAction(title: "Toàn màn hình", style: .default) { [weak self] _ in
-            self?.toggleFill()
+            self?.muToggleFullscreen()
         })
         sheet.addAction(UIAlertAction(title: "Hình trong hình", style: .default) { [weak self] _ in
             self?.togglePiP()

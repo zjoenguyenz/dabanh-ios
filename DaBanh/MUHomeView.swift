@@ -152,6 +152,10 @@ struct MUHomeView: View {
         var list: [MUTab] = [
             MUTab(label: "Trực tiếp", value: PlaylistStore.liveTabValue),
             MUTab(label: "Nổi bật", value: PlaylistStore.hotTabValue),
+            // FIX-134: the Highlight tab rides right after Nổi
+            // bật (study §3.1) on its own special selectedLeague
+            // value — the isENTab precedent below.
+            MUTab(label: "Highlight", value: HighlightStore.tabValue),
             MUTab(label: "Premier League", value: League.england.rawValue),
             MUTab(label: "La Liga", value: League.spain.rawValue),
             MUTab(label: "Serie A", value: League.italy.rawValue),
@@ -175,6 +179,11 @@ struct MUHomeView: View {
 
     private var isENTab: Bool {
         store.selectedLeague == LeagueClassifier.enTabValue
+    }
+
+    /// FIX-134: the Highlight tab is up (study §3.1).
+    private var isHighlightTab: Bool {
+        store.selectedLeague == HighlightStore.tabValue
     }
 
     /// The board's fixture entries for the selected tab, in
@@ -266,7 +275,9 @@ struct MUHomeView: View {
                 header
                 utilities
                 tabRow
-                if isENTab {
+                if isHighlightTab {
+                    MUHighlightView()
+                } else if isENTab {
                     enList
                 } else {
                     // FIX-133 (DB-17): the pagination row is the

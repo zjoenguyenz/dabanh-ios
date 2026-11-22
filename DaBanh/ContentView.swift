@@ -306,12 +306,29 @@ struct ContentView: View {
             // PlayerView instances.
             if key != nil {
                 if themeStore.isMU {
-                    // MU carries portrait + landscape player
-                    // pages — rotation stays free (theme-mu).
-                    OrientationHelper.lock(.all)
+                    if MUFullscreenState.isActive {
+                        // DB-20 (FIX-134): the MU player is in
+                        // its button-driven fullscreen state —
+                        // an in-place Đổi nguồn swap must not
+                        // drop that landscape lock back to the
+                        // free-rotation baseline, so re-assert
+                        // it for the swapped-in player.
+                        OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+                    } else {
+                        // MU carries portrait + landscape player
+                        // pages — rotation stays free (theme-mu).
+                        OrientationHelper.lock(.all)
+                    }
                 } else {
                     OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
                 }
+            } else {
+                // DB-20 (FIX-134): no player route is up —
+                // a genuine close, or a flip back to the
+                // board — so the fullscreen state dies with
+                // its player and can never leak into the
+                // next player open.
+                MUFullscreenState.isActive = false
             }
         }
         .sheet(isPresented: $showDiagLog) {
@@ -761,6 +778,10 @@ struct ContentView: View {
                     liveChip
                 }
                 hotChip
+                // FIX-134: the Highlight capsule (study §3.1 —
+                // selected fill accentGreen, like the league
+                // pills), riding its own selectedLeague value.
+                highlightChip
                 // League pill order: NHA · TBN · Ý · Đức · Pháp ·
                 // Khác · Cúp EU — the cups pill goes LAST, after
                 // Khác. This is a display order only: the League
@@ -853,6 +874,26 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    /// The ▶ Highlight chip (FIX-134): the highlight tab's
+    /// capsule in the classic chip row — same component as the
+    /// league pills, selected fill accentGreen (study §3.1).
+    private var highlightChip: some View {
+        let selected = store.selectedLeague == HighlightStore.tabValue
+        return Button {
+            store.selectedLeague = HighlightStore.tabValue
+        } label: {
+            Text("▶ Highlight")
+                .font(.subheadline.weight(selected ? .bold : .regular))
+                .foregroundStyle(selected ? .white : .white.opacity(0.7))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(selected ? accentGreen : Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     /// The 🔥 Hot chip: matches the source sites themselves flag hot,
     /// fed by the backup mirror's "🔥 Hot" group (see PlaylistStore).
     private var hotChip: some View {
@@ -883,6 +924,9 @@ struct ContentView: View {
         }
         if store.selectedLeague == LeagueClassifier.enTabValue {
             return AnyView(enList)
+        }
+        if store.selectedLeague == HighlightStore.tabValue {
+            return AnyView(ClassicHighlightView())
         }
         if store.selectedLeague == League.cups.rawValue {
             return AnyView(cupsList)

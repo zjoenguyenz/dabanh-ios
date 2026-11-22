@@ -273,7 +273,20 @@ struct PlayerView: View {
                 // page AND a landscape layout, so rotation
                 // stays free under MU; classic keeps its
                 // landscape lock exactly as before.
-                OrientationHelper.lock(.all)
+                // DB-20 (FIX-134, REVIEW-134 F1): while the
+                // button-driven fullscreen state is active this
+                // appear assert must NOT widen the lock back to
+                // .all — a Đổi nguồn swap replaces this view in
+                // place, and SwiftUI gives no ordering
+                // guarantee against ContentView's route-change
+                // re-assert (the FIX-127B doctrine below), so
+                // an unconditional .all here could land last
+                // and drop the fullscreen lock mid-player.
+                if MUFullscreenState.isActive {
+                    OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
+                } else {
+                    OrientationHelper.lock(.all)
+                }
             } else {
                 OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
             }
