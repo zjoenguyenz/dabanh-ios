@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T23:22:08Z",
+  "generatedAt": "2026-11-22T23:37:20Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -45,7 +45,7 @@
           "ref": "WyJJGWj09To",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 950,
           "addedAt": "2026-11-22T20:22:01Z"
         },
         {
@@ -53,7 +53,7 @@
           "ref": "eJShdUmAqMc",
           "label": "Dollar VFX",
           "official": false,
-          "durationSec": null,
+          "durationSec": 134,
           "addedAt": "2026-11-22T20:22:03Z"
         }
       ]
@@ -91,7 +91,7 @@
           "ref": "1qoPoVQFZWM",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 710,
           "addedAt": "2026-11-22T20:21:57Z"
         },
         {
@@ -99,7 +99,7 @@
           "ref": "0ofyoUKGddE",
           "label": "USA Sports",
           "official": false,
-          "durationSec": null,
+          "durationSec": 583,
           "addedAt": "2026-11-22T20:21:58Z"
         }
       ]
@@ -204,16 +204,8 @@
           "ref": "cacYEeP4tFU",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 560,
           "addedAt": "2026-11-22T20:22:14Z"
-        },
-        {
-          "kind": "youtube",
-          "ref": "3x7Lsqr-gUw",
-          "label": "AFC Bournemouth",
-          "official": false,
-          "durationSec": null,
-          "addedAt": "2026-11-22T20:22:15Z"
         }
       ]
     },
@@ -231,7 +223,7 @@
           "ref": "22n9oyWtQSM",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 594,
           "addedAt": "2026-11-22T20:22:20Z"
         },
         {
@@ -239,16 +231,8 @@
           "ref": "vwjhCaMIiMc",
           "label": "Aston Villa Football Club",
           "official": false,
-          "durationSec": null,
+          "durationSec": 117,
           "addedAt": "2026-11-22T20:22:21Z"
-        },
-        {
-          "kind": "youtube",
-          "ref": "pIpEIUUys9A",
-          "label": "NBC Sports",
-          "official": true,
-          "durationSec": null,
-          "addedAt": "2026-11-22T23:08:50Z"
         }
       ]
     },
@@ -266,7 +250,7 @@
           "ref": "NCk_eUqcgEE",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 605,
           "addedAt": "2026-11-22T20:22:27Z"
         },
         {
@@ -274,7 +258,7 @@
           "ref": "yD6SLduQ1PA",
           "label": "Chelsea Football Club",
           "official": false,
-          "durationSec": null,
+          "durationSec": 114,
           "addedAt": "2026-11-22T20:22:28Z"
         },
         {
@@ -282,8 +266,16 @@
           "ref": "7FO9vPbudn4",
           "label": "Chelsea Football Club",
           "official": false,
-          "durationSec": null,
+          "durationSec": 577,
           "addedAt": "2026-11-22T23:11:43Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "yxfcpPVnKaI",
+          "label": "Goalithics",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:36:50Z"
         }
       ]
     },
@@ -301,8 +293,16 @@
           "ref": "t6mOmWF-vF4",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 697,
           "addedAt": "2026-11-22T20:22:35Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "oHg7rTSQo2k",
+          "label": "Crystal Palace FC",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:36:58Z"
         }
       ]
     },
@@ -349,8 +349,24 @@
           "ref": "DWlZvq3qtKU",
           "label": "NBC Sports",
           "official": true,
-          "durationSec": null,
+          "durationSec": 648,
           "addedAt": "2026-11-22T20:22:08Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "VLOf_yCtj90",
+          "label": "Goalithics",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:36:24Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "UNgQeJSI9PI",
+          "label": "Mnoma",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:36:26Z"
         }
       ]
     },
