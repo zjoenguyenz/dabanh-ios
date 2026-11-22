@@ -1,7 +1,50 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T21:39:29Z",
+  "generatedAt": "2026-11-22T22:09:24Z",
   "matches": [
+    {
+      "competition": "la-liga",
+      "home": "Getafe",
+      "away": "Atlético Madrid",
+      "scoreHome": 0,
+      "scoreAway": 3,
+      "matchDate": "2026-11-22T20:00Z",
+      "espnEventId": "401882803",
+      "sources": [
+        {
+          "kind": "espn-mp4",
+          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/8802b1c0-130a-4d86-bcd1-b121dce5f5f2/8802b1c0-130a-4d86-bcd1-b121dce5f5f2.mp4",
+          "label": "ESPN",
+          "official": true,
+          "durationSec": 70,
+          "addedAt": "2026-11-22T22:09:15Z"
+        },
+        {
+          "kind": "espn-mp4",
+          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/07333bb7-cc7c-407a-8de9-28171ed882f8/07333bb7-cc7c-407a-8de9-28171ed882f8.mp4",
+          "label": "ESPN",
+          "official": true,
+          "durationSec": 59,
+          "addedAt": "2026-11-22T22:09:15Z"
+        },
+        {
+          "kind": "espn-mp4",
+          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/bebda115-1c25-4480-9fa7-3ad1d8eeecae/bebda115-1c25-4480-9fa7-3ad1d8eeecae.mp4",
+          "label": "ESPN",
+          "official": true,
+          "durationSec": 24,
+          "addedAt": "2026-11-22T22:09:15Z"
+        },
+        {
+          "kind": "espn-mp4",
+          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1122/34b0ea68-711d-4ca9-96b5-878b0daa852b/34b0ea68-711d-4ca9-96b5-878b0daa852b.mp4",
+          "label": "ESPN",
+          "official": true,
+          "durationSec": 52,
+          "addedAt": "2026-11-22T22:09:15Z"
+        }
+      ]
+    },
     {
       "competition": "la-liga",
       "home": "Osasuna",
