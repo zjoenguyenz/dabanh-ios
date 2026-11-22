@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-22T23:09:27Z",
+  "generatedAt": "2026-11-22T23:12:54Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -8,7 +8,7 @@
       "away": "Atlético Madrid",
       "scoreHome": 0,
       "scoreAway": 3,
-      "matchDate": "2026-11-22T20:00Z",
+      "matchDate": "2026-11-22T20:00:00Z",
       "espnEventId": "401882803",
       "sources": [
         {
@@ -51,7 +51,7 @@
       "away": "Málaga",
       "scoreHome": 1,
       "scoreAway": 0,
-      "matchDate": "2026-11-22T17:30Z",
+      "matchDate": "2026-11-22T17:30:00Z",
       "espnEventId": "401882801",
       "sources": [
         {
@@ -86,7 +86,7 @@
       "away": "Manchester United",
       "scoreHome": 4,
       "scoreAway": 0,
-      "matchDate": "2026-11-22T16:30Z",
+      "matchDate": "2026-11-22T16:30:00Z",
       "espnEventId": "401878755",
       "sources": [
         {
@@ -121,7 +121,7 @@
       "away": "Real Sociedad",
       "scoreHome": 3,
       "scoreAway": 2,
-      "matchDate": "2026-11-22T15:15Z",
+      "matchDate": "2026-11-22T15:15:00Z",
       "espnEventId": "401882800",
       "sources": [
         {
@@ -172,7 +172,7 @@
       "away": "Brighton & Hove Albion",
       "scoreHome": 2,
       "scoreAway": 0,
-      "matchDate": "2026-11-22T14:00Z",
+      "matchDate": "2026-11-22T14:00:00Z",
       "espnEventId": "401879234",
       "sources": [
         {
@@ -199,7 +199,7 @@
       "away": "Villarreal",
       "scoreHome": 3,
       "scoreAway": 2,
-      "matchDate": "2026-11-22T13:00Z",
+      "matchDate": "2026-11-22T13:00:00Z",
       "espnEventId": "401882804",
       "sources": [
         {
@@ -282,7 +282,7 @@
       "away": "Celta Vigo",
       "scoreHome": 2,
       "scoreAway": 1,
-      "matchDate": "2026-11-21T20:00Z",
+      "matchDate": "2026-11-21T20:00:00Z",
       "espnEventId": "401882798",
       "sources": [
         {
@@ -333,7 +333,7 @@
       "away": "Arsenal",
       "scoreHome": 2,
       "scoreAway": 2,
-      "matchDate": "2026-11-21T17:30Z",
+      "matchDate": "2026-11-21T17:30:00Z",
       "espnEventId": "401879232",
       "sources": [
         {
@@ -360,7 +360,7 @@
       "away": "Real Betis",
       "scoreHome": 1,
       "scoreAway": 1,
-      "matchDate": "2026-11-21T17:30Z",
+      "matchDate": "2026-11-21T17:30:00Z",
       "espnEventId": "401882797",
       "sources": [
         {
@@ -387,7 +387,7 @@
       "away": "Valencia",
       "scoreHome": 0,
       "scoreAway": 1,
-      "matchDate": "2026-11-21T15:15Z",
+      "matchDate": "2026-11-21T15:15:00Z",
       "espnEventId": "401882799",
       "sources": [
         {
@@ -422,7 +422,7 @@
       "away": "Nottingham Forest",
       "scoreHome": 2,
       "scoreAway": 0,
-      "matchDate": "2026-11-21T15:00Z",
+      "matchDate": "2026-11-21T15:00:00Z",
       "espnEventId": "401879238",
       "sources": [
         {
@@ -449,7 +449,7 @@
       "away": "Sunderland",
       "scoreHome": 0,
       "scoreAway": 0,
-      "matchDate": "2026-11-21T15:00Z",
+      "matchDate": "2026-11-21T15:00:00Z",
       "espnEventId": "401878756",
       "sources": [
         {
@@ -484,7 +484,7 @@
       "away": "Leeds United",
       "scoreHome": 1,
       "scoreAway": 4,
-      "matchDate": "2026-11-21T15:00Z",
+      "matchDate": "2026-11-21T15:00:00Z",
       "espnEventId": "401879236",
       "sources": [
         {
@@ -510,6 +510,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-22T20:22:28Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "7FO9vPbudn4",
+          "label": "Chelsea Football Club",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-22T23:11:43Z"
         }
       ]
     },
@@ -519,7 +527,7 @@
       "away": "Crystal Palace",
       "scoreHome": 3,
       "scoreAway": 2,
-      "matchDate": "2026-11-21T15:00Z",
+      "matchDate": "2026-11-21T15:00:00Z",
       "espnEventId": "401879235",
       "sources": [
         {
@@ -538,7 +546,7 @@
       "away": "Ipswich Town",
       "scoreHome": 2,
       "scoreAway": 0,
-      "matchDate": "2026-11-21T15:00Z",
+      "matchDate": "2026-11-21T15:00:00Z",
       "espnEventId": "401878754",
       "sources": []
     },
@@ -548,7 +556,7 @@
       "away": "Deportivo",
       "scoreHome": 3,
       "scoreAway": 1,
-      "matchDate": "2026-11-21T13:00Z",
+      "matchDate": "2026-11-21T13:00:00Z",
       "espnEventId": "401882806",
       "sources": [
         {
@@ -599,7 +607,7 @@
       "away": "Fulham",
       "scoreHome": 1,
       "scoreAway": 1,
-      "matchDate": "2026-11-21T12:30Z",
+      "matchDate": "2026-11-21T12:30:00Z",
       "espnEventId": "401879233",
       "sources": [
         {
@@ -626,7 +634,7 @@
       "away": "Espanyol",
       "scoreHome": 0,
       "scoreAway": 1,
-      "matchDate": "2026-11-20T20:00Z",
+      "matchDate": "2026-11-20T20:00:00Z",
       "espnEventId": "401882805",
       "sources": [
         {
