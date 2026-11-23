@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-23T05:39:38Z",
+  "generatedAt": "2026-11-23T06:09:28Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -206,6 +206,14 @@
           "official": true,
           "durationSec": 560,
           "addedAt": "2026-11-22T20:22:14Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "CnVmiIsfFdM",
+          "label": "Telemundo Deportes",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T06:08:50Z"
         }
       ]
     },
