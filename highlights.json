@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-23T22:09:37Z",
+  "generatedAt": "2026-11-23T22:39:33Z",
   "matches": [
     {
       "competition": "premier-league",
@@ -10,7 +10,24 @@
       "scoreAway": 0,
       "matchDate": "2026-11-23T20:00:00Z",
       "espnEventId": "401879237",
-      "sources": []
+      "sources": [
+        {
+          "kind": "youtube",
+          "ref": "NZDyGQNYBRU",
+          "label": "USA Sports",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T22:38:28Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "rjZthGDG1Vs",
+          "label": "Goal Rush TV",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T22:38:31Z"
+        }
+      ]
     },
     {
       "competition": "la-liga",
@@ -268,6 +285,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-23T17:08:51Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "vJ-N96YMZ8w",
+          "label": "EFL",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T22:38:58Z"
         }
       ]
     },
