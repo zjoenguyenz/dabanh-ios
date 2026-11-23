@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-23T22:39:33Z",
+  "generatedAt": "2026-11-23T23:09:32Z",
   "matches": [
     {
       "competition": "premier-league",
@@ -26,6 +26,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-23T22:38:31Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "amHGzfq9DCw",
+          "label": "NBC Sports",
+          "official": true,
+          "durationSec": null,
+          "addedAt": "2026-11-23T23:08:32Z"
         }
       ]
     },
