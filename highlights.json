@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-23T06:09:28Z",
+  "generatedAt": "2026-11-23T06:39:36Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -241,6 +241,14 @@
           "official": false,
           "durationSec": 117,
           "addedAt": "2026-11-22T20:22:21Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "TZSf2qjSAX4",
+          "label": "Sunderland AFC",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T06:39:04Z"
         }
       ]
     },
