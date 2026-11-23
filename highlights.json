@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-23T09:42:49Z",
+  "generatedAt": "2026-11-23T15:38:15Z",
   "matches": [
     {
       "competition": "la-liga",
@@ -131,7 +131,16 @@
       "scoreAway": 1,
       "matchDate": "2026-11-21T20:00:00Z",
       "espnEventId": "401882798",
-      "sources": []
+      "sources": [
+        {
+          "kind": "espn-mp4",
+          "ref": "https://espnmedia-cdn.akamaized.net/espn/media/16x9/wsc/2026/1121/dfc8f487-e97f-4562-8602-ec33a26231f0/dfc8f487-e97f-4562-8602-ec33a26231f0.mp4",
+          "label": "ESPN",
+          "official": true,
+          "durationSec": 73,
+          "addedAt": "2026-11-23T15:38:13Z"
+        }
+      ]
     },
     {
       "competition": "premier-league",
@@ -391,6 +400,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-22T23:38:44Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "fr2vgQF2HJI",
+          "label": "FutZio7",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-23T14:08:45Z"
         }
       ]
     },
