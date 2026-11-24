@@ -1,7 +1,27 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-24T19:09:30Z",
+  "generatedAt": "2026-11-24T19:51:10Z",
   "matches": [
+    {
+      "competition": "champions-league",
+      "home": "Bodo/Glimt",
+      "away": "LASK Linz",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-24T17:45:00Z",
+      "espnEventId": "401915380",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Galatasaray",
+      "away": "Aston Villa",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-24T17:45:00Z",
+      "espnEventId": "401915300",
+      "sources": []
+    },
     {
       "competition": "premier-league",
       "home": "Brentford",
