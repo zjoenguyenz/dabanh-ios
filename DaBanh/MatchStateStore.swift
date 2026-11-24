@@ -362,6 +362,15 @@ private struct ESPNCompetitorDTO: Decodable {
     let homeAway: String?
     let score: String?
     let team: ESPNTeamDTO?
+    /// Per-period scores (FIX-137, basketball): the NBA
+    /// scoreboard carries one entry per played period; the
+    /// soccer board's competitors do not need it and never read
+    /// it — decoding an extra optional field changes nothing
+    /// on the soccer path.
+    let linescores: [ESPNLinescoreDTO]?
+}
+private struct ESPNLinescoreDTO: Decodable {
+    let displayValue: String?
 }
 private struct ESPNTeamDTO: Decodable {
     let id: String?
@@ -388,6 +397,11 @@ private struct ESPNAthleteDTO: Decodable { let displayName: String? }
 private struct ESPNStatusDTO: Decodable {
     let displayClock: String?
     let type: ESPNStatusTypeDTO?
+    /// The current period (FIX-137, basketball): the NBA
+    /// scoreboard carries it on every event (1–4 = quarters,
+    /// 5+ = overtime); the soccer status does not carry a
+    /// usable one and the soccer path never reads it.
+    let period: Int?
 }
 private struct ESPNStatusTypeDTO: Decodable {
     let name: String?
@@ -698,6 +712,145 @@ enum MatchStateClient {
         return plain.date(from: raw)
     }
 
+    // MARK: ESPN basketball (NBA) — FIX-137 (DB-31/FL-478)
+
+    /// The NBA scoreboard sweep, the basketball sibling of
+    /// `fetchESPN`: same host, same `?dates=` discipline (the
+    /// ICT seam ±1 day), decoded with the same wire DTOs.
+    /// Designed against the LIVE payload pulled 2026-11-24
+    /// (10 events): `status` carries `period` (1–4 quarters,
+    /// 5+ overtime) and `displayClock` (the game clock, e.g.
+    /// "8:02", "18.3"), `type.detail` reads "8:02 - 2nd
+    /// Quarter" / "Final" / "Final/OT"; `competitions[].details`
+    /// is EMPTY on the scoreboard — there are no scoring plays
+    /// to map — and each competitor carries `linescores`
+    /// (per-period scores), from which the half-time score is
+    /// Q1+Q2 once the second quarter is complete.
+    ///
+    /// States are stamped `source: .espn` (the same layer and
+    /// precedence as the soccer board — pair keys never collide
+    /// across sports) with competition `.other("NBA")`, and the
+    /// live minute text is a BASKETBALL clock ("Q2 · 8:02",
+    /// "OT · 2:34") — never the football BoundedClock, which
+    /// stays a fallback for unmatched FOOTBALL fixtures only
+    /// (the render-side guard is in FixtureEntry.liveBadgeText).
+    static func fetchESPNBasketball() async -> [MatchState] {
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let now = Date()
+        let dates = [ictDateParam(now.addingTimeInterval(-24 * 3600)),
+                     ictDateParam(now),
+                     ictDateParam(now.addingTimeInterval(24 * 3600))]
+        return await withTaskGroup(of: [MatchState].self) { group in
+            for dateParam in dates {
+                group.addTask {
+                    await fetchESPNBasketballBoard(dateParam: dateParam, session: session)
+                }
+            }
+            var all: [MatchState] = []
+            for await states in group { all += states }
+            return all
+        }
+    }
+
+    private static func fetchESPNBasketballBoard(dateParam: String,
+                                                 session: URLSession) async -> [MatchState] {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=\(dateParam)"),
+              let data = await get(url, session: session),
+              let dto = try? JSONDecoder().decode(ESPNDTO.self, from: data),
+              let events = dto.events else { return [] }
+        var out: [MatchState] = []
+        for event in events {
+            guard let comp = event.competitions?.first,
+                  let competitors = comp.competitors, competitors.count == 2,
+                  let home = competitors.first(where: { $0.homeAway == "home" }),
+                  let away = competitors.first(where: { $0.homeAway == "away" }),
+                  let homeName = home.team?.displayName,
+                  let awayName = away.team?.displayName,
+                  let key = MatchMatching.pairKey(team1: homeName, team2: awayName)
+            else { continue }
+            let kickoff = event.date.flatMap { parseISO8601($0) }
+            let dateKey = kickoff.map { FixtureGrouping.stampDateKey(of: $0) } ?? ""
+            let type = event.status?.type
+            let name = (type?.name ?? "").uppercased()
+            let status: MatchStatus
+            var minute: String? = nil
+            if type?.state == "pre" {
+                status = .pre
+            } else if name.contains("POSTPONED") {
+                status = .postponed
+            } else if name.contains("CANCEL") {
+                status = .cancelled
+            } else if type?.state == "post" || type?.completed == true {
+                status = .fullTime
+            } else if name.contains("HALFTIME") || type?.detail == "Halftime" {
+                status = .halfTime
+            } else {
+                status = .live
+                minute = basketballClock(period: event.status?.period,
+                                         displayClock: event.status?.displayClock)
+            }
+            // Half-time score from the linescores (Q1+Q2), only
+            // once the second quarter is COMPLETE — the game is
+            // at half-time, in Q3/Q4/OT, or finished. During Q2
+            // the second linescore is still moving and stamping
+            // it as a half-time score would print a running sum
+            // under the half-time label.
+            var htHome: Int? = nil
+            var htAway: Int? = nil
+            if status == .halfTime || status == .fullTime
+                || (event.status?.period ?? 0) >= 3 {
+                htHome = halftimeScore(from: home.linescores)
+                htAway = halftimeScore(from: away.linescores)
+                if htHome == nil || htAway == nil { htHome = nil; htAway = nil }
+            }
+            // The feed's own badges join Crests' learned registry,
+            // exactly as on the soccer board (DB-02).
+            let homeLogo = home.team?.logo.flatMap { URL(string: $0) }
+            let awayLogo = away.team?.logo.flatMap { URL(string: $0) }
+            if let homeLogo { Crests.registerLearnedLogo(forTeam: homeName, logoURL: homeLogo) }
+            if let awayLogo { Crests.registerLearnedLogo(forTeam: awayName, logoURL: awayLogo) }
+            out.append(MatchState(
+                pairKey: key, dateKey: dateKey, eventKickoff: kickoff,
+                status: status, minuteText: minute,
+                scoreHome: home.score.flatMap { Int($0) },
+                scoreAway: away.score.flatMap { Int($0) },
+                htHome: htHome, htAway: htAway,
+                goals: [], cards: [],
+                competition: .other(label: "NBA"), source: .espn,
+                fotmobID: nil, fetchedAt: Date(),
+                womenMarked: false))
+        }
+        return out
+    }
+
+    /// The basketball live clock text for the badge/hero: the
+    /// quarter (or overtime) plus ESPN's own game clock —
+    /// "Q2 · 8:02", "Q4 · 18.3", "OT · 2:34", "OT2 · 1:05".
+    /// Falls back to the bare game clock when the period is
+    /// missing, and to nil when ESPN carries neither (the state
+    /// then renders a plain LIVE, never an invented clock).
+    private static func basketballClock(period: Int?, displayClock: String?) -> String? {
+        guard let displayClock, !displayClock.isEmpty else { return nil }
+        guard let period, period >= 1 else { return displayClock }
+        switch period {
+        case 1...4: return "Q\(period) · \(displayClock)"
+        case 5: return "OT · \(displayClock)"
+        default: return "OT\(period - 4) · \(displayClock)"
+        }
+    }
+
+    /// Q1+Q2 from a competitor's linescores, or nil when fewer
+    /// than two periods are recorded or either is unparseable
+    /// (fail closed — no half-time line rather than a wrong one).
+    private static func halftimeScore(from linescores: [ESPNLinescoreDTO]?) -> Int? {
+        guard let linescores, linescores.count >= 2,
+              let q1 = linescores[0].displayValue.flatMap({ Int($0) }),
+              let q2 = linescores[1].displayValue.flatMap({ Int($0) })
+        else { return nil }
+        return q1 + q2
+    }
+
     // MARK: FotMob
 
     /// The FotMob competition map (spec §3.3, measured names —
@@ -936,11 +1089,11 @@ enum MatchStateClient {
     /// `minuteText` stays nil and goals/cards stay empty — the
     /// bounded clock and the ESPN/FotMob layers own those.
     ///
-    /// The basketball feed (f_3) is deliberately NOT fetched: this
-    /// app binds football fixtures only — no basketball fixture,
-    /// pair-keyed state or tab exists anywhere in DaBanh (the one
-    /// "NBA" hit is a Nuvio channel-family comment) — so NBB
-    /// states could never bind and would only pollute the store.
+    /// The Flashscore basketball feed (f_3) is deliberately NOT
+    /// fetched: basketball fixtures bind through the ESPN NBA
+    /// board instead (FIX-137, DB-31/FL-478 — score + quarter
+    /// clock + linescores), which carries the fuller record;
+    /// this layer stays soccer-only.
     static func fetchFlashscore() async -> [MatchState] {
         let session = makeSession()
         defer { session.invalidateAndCancel() }
@@ -1153,6 +1306,56 @@ final class MatchStateStore: ObservableObject {
     /// against; a lagging result for a different episode restarts
     /// the count at 1. Cleared when a result is accepted.
     private var detailRejects: [Int: (episode: DetailStamp, count: Int)] = [:]
+    /// Ids whose missing-stamp fail-open re-fetch has already
+    /// fired (FIX-137, DB-29/FL-477): a cache entry written with
+    /// no stamp (a nil-issued store) counts as score-moved ONCE
+    /// so the entry can earn a real stamp; before this set the
+    /// fail-open re-qualified the entry on every pass forever
+    /// whenever the healing fetch kept failing or lagging.
+    /// The allowance is spent when the fetch FIRES but REFUNDED
+    /// when that fetch fails (nil) or returns lagging (FIX-137
+    /// round 2, gate M-1): a healing fetch that never landed
+    /// must not seal the entry — that was the E2 freeze. The
+    /// retries the refund re-enables are bounded by the failure
+    /// backoff below (nil) and by the reject cap (lagging: the
+    /// 3rd lag advances the stamp anyway). Cleared for an id
+    /// when a stamp is written for it; pruned for ids that have
+    /// left the feed.
+    private var stampFailOpenUsed: Set<Int> = []
+    /// Consecutive NIL detail fetches per id (FIX-137 round 2,
+    /// gate B-1): the episode the failures were counted against,
+    /// how many in a row, and the moment the id becomes
+    /// fetch-eligible again. Before this record a nil fetch
+    /// advanced NOTHING — no stamp, budget, reject or failure
+    /// count — so an id whose details endpoint is permanently
+    /// broken (a per-id payload the client decodes to nil, not
+    /// an outage) re-qualified on every pass forever and, with
+    /// 4+ such ids, saturated the shared cap indefinitely.
+    /// The gate is episode-scoped like `detailRejects`: a score
+    /// change since the failure is a new episode and bypasses
+    /// the backoff at once, so a revived score move is never
+    /// blacklisted; any answered fetch clears the record
+    /// (`storeDetails`), so a revived endpoint recovers fully.
+    /// A nil episode (an on-demand store whose issue stamp was
+    /// unavailable) gates on the clock alone. Pruned for ids
+    /// that have left the feed.
+    private var detailFetchFailures: [Int: (episode: DetailStamp?, count: Int, retryAfter: Date)] = [:]
+
+    /// Stepped retry delay after `n` consecutive nil detail
+    /// fetches for one id (FIX-137 round 2, gate B-1): quick
+    /// forgiveness for a transient drop, a firm one-hour ceiling
+    /// for a permanently broken endpoint — one fetch per hour
+    /// per broken id, so the population's cost per cycle falls
+    /// to ~0 instead of pinning the cap of 4 forever.
+    private static func detailFailureBackoff(consecutiveFailures n: Int) -> TimeInterval {
+        switch n {
+        case 1: return 60
+        case 2: return 300
+        case 3: return 900
+        case 4: return 1800
+        default: return 3600
+        }
+    }
     private static let maxDetailRejects = 3
     /// Accepted fetches issued at full time after which a cached
     /// entry stops qualifying for full-time settling fetches.
@@ -1189,11 +1392,15 @@ final class MatchStateStore: ObservableObject {
             now.timeIntervalSince($0) > 3600
         } ?? true
         async let espnFetch = MatchStateClient.fetchESPN(full: full, activeSlugs: knownSlugs)
+        // FIX-137 (DB-31/FL-478): the NBA board rides the same
+        // cycle — three date boards, no slug gating.
+        async let nbaFetch = MatchStateClient.fetchESPNBasketball()
         async let fotmobFetch = MatchStateClient.fetchFotMob()
         async let flashFetch = MatchStateClient.fetchFlashscore()
         async let liveFetch = MatchStateClient.fetchLiveScoreLive()
         async let dateFetch = MatchStateClient.fetchLiveScoreDate(ifNeeded: wantDateFeed)
         let espnStates = await espnFetch
+        let nbaStates = await nbaFetch
         let fotmobStates = await fotmobFetch
         let flashStates = await flashFetch
         let liveStates = await liveFetch
@@ -1207,7 +1414,11 @@ final class MatchStateStore: ObservableObject {
         // in `filledFromPool`, where the date-agreed pool for the
         // fixture is known — FIX-127.)
         var merged: [String: MatchState] = [:]
-        for state in dateStates + liveStates + flashStates + fotmobStates + espnStates {
+        // The NBA states merge LAST, with the ESPN soccer states:
+        // same layer, and pair keys never collide across sports,
+        // so no soccer binding can be displaced by a basketball
+        // state or vice versa (FIX-137).
+        for state in dateStates + liveStates + flashStates + fotmobStates + espnStates + nbaStates {
             merged[state.pairKey + "|" + state.dateKey] = state
         }
         // FotMob states inherit any cached matchDetails incidents
@@ -1242,6 +1453,7 @@ final class MatchStateStore: ObservableObject {
         revision += 1
         DiagLog.log("cluster",
                     "cycle full=\(full): espn=\(espnStates.count) "
+                    + "nba=\(nbaStates.count) "
                     + "fotmob=\(fotmobStates.count) flash=\(flashStates.count) "
                     + "livescore=\(liveStates.count + dateStates.count) "
                     + "merged=\(upgraded.count) "
@@ -1251,6 +1463,35 @@ final class MatchStateStore: ObservableObject {
         // not only at playlist publish, so scorers/cards land
         // within a cycle of the state that needs them.
         await upgradeLiveFotMobDetails()
+    }
+
+    /// True while `id` sits in a nil-failure backoff for
+    /// `episode` (FIX-137 round 2, gate B-1): the failure record
+    /// gates only the episode it was counted against — a score
+    /// change since then is new information and fetches at
+    /// once — and only until its retry moment. A record with a
+    /// nil episode gates on the clock alone.
+    private func detailFetchBackedOff(_ id: Int, episode: DetailStamp) -> Bool {
+        guard let failure = detailFetchFailures[id] else { return false }
+        if let failedEpisode = failure.episode,
+           !failedEpisode.sameEpisode(as: episode) { return false }
+        return Date() < failure.retryAfter
+    }
+
+    /// Records one NIL detail fetch for `id` (FIX-137 round 2,
+    /// gate B-1): the consecutive-failure count advances, the
+    /// retry moment steps out per `detailFailureBackoff`, and
+    /// the engagement is written to the diagnostic log. The
+    /// record is replaced with the episode this failure was
+    /// issued against; any answered fetch clears it
+    /// (`storeDetails`).
+    private func noteDetailFetchFailure(for id: Int, issued: DetailStamp?) {
+        let count = (detailFetchFailures[id]?.count ?? 0) + 1
+        let delay = Self.detailFailureBackoff(consecutiveFailures: count)
+        detailFetchFailures[id] = (issued, count, Date().addingTimeInterval(delay))
+        DiagLog.log("cluster",
+                    "fotmob details fetch failed: id=\(id) — consecutive "
+                    + "failure \(count), backing off \(Int(delay))s")
     }
 
     /// The refresh-cycle form of the FotMob incidents upgrade
@@ -1276,36 +1517,99 @@ final class MatchStateStore: ObservableObject {
     /// cap of 4, re-fetches first. The stamp is written with the
     /// cache entry (`storeDetails`), which also holds the
     /// consistency rule.
+    ///
+    /// FIX-137 (DB-29/FL-477) quiescence discipline — the E2
+    /// populations above are kept (late goals/cards DO arrive),
+    /// but each is now bounded so the machinery goes quiet when
+    /// nothing new is happening:
+    /// - a fetched result is applied through `applyDetails`,
+    ///   which bumps `revision` ONLY when the incidents actually
+    ///   change (a confirming re-fetch costs no re-render);
+    /// - an accepted full-time fetch whose result DEMONSTRABLY
+    ///   confirms the cached incidents complete banks the whole
+    ///   settling budget at once (`storeDetails`), so a finished
+    ///   match stops qualifying after a confirming repeat
+    ///   instead of three accepted fetches — the ~200-match
+    ///   full-time backlog drains at ~two fetches per match,
+    ///   not three-to-nine. Round 2 (gate M-2): the confirmation
+    ///   must repeat — goals AND cards — a cache that was itself
+    ///   written at full time; a first fetch never banks, so a
+    ///   late-published card is never sealed out by goals-only
+    ///   evidence;
+    /// - the missing-stamp fail-open fires ONCE per cache entry
+    ///   (`stampFailOpenUsed`), not on every pass forever — and
+    ///   the spend is refunded when the fetch fails or lags
+    ///   (round 2, gate M-1), so a healing fetch that never
+    ///   landed cannot seal the entry;
+    /// - a NIL fetch (network/decode failure) advances a per-id
+    ///   consecutive-failure backoff (round 2, gate B-1): the
+    ///   id stops re-qualifying until its stepped retry moment
+    ///   (60 s → 1 h ceiling), a changed episode bypasses the
+    ///   gate at once, and any answered fetch clears it — so
+    ///   even a permanently broken per-id endpoint drains out
+    ///   of the cap instead of pinning it forever;
+    /// - score-moved re-fetches (the user-visible changes) fill
+    ///   the cap before settling-only ones, which fill it before
+    ///   first fetches (E2 P3 order, refined).
+    /// Steady state with no new goals/cards: zero detail fetches
+    /// and zero detail-driven revision bumps per cycle.
     private func upgradeLiveFotMobDetails() async {
         let ordered = states.sorted {
             ($0.status.isLiveish ? 0 : 1) < ($1.status.isLiveish ? 0 : 1)
         }
+        // Bookkeeping for ids that have left the day feed is
+        // pruned (FIX-137 round 2, gate MINOR): the fail-open
+        // spends and failure records of vanished ids would
+        // otherwise outlive their matches for the whole session.
+        // A pruned id that returns starts fresh — one healing or
+        // retry fetch, then the same bounds re-engage.
+        let feedIDs = Set(ordered.compactMap {
+            $0.source == .fotmob ? $0.fotmobID : nil
+        })
+        stampFailOpenUsed.formIntersection(feedIDs)
+        detailFetchFailures = detailFetchFailures.filter { feedIDs.contains($0.key) }
         // E2 (P3): re-fetch targets fill the cap of 4 BEFORE
         // first-fetch targets, so uncached states from the whole
         // day's feed cannot starve them. Which states qualify as a
-        // first fetch is unchanged.
-        typealias Target = (id: Int, issued: DetailStamp, log: String?)
-        var refetches: [Target] = []
+        // first fetch is unchanged. FIX-137: within re-fetches,
+        // score-moved targets (a visible change is waiting) go
+        // before settling-only targets.
+        typealias Target = (id: Int, issued: DetailStamp, log: String?, failOpen: Bool)
+        var movedFetches: [Target] = []
+        var settlingFetches: [Target] = []
         var firstFetches: [Target] = []
         for state in ordered {
             guard state.source == .fotmob, let id = state.fotmobID else { continue }
             let issued = DetailStamp(home: state.scoreHome, away: state.scoreAway,
                                      atFullTime: state.status == .fullTime)
+            // FIX-137 round 2 (gate B-1): an id in a nil-failure
+            // backoff for this episode is not fetched yet — a
+            // permanently broken details endpoint must not
+            // re-qualify on every pass and pin the cap. The gate
+            // covers all three populations below (first fetch,
+            // score-moved, settling); a changed episode bypasses
+            // it inside `detailFetchBackedOff`.
+            if detailFetchBackedOff(id, episode: issued) { continue }
             guard detailCache[id] != nil else {
                 if state.goals.isEmpty && state.cards.isEmpty {
-                    firstFetches.append((id, issued, nil))
+                    firstFetches.append((id, issued, nil, false))
                 }
                 continue
             }
             let stamp = detailStamp[id]
             // Score moved since the issued-against score, while
             // live, half-time or full-time. A missing stamp counts
-            // as moved (fail open): a cache entry with no stamp is
-            // exactly the state that used to freeze.
+            // as moved (fail open) ONCE per cache entry (FIX-137):
+            // a cache entry with no stamp is exactly the state
+            // that used to freeze. The one spend is refunded when
+            // the healing fetch fails or lags (round 2, gate
+            // M-1) — those retries are bounded by the failure
+            // backoff and the reject cap, not by the spend.
+            let failOpen = stamp == nil && !stampFailOpenUsed.contains(id)
             let scoreMoved = (state.status.isLiveish || state.status == .fullTime)
                 && (stamp.map {
                     $0.home != state.scoreHome || $0.away != state.scoreAway
-                } ?? true)
+                } ?? failOpen)
             // Full-time settling fetch: at every full-time pass,
             // whatever the score (late cards and other incidents),
             // until 3 fetches issued at full time have been ACCEPTED
@@ -1326,10 +1630,22 @@ final class MatchStateStore: ObservableObject {
                 log = "fotmob details full-time settle: id=\(id) "
                     + "accepted \(fullTimeAccepted)/\(Self.fullTimeFetchBudget)"
             }
-            refetches.append((id, issued, log))
+            if scoreMoved {
+                movedFetches.append((id, issued, log, stamp == nil))
+            } else {
+                settlingFetches.append((id, issued, log, false))
+            }
         }
-        let targets = Array((refetches + firstFetches).prefix(4))
+        let targets = Array((movedFetches + settlingFetches + firstFetches).prefix(4))
         if targets.isEmpty { return }
+        // The fail-open allowance is spent only by a fetch that
+        // actually fires (a target cut by the cap keeps it) —
+        // and refunded below when that fetch fails, or inside
+        // `storeDetails` when it returns lagging (round 2,
+        // gate M-1).
+        for target in targets where target.failOpen {
+            stampFailOpenUsed.insert(target.id)
+        }
         for target in targets {
             if let line = target.log { DiagLog.log("cluster", line) }
         }
@@ -1337,16 +1653,43 @@ final class MatchStateStore: ObservableObject {
             let id = target.id
             if let details = await MatchStateClient.fetchFotMobDetails(matchID: id) {
                 storeDetails(details, for: id, issued: target.issued)
-                var changed = false
-                for i in states.indices
-                where states[i].source == .fotmob && states[i].fotmobID == id {
-                    states[i].goals = details.goals
-                    states[i].cards = details.cards
-                    changed = true
-                }
-                if changed { revision += 1 }
+                applyDetails(details, for: id)
+            } else {
+                // FIX-137 round 2 (gate B-1 + M-1): a nil fetch
+                // advances the per-id failure backoff, so a
+                // permanently broken endpoint drains out of the
+                // cap instead of re-qualifying every pass; and
+                // the fail-open allowance is REFUNDED — the
+                // healing fetch never landed, so it must not
+                // seal a stamp-less entry (the E2 freeze). The
+                // refund's retries are bounded by the backoff
+                // just recorded.
+                noteDetailFetchFailure(for: id, issued: target.issued)
+                stampFailOpenUsed.remove(id)
             }
         }
+    }
+
+    /// Applies one fetched details result to the published
+    /// states for its FotMob id (FIX-137, DB-29/FL-477): the
+    /// equality guard FL-477's prevention line 1 demands. The
+    /// incidents are written — and `revision` bumped, which is
+    /// what re-renders the whole app — ONLY where they actually
+    /// differ from what the state already shows; a re-fetch that
+    /// confirms the incidents already on screen is free.
+    private func applyDetails(_ details: (goals: [GoalEvent], cards: [CardEvent]),
+                              for id: Int) {
+        var changed = false
+        for i in states.indices
+        where states[i].source == .fotmob && states[i].fotmobID == id {
+            if states[i].goals != details.goals
+                || states[i].cards != details.cards {
+                states[i].goals = details.goals
+                states[i].cards = details.cards
+                changed = true
+            }
+        }
+        if changed { revision += 1 }
     }
 
     /// The issue-time stamp for FotMob match `id`: its own raw
@@ -1367,8 +1710,9 @@ final class MatchStateStore: ObservableObject {
     /// FotMob state at issue time) writes the cache with NO stamp,
     /// and a lagging result (below) keeps the previous stamp. Both
     /// are re-fetched by `upgradeLiveFotMobDetails`: a missing
-    /// stamp counts as a moved score (fail open), and a kept stamp
-    /// still differs from the current score or still has budget.
+    /// stamp counts as a moved score (fail open — ONCE per cache
+    /// entry since FIX-137), and a kept stamp still differs from
+    /// the current score or still has budget.
     ///
     /// Consistency rule (E2, P4): when the issued score is known on
     /// both sides, the result must list at least `home + away`
@@ -1387,10 +1731,44 @@ final class MatchStateStore: ObservableObject {
     /// An accepted stamp carries `fullTimeAccepted` forward from
     /// the previous stamp, plus 1 when this fetch was issued at
     /// full time (the full-time settling budget).
+    ///
+    /// FIX-137 (DB-29/FL-477): one accepted full-time fetch can
+    /// bank the WHOLE budget when its result demonstrably
+    /// confirms the incidents complete against the final score:
+    /// the result is not lagging (it passed the goal-consistency
+    /// check above) AND it repeats the previously cached
+    /// incident set exactly — goals AND cards — where that
+    /// cache was itself written by a full-time-issued fetch
+    /// (`demonstrablyComplete`). Before this, EVERY finished
+    /// match owed 3 accepted full-time fetches (3–9 cycle slots
+    /// with lag), so the day's ~200 finished matches saturated
+    /// the cap of 4 for hours. A lagging result that only
+    /// advanced at the reject cap never banks early — its
+    /// incident set is known to be incomplete. A later score
+    /// correction still re-fetches through the score-moved
+    /// rule, which the budget never gates.
+    ///
+    /// FIX-137 round 2 (gate M-2): a FIRST full-time fetch
+    /// never banks. Round 1 let it bank on the goal-consistency
+    /// check alone — goals-only evidence — which sealed out
+    /// cards published after that fetch (a card never moves
+    /// the score, so nothing re-qualified the match). Now the
+    /// first fetch only advances the budget (+1) and at least
+    /// one further settling fetch must repeat the by-then
+    /// full-time-written cache, cards included, before the
+    /// budget banks.
     private func storeDetails(_ details: (goals: [GoalEvent], cards: [CardEvent]),
                               for id: Int, issued: DetailStamp?) {
+        let previous = detailCache[id]
         detailCache[id] = details
+        // Any ANSWERED fetch — even a lagging one — proves the
+        // endpoint is alive for this id, so the nil-failure
+        // backoff resets in full (FIX-137 round 2, gate B-1
+        // recovery): a revived endpoint is never held back by
+        // failures from before its recovery.
+        detailFetchFailures[id] = nil
         guard let issued else { return }
+        var laggedOut = false
         if let home = issued.home, let away = issued.away,
            details.goals.count < home + away {
             let rejects: Int
@@ -1404,14 +1782,72 @@ final class MatchStateStore: ObservableObject {
                         + "goal(s) for \(home)-\(away) — attempt \(rejects)/\(Self.maxDetailRejects)")
             if rejects < Self.maxDetailRejects {
                 detailRejects[id] = (issued, rejects)
+                // FIX-137 round 2 (gate M-1): a lagging result
+                // writes no stamp, so a fail-open allowance spent
+                // on this fetch is refunded — the entry may heal
+                // on a later pass instead of staying sealed. The
+                // retries are bounded by the reject count itself:
+                // the 3rd consecutive lag advances the stamp
+                // anyway (below), after which the entry is
+                // stamped and the fail-open no longer applies.
+                stampFailOpenUsed.remove(id)
                 return
             }
+            laggedOut = true
         }
         detailRejects[id] = nil
+        // A stamp now exists for this entry: any future
+        // stamp-less episode is a new entry's, so the fail-open
+        // allowance resets (FIX-137).
+        stampFailOpenUsed.remove(id)
         var stamp = issued
-        stamp.fullTimeAccepted = (detailStamp[id]?.fullTimeAccepted ?? 0)
-            + (issued.atFullTime ? 1 : 0)
+        let carried = detailStamp[id]?.fullTimeAccepted ?? 0
+        if issued.atFullTime && !laggedOut
+            && Self.demonstrablyComplete(details, previous: previous,
+                                         previousStamp: detailStamp[id]) {
+            stamp.fullTimeAccepted = Self.fullTimeFetchBudget
+            if carried < Self.fullTimeFetchBudget {
+                DiagLog.log("cluster",
+                            "fotmob details settled: id=\(id) — full-time fetch "
+                            + "confirmed incidents complete, settling banked "
+                            + "\(Self.fullTimeFetchBudget)/\(Self.fullTimeFetchBudget)")
+            }
+        } else {
+            stamp.fullTimeAccepted = carried + (issued.atFullTime ? 1 : 0)
+        }
         detailStamp[id] = stamp
+    }
+
+    /// The FIX-137 completeness test for an accepted full-time
+    /// fetch (see `storeDetails`): the endpoint's answer leaves
+    /// nothing further to learn for this match. It qualifies
+    /// ONLY as an exact repeat — goals AND cards — of a cached
+    /// incident set that was itself written by a full-time-
+    /// issued fetch (the previous stamp is a full-time one):
+    /// the endpoint, asked at full time, answered twice with
+    /// the identical incident list, cards included.
+    ///
+    /// FIX-137 round 2 (gate M-2): round 1 also let a FIRST
+    /// fetch qualify whenever the goal-consistency check ran —
+    /// goals-only evidence that says nothing about cards, the
+    /// very incidents settling exists to catch late (a card
+    /// never moves the score, so a card published after that
+    /// fetch could never re-qualify the match). A first fetch,
+    /// a repeat of a pre-full-time cache, and a repeat of a
+    /// stamp-less cache all fail this test: they advance the
+    /// budget by one and leave at least one further settling
+    /// fetch to confirm. Any incident change likewise fails
+    /// it, so the confirming repeat must come after the last
+    /// change.
+    private static func demonstrablyComplete(
+        _ details: (goals: [GoalEvent], cards: [CardEvent]),
+        previous: (goals: [GoalEvent], cards: [CardEvent])?,
+        previousStamp: DetailStamp?
+    ) -> Bool {
+        guard let previous, let previousStamp, previousStamp.atFullTime
+        else { return false }
+        return previous.goals == details.goals
+            && previous.cards == details.cards
     }
 
     /// The state bound to a fixture channel, if any: pair-key +
@@ -1596,6 +2032,13 @@ final class MatchStateStore: ObservableObject {
                   let id = state.fotmobID,
                   state.goals.isEmpty,
                   detailCache[id] == nil else { continue }
+            // FIX-137 round 2 (gate B-1): the nil-failure
+            // backoff gates this path too — a board re-open must
+            // not hammer an endpoint already backing off for
+            // this episode.
+            let episode = DetailStamp(home: state.scoreHome, away: state.scoreAway,
+                                      atFullTime: state.status == .fullTime)
+            if detailFetchBackedOff(id, episode: episode) { continue }
             targets.append(id)
         }
         if targets.isEmpty { return }
@@ -1606,14 +2049,15 @@ final class MatchStateStore: ObservableObject {
             let issued = issueStamp(for: id)
             if let details = await MatchStateClient.fetchFotMobDetails(matchID: id) {
                 storeDetails(details, for: id, issued: issued)
-                var changed = false
-                for i in states.indices
-                where states[i].source == .fotmob && states[i].fotmobID == id {
-                    states[i].goals = details.goals
-                    states[i].cards = details.cards
-                    changed = true
-                }
-                if changed { revision += 1 }
+                // FIX-137: same equality guard as the cycle path
+                // — no observable change, no revision bump.
+                applyDetails(details, for: id)
+            } else {
+                // FIX-137 round 2 (gate B-1): a nil fetch on
+                // this path advances the same failure backoff
+                // (the issue stamp may be nil here — the record
+                // then gates on the clock alone).
+                noteDetailFetchFailure(for: id, issued: issued)
             }
         }
     }

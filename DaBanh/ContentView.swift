@@ -329,6 +329,15 @@ struct ContentView: View {
                 // its player and can never leak into the
                 // next player open.
                 MUFullscreenState.isActive = false
+                // FIX-137 (DB-30/FL-402): the flip back to
+                // the board must also restore portrait HERE —
+                // before this, this branch made no orientation
+                // call at all, so a landscape lock (classic) or
+                // a landscape window (MU) survived under the
+                // board until the whole cover was dismissed.
+                // The cover's onDismiss repeats the same call
+                // on a genuine close; both are the one widen.
+                OrientationHelper.lock(.all, rotateTo: .portrait)
             }
         }
         .sheet(isPresented: $showDiagLog) {

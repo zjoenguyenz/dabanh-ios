@@ -993,20 +993,33 @@ extension LivePlayerViewController {
     /// orientation lock, the step the MU branch never had
     /// (DIAG-133 §3–§4: both MU "fullscreen" entries used to
     /// run the classic fill/fit toggle, which never rotates
-    /// the portrait page). Entering (currently portrait)
-    /// narrows the lock to landscape with the exact call the
-    /// classic branch uses; the geometry update rotates the
-    /// UI and layoutMUChrome reflows to the landscape page
-    /// on the new bounds. Exiting (currently landscape)
-    /// rotates back to the portrait page AND reopens the
-    /// lock to MU's free-rotation baseline. The current side
-    /// comes from the same tracked flag layoutMUChrome keeps
-    /// (mu.landscape), falling back to its own bounds test —
-    /// no new persistent state beyond MUFullscreenState,
-    /// which ContentView needs for its route-change guard.
+    /// the portrait page). Entering narrows the lock to
+    /// landscape with the exact call the classic branch uses;
+    /// the geometry update rotates the UI and layoutMUChrome
+    /// reflows to the landscape page on the new bounds.
+    /// Exiting rotates back to the portrait page AND reopens
+    /// the lock to MU's free-rotation baseline.
+    ///
+    /// FIX-137 (DB-30/FL-402): enter/exit is decided by the
+    /// fullscreen state's own record — `MUFullscreenState.
+    /// isActive`, the actual current state of the feature —
+    /// NOT by `mu.landscape`, the layout flag layoutMUChrome
+    /// maintains. Under MU's free-rotation baseline the owner
+    /// can reach the landscape page by physically rotating the
+    /// phone with fullscreen never entered; the old code read
+    /// the layout flag, saw "landscape", and treated the tap
+    /// as an EXIT (dropping to a free mask + a portrait
+    /// request) — the toggle inverted against the user's
+    /// intent. The live interface orientation is logged with
+    /// every toggle so the device log can convict any residual
+    /// mismatch between the record and the window.
     @objc func muToggleFullscreen() {
-        let isLandscape = muChrome?.landscape ?? (view.bounds.width > view.bounds.height)
-        if isLandscape {
+        let live = view.window?.windowScene?.interfaceOrientation
+        DiagLog.log("player",
+                    "mu fullscreen toggle: active=\(MUFullscreenState.isActive) "
+                    + "interface=\(live?.rawValue ?? -1) "
+                    + "layoutLandscape=\(muChrome?.landscape ?? false)")
+        if MUFullscreenState.isActive {
             MUFullscreenState.isActive = false
             OrientationHelper.lock(.all, rotateTo: .portrait)
         } else {

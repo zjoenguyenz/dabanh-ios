@@ -216,6 +216,12 @@ enum TeamNameNorm {
         "agf aarhus": "agf",
         "lyngby bk": "lyngby",
         "sv darmstadt": "darmstadt",
+        // FIX-137 (DB-31/FL-478), measured on the live ESPN NBA
+        // board + the playlist snapshot (2026-11-24): ESPN writes
+        // "LA Clippers", the playlist writes "Los Angeles
+        // Clippers" — one team, two keys, so the basketball state
+        // could never bind the fixture.
+        "la clippers": "los angeles clippers",
         // REVIEW-127B-LOOP2 Finding 1 (2026-11-20) — measured in
         // the round's own corpus, each pair on the same fixture
         // (same opponent, same date) across sources:

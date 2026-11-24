@@ -131,17 +131,30 @@ struct FixtureEntry: Identifiable {
     /// The board's badge text for a live fixture: the matched
     /// state's own minute/status, or the bounded computed clock
     /// when no source matched (never a fabricated score).
+    /// FIX-137 (DB-31/FL-478): the bounded clock is a FOOTBALL
+    /// clock (45'+x', frozen "90+'") — it must never render for
+    /// a non-football fixture (the Rockets–Clippers screenshot
+    /// wore "90+'" on a basketball game). The sport test is the
+    /// classifier's own: `sportRank` 1 = a non-football sport
+    /// emoji (🏀🏐🎾🏸🏒🥊) in the title. A basketball fixture
+    /// WITH a bound state never reaches this fallback — the
+    /// state's own quarter clock renders instead.
     var liveBadgeText: String? {
         if let state { return state.badgeText }
         guard isLive, let kickoff = channel.kickoff else { return nil }
+        guard LeagueClassifier.sportRank(of: channel) == 0 else { return nil }
         return BoundedClock.text(kickoff: kickoff)
     }
 
     /// True when the live badge should wear the half-time amber:
     /// a matched HT state, or the computed clock's HT estimate.
+    /// The stateless estimate gets the same FIX-137 sport guard
+    /// as the badge text — no football half-time estimate on a
+    /// non-football fixture.
     var isHalfTimeDisplay: Bool {
         if let state { return state.status == .halfTime }
         guard let kickoff = channel.kickoff else { return false }
+        guard LeagueClassifier.sportRank(of: channel) == 0 else { return false }
         return isLive && BoundedClock.isHalfTimeEstimate(kickoff: kickoff)
     }
 
