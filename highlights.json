@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-24T00:11:12Z",
+  "generatedAt": "2026-11-24T00:41:03Z",
   "matches": [
     {
       "competition": "premier-league",
@@ -34,6 +34,14 @@
           "official": true,
           "durationSec": null,
           "addedAt": "2026-11-23T23:08:32Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "VQq8IoHTYmk",
+          "label": "Everton Football Club",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-24T00:38:53Z"
         }
       ]
     },
