@@ -20,7 +20,7 @@ permissions:
 jobs:
   build:
     if: github.event_name == 'push' || inputs.target == 'ios' || inputs.target == 'both'
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -32,11 +32,6 @@ jobs:
           NAME="DaBanh-ipa-run${{ github.run_number }}-${DATE}"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "Artifact / IPA name: ${NAME}"
-
-      - name: Select latest stable Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: "26.6"
 
       - name: Show toolchain
         run: |
