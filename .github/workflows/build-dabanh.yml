@@ -11,7 +11,7 @@ on:
       target:
         description: "What to build"
         type: choice
-        options: [both, ios, tvos, tvapp]
+        options: [both, ios, tvos]
         default: both
 
 permissions:
@@ -20,7 +20,7 @@ permissions:
 jobs:
   build:
     if: github.event_name == 'push' || inputs.target == 'ios' || inputs.target == 'both'
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Show toolchain
         run: |
@@ -87,7 +87,7 @@ jobs:
 
   build-tvos:
     if: github.event_name == 'workflow_dispatch' && (inputs.target == 'tvos' || inputs.target == 'both')
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Show toolchain
         run: |
@@ -151,10 +151,10 @@ jobs:
           name: ${{ steps.names.outputs.name }}
           path: ${{ steps.names.outputs.name }}.ipa
           if-no-files-found: error
-  
+
   build-tvapp:
     if: github.event_name == 'workflow_dispatch' && (inputs.target == 'tvapp' || inputs.target == 'both')
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -170,7 +170,7 @@ jobs:
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "26.6"
 
       - name: Show toolchain
         run: |
