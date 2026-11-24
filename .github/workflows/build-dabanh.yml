@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           xcodebuild \
             -project DaBanh.xcodeproj \
-            -scheme DaBanh \
+            -target DaBanh \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             CONFIGURATION_BUILD_DIR="$PWD/build/app" \
