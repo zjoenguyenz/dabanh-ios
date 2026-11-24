@@ -365,6 +365,10 @@ struct PlayerView: View {
     /// set — the host re-presents a fresh session rotated to
     /// it, the board's own entry path.
     private func switchToVN(_ channel: Channel) {
+        // FIX-139: an explicit in-player pick is one of the two
+        // callers allowed to expire a stale pre-warm dead
+        // verdict for the picked row (see SourcePrewarmStore).
+        SourcePrewarmStore.shared.expireDeadIfPicked(channel.url)
         sourceBoardPresented = false
         if let position = session.sources.firstIndex(where: { $0.url == channel.url }) {
             if position != index {
@@ -2557,17 +2561,28 @@ private enum SourcePrewarmer {
 /// (ResolveHub.provenDeadTTL, 30 s — E1, AUDIT.md), so the
 /// player's automatic advance can skip that rung instantly
 /// (PlayerView.advance); an explicit board pick still tries
-/// the row the viewer chose. Once the verdict expires the URL
-/// reads as never convicted, exactly like an expired hub
-/// verdict, and a later warm() may warm it again. Warmth is per
-/// app run: a source warmed once is not re-fetched for later
-/// boards or sessions of the same fixture.
+/// the row the viewer chose. FIX-139 (REVIEW-FULL WP3 item 5 /
+/// WP6 verdict D3): the TTL expiry is BOUND to that explicit
+/// pick — PR 2 expired the verdict lazily inside `state(of:)`,
+/// so a plain board open / board render (which reads `state`
+/// through `isDead` and `warm`) silently re-enabled a dead
+/// host and re-probed it on every board open. Reads are now
+/// pure: however old a verdict is, `state(of:)` / `isDead` /
+/// `warm` keep honouring it, and only `expireDeadIfPicked` —
+/// called from the tap entry (ResolveHub.session, isTap) and
+/// from an in-player pick (PlayerView.switchToVN) — may drop
+/// a verdict older than the TTL, after which the URL reads as
+/// never convicted and a later warm() may warm it again.
+/// Warmth is per app run: a source warmed once is not
+/// re-fetched for later boards or sessions of the same fixture.
 @MainActor
 final class SourcePrewarmStore {
     static let shared = SourcePrewarmStore()
 
-    /// `.dead` carries the time of its verdict (E1): the verdict
-    /// expires lazily on read, on the hub's TTL, in `state(of:)`.
+    /// `.dead` carries the time of its verdict (E1), so the
+    /// pick-bound expiry in `expireDeadIfPicked` can age it
+    /// against the hub's TTL. FIX-139: `state(of:)` itself no
+    /// longer expires anything on read (see the class doc).
     private enum WarmState: Equatable { case warming, warm, dead(Date) }
     private var states: [String: WarmState] = [:]
     private var pending: [Channel] = []
@@ -2581,17 +2596,33 @@ final class SourcePrewarmStore {
         return false
     }
 
-    /// The URL's state as read now. A dead verdict older than
-    /// the hub's TTL is dropped on the spot and the URL reads as
-    /// never convicted — the same lazy expiry as
-    /// ResolveHub.isProvenDead (no timers, no sweeps).
+    /// The URL's state as read now — a PURE read (FIX-139):
+    /// it never mutates the store and never expires a verdict,
+    /// however old. Board-open / board-render callers (isDead,
+    /// warm) therefore cannot re-enable a dead host as a side
+    /// effect of merely being read. Expiry lives only in
+    /// `expireDeadIfPicked` below.
     private func state(of url: String) -> WarmState? {
+        states[url]
+    }
+
+    /// FIX-139: the ONLY expiry of a pre-warm dead verdict,
+    /// and the explicit-pick bound on it — a dead verdict older
+    /// than the hub's TTL (ResolveHub.provenDeadTTL) is dropped
+    /// here, and this is called ONLY from the explicit pick /
+    /// on-demand paths: ResolveHub.session(for:isTap:) for the
+    /// tap's pick (the rotated ladder's head) and
+    /// PlayerView.switchToVN for an in-player Đổi nguồn pick.
+    /// A verdict inside its TTL is kept even for a pick (the
+    /// pick itself still plays — publishHeadNow / switchToVN
+    /// never let a verdict veto the viewer's row — it is only
+    /// the RE-PROBE, via a later warm(), that the TTL gates).
+    /// No timers, no sweeps, no read-side mutation.
+    func expireDeadIfPicked(_ url: String) {
         if case .dead(let stampedAt)? = states[url],
            Date().timeIntervalSince(stampedAt) > ResolveHub.provenDeadTTL {
             states[url] = nil
-            return nil
         }
-        return states[url]
     }
 
     /// Enqueue a ladder for warming. `startingAfter` re-bases
@@ -2929,6 +2960,15 @@ final class ResolveHub {
     /// meeting a stale entry falls through to a fresh session —
     /// refreshing the entry is exactly the pass's job.
     private func session(for ladder: [Channel], isTap: Bool) -> (session: MatchPlaySession, createdFresh: Bool) {
+        // FIX-139: a tap is the explicit pick / on-demand entry
+        // — the one place a stale pre-warm dead verdict for the
+        // pick (the rotated ladder's head) may expire, BEFORE
+        // any publishHeadNow / isKnownDead read below consults
+        // it. A pre-resolve call (isTap == false, board-open
+        // intent) never expires a verdict here.
+        if isTap, let pick = ladder.first {
+            SourcePrewarmStore.shared.expireDeadIfPicked(pick.url)
+        }
         let key = Self.key(for: ladder)
         if let live = inFlight[key] {
             if live.isCancelled {

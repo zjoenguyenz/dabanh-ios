@@ -51,6 +51,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 /// to the diagnostic log (category "player") — before this fix the
 /// orientation path logged nothing at all, so the on-device lock
 /// sequence was unobservable.
+///
+/// FIX-139: the supported-orientations set must be updated
+/// BEFORE the geometry request (Apple TN3192). The pre-fix
+/// code called `requestGeometryUpdate` first and
+/// `setNeedsUpdateOfSupportedInterfaceOrientations()` only
+/// afterwards, so at player exit the system still held the
+/// `.landscape` supported set and the FIX-137 portrait-only
+/// geometry request was rejected. That rejection was also
+/// invisible: no `errorHandler` was passed, so the failure
+/// left no trace in the log. The set update now runs first
+/// (and still runs when no rotation target is given, for a
+/// mask-only change), and an `errorHandler` writes any
+/// rejection to the diagnostic log (category "player").
 @MainActor
 enum OrientationHelper {
     static func lock(_ mask: UIInterfaceOrientationMask,
@@ -67,15 +80,18 @@ enum OrientationHelper {
                         + "rotateTo=\(orientation?.rawValue ?? -1) — no window scene")
             return
         }
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
         if let orientation, orientation != .unknown {
             let target = UIInterfaceOrientationMask(
                 rawValue: 1 << UInt(orientation.rawValue))
             scene.requestGeometryUpdate(
                 UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: target)
-            )
+            ) { error in
+                DiagLog.log("player",
+                            "orientation geometry update rejected: \(error)")
+            }
         }
-        scene.keyWindow?.rootViewController?
-            .setNeedsUpdateOfSupportedInterfaceOrientations()
         DiagLog.log("player",
                     "orientation lock: mask=\(mask.rawValue) "
                     + "rotateTo=\(orientation?.rawValue ?? -1) "

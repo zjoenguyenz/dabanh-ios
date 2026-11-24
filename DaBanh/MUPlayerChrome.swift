@@ -993,33 +993,44 @@ extension LivePlayerViewController {
     /// orientation lock, the step the MU branch never had
     /// (DIAG-133 §3–§4: both MU "fullscreen" entries used to
     /// run the classic fill/fit toggle, which never rotates
-    /// the portrait page). Entering narrows the lock to
-    /// landscape with the exact call the classic branch uses;
-    /// the geometry update rotates the UI and layoutMUChrome
-    /// reflows to the landscape page on the new bounds.
-    /// Exiting rotates back to the portrait page AND reopens
-    /// the lock to MU's free-rotation baseline.
+    /// the portrait page). Entering (currently portrait)
+    /// narrows the lock to landscape with the exact call the
+    /// classic branch uses; the geometry update rotates the
+    /// UI and layoutMUChrome reflows to the landscape page
+    /// on the new bounds. Exiting (currently landscape)
+    /// rotates back to the portrait page AND reopens the
+    /// lock to MU's free-rotation baseline. The current side
+    /// comes from the same tracked flag layoutMUChrome keeps
+    /// (mu.landscape), falling back to its own bounds test —
+    /// no new persistent state beyond MUFullscreenState,
+    /// which ContentView needs for its route-change guard.
+    /// `MUFullscreenState.isActive` is still WRITTEN here as
+    /// that record, but it is not the decision source.
     ///
-    /// FIX-137 (DB-30/FL-402): enter/exit is decided by the
-    /// fullscreen state's own record — `MUFullscreenState.
-    /// isActive`, the actual current state of the feature —
-    /// NOT by `mu.landscape`, the layout flag layoutMUChrome
-    /// maintains. Under MU's free-rotation baseline the owner
-    /// can reach the landscape page by physically rotating the
-    /// phone with fullscreen never entered; the old code read
-    /// the layout flag, saw "landscape", and treated the tap
-    /// as an EXIT (dropping to a free mask + a portrait
-    /// request) — the toggle inverted against the user's
-    /// intent. The live interface orientation is logged with
-    /// every toggle so the device log can convict any residual
-    /// mismatch between the record and the window.
+    /// FIX-139: this restores the 1.35 decision source — the
+    /// LIVE LAYOUT — in place of the FIX-137 decision by
+    /// `MUFullscreenState.isActive`. That flag is flipped
+    /// optimistically, before the rotation it requests has
+    /// actually happened, so when a geometry update was
+    /// rejected (see FIX-139 in DaBanhApp.swift) the flag and
+    /// the window disagreed: the flag said "not fullscreen"
+    /// while the window stayed landscape, the next tap read
+    /// the flag and chose ENTER again, and the player could
+    /// never return to portrait — one rejected rotation
+    /// became a self-sustaining landscape lock-out (WP4 of
+    /// the full review). Deciding from the live layout makes
+    /// the toggle follow the window as it actually is. The
+    /// live interface orientation, the layout flag and the
+    /// chosen direction are logged with every toggle so the
+    /// device log can convict any residual mismatch.
     @objc func muToggleFullscreen() {
+        let isLandscape = muChrome?.landscape ?? (view.bounds.width > view.bounds.height)
         let live = view.window?.windowScene?.interfaceOrientation
         DiagLog.log("player",
-                    "mu fullscreen toggle: active=\(MUFullscreenState.isActive) "
-                    + "interface=\(live?.rawValue ?? -1) "
-                    + "layoutLandscape=\(muChrome?.landscape ?? false)")
-        if MUFullscreenState.isActive {
+                    "mu fullscreen toggle: interface=\(live?.rawValue ?? -1) "
+                    + "layoutLandscape=\(isLandscape) "
+                    + "direction=\(isLandscape ? "exit" : "enter")")
+        if isLandscape {
             MUFullscreenState.isActive = false
             OrientationHelper.lock(.all, rotateTo: .portrait)
         } else {

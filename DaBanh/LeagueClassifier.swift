@@ -52,9 +52,15 @@ enum LeagueClassifier {
         return 3
     }
 
-    /// 0 = football first, 1 = other sports. Mirrors Android sportOf: a ⚽ in
-    /// the title (or no sport emoji at all) means football; 🏐🏀🎾🏸🏒🥊
-    /// mean "other sport".
+    /// Sport identity of a channel title: 0 = positively football
+    /// (⚽ in the title), 1 = other sport (🏐🏀🎾🏸🏒🥊 in the
+    /// title), 2 = unknown (no sport emoji at all — NOT assumed
+    /// football). FIX-139: Android's sportOf returned 0 for the
+    /// untagged fall-through too, which made "untagged" and
+    /// "football" indistinguishable; the fall-through is now 2.
+    /// `sorted(_:now:)` maps 2 back into the football group, so
+    /// ordering is unchanged — only identity tests see the new
+    /// value (see `isIdentifiedFootball`).
     static func sportRank(of channel: Channel) -> Int {
         let t = channel.title
         if t.contains("⚽") { return 0 }
@@ -62,7 +68,33 @@ enum LeagueClassifier {
             || t.contains("🏸") || t.contains("🏒") || t.contains("🥊") {
             return 1
         }
-        return 0
+        return 2
+    }
+
+    /// Positive football identity — the ONLY test the football-clock
+    /// gates (`FixtureEntry.liveBadgeText` / `isHalfTimeDisplay`)
+    /// may use. FIX-139 (WP5 root cause): the FIX-137 gates tested
+    /// `sportRank == 0`, but 0 was also the fall-through for
+    /// untagged channels, and the playlist carries no 🏒 tags at
+    /// all — an NHL fixture (Minnesota Wild vs San Jose Sharks)
+    /// passed as "football" and wore a fabricated "75'".
+    ///
+    /// Identity, positively: false when the title positively names
+    /// another sport (sportRank 1); true when the title carries ⚽
+    /// (sportRank 0); otherwise true only when the title matched
+    /// the classifier's known football-league vocabulary
+    /// (`channel.leagueRank < 9` — the channel's stored property,
+    /// set at parse from `leagueRank(of:)`). An untagged fixture
+    /// from an unrecognised league is UNKNOWN and fails this test:
+    /// it keeps its LIVE badge, just no fabricated minute. A
+    /// fixture with a matched state never reaches the gates (the
+    /// state path bypasses them), so identified-by-state football
+    /// is unaffected.
+    static func isIdentifiedFootball(_ channel: Channel) -> Bool {
+        let rank = sportRank(of: channel)
+        if rank == 1 { return false }
+        if rank == 0 { return true }
+        return channel.leagueRank < 9
     }
 
     /// The Android sortChannels comparator. Swift's sorted(by:) is stable,
@@ -72,8 +104,14 @@ enum LeagueClassifier {
             let ba = bucket(of: a, now: now)
             let bb = bucket(of: b, now: now)
             if ba != bb { return ba < bb }
-            let sa = sportRank(of: a)
-            let sb = sportRank(of: b)
+            // FIX-139: sportRank is now 0 = football / 1 = other
+            // sport / 2 = unknown. The sort deliberately keeps
+            // unknown with football (ordering is presentation, not
+            // identity), so compare on the derived key — rank 1 → 1,
+            // ranks 0 and 2 → 0 — which reproduces the pre-FIX-139
+            // comparator outcome for every input pair.
+            let sa = sportRank(of: a) == 1 ? 1 : 0
+            let sb = sportRank(of: b) == 1 ? 1 : 0
             if sa != sb { return sa < sb }
             if ba == 1 && a.leagueRank != b.leagueRank { return a.leagueRank < b.leagueRank }
             if ba <= 2 {
