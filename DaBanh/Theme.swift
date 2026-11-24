@@ -548,7 +548,38 @@ struct MUSettingsView: View {
             menuRow("Phát lại") { page = .playback }
             menuDivider
             resetRow
+            menuDivider
+            versionRow
         }
+    }
+
+    /// The running build's own stamp, read from the bundle
+    /// at render time (VERSION-IN-SETTINGS LAW, owner order
+    /// 2026-11-24): every build shows its full version +
+    /// build number in Settings, e.g. "1.40 (41)", so the
+    /// owner can tell at a glance which build is installed.
+    /// Never hardcode the numbers here — they come from the
+    /// Info.plist the build itself was stamped with.
+    private var versionRow: some View {
+        HStack(spacing: 8) {
+            Text("Phiên bản")
+                .font(MUFont.body(13))
+                .foregroundStyle(MUTokens.cream)
+            Spacer(minLength: 8)
+            Text(Self.appVersionText)
+                .font(MUFont.body(13))
+                .foregroundStyle(MUTokens.secondary)
+        }
+        .frame(minHeight: 52)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Phiên bản \(Self.appVersionText)")
+    }
+
+    private static var appVersionText: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(short) (\(build))"
     }
 
     private var menuDivider: some View {
