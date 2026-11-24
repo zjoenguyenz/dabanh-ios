@@ -12,12 +12,23 @@ What it does:
   2. For each match, looks for highlight sources:
        (a) ESPN summary endpoint videos -> direct MP4 (kind "espn-mp4",
            official=True, label "ESPN"). NOTE: ESPN's attach is editorial —
-           some clips are highlights, some are studio analysis (study §1.2).
+           reporter pieces, pressers and studio talk ride along with the
+           reels, so every video passes the DB-23 classifier
+           (is_espn_highlight) before it may become a source.
        (b) YouTube: a small seed map of previously verified videos (from the
            demo build, DEMO-HIGHLIGHT-REPORT.md) re-verified live, plus a
            generic search function (youtube_search) that parses the YouTube
            search-results page. EVERY YouTube id is verified through the
            oEmbed endpoint (HTTP 200) before inclusion; unverified = excluded.
+           FULL-HIGHLIGHT STANDARD (owner, 2026-11-22 17:28 CST: "Chỉ lấy
+           clip full highlight / Ko có thì thôi"): a YouTube video becomes
+           a source ONLY if its oEmbed title passes
+           is_youtube_full_highlight — a full-match highlight signal
+           ("highlight" / "resumen") with no talking or single-moment
+           signal, naming both teams, and consistent with the match's
+           date/score when the title carries them. Partials, interviews
+           and wrong-match uploads are excluded; a match with no full
+           highlight yet simply has no YouTube source.
   3. Merges progressively into ./highlights.json: matches keyed by
      competition + espnEventId; sources deduped by (kind, ref) and never
      removed just because a newer one arrived; matches older than N days
@@ -36,6 +47,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -88,6 +100,21 @@ GENERIC_CANDIDATES_PER_MATCH = 2
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def iso_canon(raw):
+    """Normalize any ISO8601 date string to YYYY-MM-DDTHH:MM:SSZ.
+
+    FL-405: ESPN emits kickoff dates WITHOUT seconds
+    ("2026-11-22T20:00Z"); the app's ISO8601 reader requires the
+    seconds field, so an un-normalized date made every match in
+    the file unreadable. Every date this collector writes goes
+    through here — seconds always present.
+    """
+    dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def http_get(url, timeout=30):
@@ -145,7 +172,7 @@ def fetch_ft_matches(days):
                         "away": away,
                         "scoreHome": int(sh),
                         "scoreAway": int(sa),
-                        "matchDate": ev["date"].replace("+00:00", "Z"),
+                        "matchDate": iso_canon(ev["date"]),
                         "espnEventId": str(ev["id"]),
                         "sources": [],
                     })
@@ -154,8 +181,40 @@ def fetch_ft_matches(days):
     return matches
 
 
+# DB-23: the ESPN summary endpoint attaches EVERY editorial video to a
+# match — reporter stand-ups, manager pressers, studio talk — not just
+# highlights (owner caught a James Olley reporter piece playing as the
+# "ESPN highlight" of Newcastle 2-2 Arsenal, 2026-11-22). Classification
+# rule built from sampled payloads of all 13 ESPN-carrying matches in
+# the 2026-11-22 index (see theme-mu/FIX-COLLECTOR-DB23-REPORT.md):
+#   KEEP  — headline or description carries the highlight signal: the
+#           word "highlight". In every sampled payload that is exactly
+#           ESPN's reel format: headline "<Home> vs. <Away> - Game
+#           Highlights", description "Watch the Game Highlights from
+#           <Home> vs. <Away>, <date>".
+#   DROP  — no highlight signal. This covers BOTH the talking pieces
+#           (reporter/pundit/presser) and the single-moment clips
+#           (one goal / one save), whose headlines never carry it.
+#   GUARD — even WITH a highlight signal, a video whose headline or
+#           description carries a talking verb observed in the sampled
+#           non-highlights (discuss/react/explain/talk about/disagree/
+#           question) is dropped: the fault class wins ties.
+ESPN_TALKING_SIGNALS = ("discuss", "react", "explain", "talk about",
+                        "disagree", "question")
+
+
+def is_espn_highlight(video):
+    """True only for a genuine ESPN highlight reel (DB-23 rule above)."""
+    text = ((video.get("headline") or "") + " "
+            + (video.get("description") or "")).lower()
+    if "highlight" not in text:
+        return False
+    return not any(sig in text for sig in ESPN_TALKING_SIGNALS)
+
+
 def espn_summary_sources(slug, event_id):
-    """Direct-MP4 videos from the ESPN summary endpoint."""
+    """Classified highlight reels from the ESPN summary endpoint (DB-23:
+    only videos passing is_espn_highlight become sources)."""
     url = (f"https://site.api.espn.com/apis/site/v2/sports/soccer/"
            f"{slug}/summary?event={event_id}")
     out = []
@@ -167,6 +226,9 @@ def espn_summary_sources(slug, event_id):
     for v in data.get("videos", []) or []:
         href = (((v.get("links") or {}).get("source") or {}).get("href")) or ""
         if not href.endswith(".mp4"):
+            continue
+        if not is_espn_highlight(v):
+            log(f"    - espn non-highlight dropped: {v.get('headline')!r}")
             continue
         dur = v.get("duration")
         out.append({
@@ -208,6 +270,102 @@ def is_official_channel(author_name):
     return any(h in a for h in OFFICIAL_CHANNEL_HINTS)
 
 
+# FULL-HIGHLIGHT STANDARD for YouTube (owner, 2026-11-22 17:28 CST:
+# "Chỉ lấy clip full highlight / Ko có thì thôi" — full match-highlight
+# reels ONLY; no partial clips, no interviews, no filler; a match with
+# no full highlight yet shows nothing). Rule built from the real titles
+# of all 16 YouTube sources audited 2026-11-22 (see theme-mu/
+# FIX-COLLECTOR-FULLHL-REPORT.md). A video becomes a source ONLY if its
+# title passes EVERY check in is_youtube_full_highlight:
+#   KEEP signal — "highlight" (NBC "PREMIER LEAGUE HIGHLIGHTS", Sky
+#     "Premier League Highlights", club "HIGHLIGHTS - Extended") or
+#     "resumen" (LALIGA EA SPORTS official per-match format "RESUMEN
+#     LALIGA EA SPORTS"). No signal -> not a certified full reel -> out.
+#     This alone convicts scorer-headline report packages with no
+#     highlight claim (AFC Bournemouth's "Evanilson and Kluivert
+#     strike as winning run continues | AFC Bournemouth 2-0 ...").
+#   TALKING guard — a talking signal (the DB-23 ESPN list plus
+#     interview / press conference / podcast / reaction) drops the
+#     video even WITH a keep signal: the fault class wins ties.
+#   MOMENT guard — single-moment headline patterns ("goal by",
+#     "scores", "red card", "sent off", "save", "penalty miss"...)
+#     drop the video even WITH a keep signal.
+#   FIXTURE guard — the title must name BOTH teams (any significant
+#     token of each, accent-folded), and when it carries an M/D/YYYY
+#     date or an N-N score, they must equal the match's. This convicts
+#     the wrong-match class found in the audit: NBC's Sunderland v.
+#     Aston Villa highlights of 9/21/2025 (last season's reverse
+#     fixture) had ridden the old first-word relevance gate into the
+#     2026-11-21 Aston Villa 0-0 Sunderland entry.
+YT_TALKING_SIGNALS = ESPN_TALKING_SIGNALS + (
+    "interview", "press conference", "presser", "podcast", "reaction",
+    "preview", "prediction",
+)
+YT_MOMENT_PATTERNS = (
+    r"\bgoal by\b", r"\bscores\b", r"\bscored\b", r"\bred card\b",
+    r"\bsent off\b", r"\bsave\b", r"\bsaves\b", r"\bpenalty miss",
+    r"\bmisses penalty\b", r"\bmissed penalty\b", r"\bown goal\b",
+)
+_TEAM_TOKEN_STOP = {"football", "club", "afc", "cf", "fc", "sc", "the"}
+
+
+def _fold(text):
+    """Lowercase + strip accents for title/team matching."""
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+
+
+def _team_tokens(name):
+    toks = re.findall(r"[a-z0-9]+", _fold(name))
+    return {t for t in toks if len(t) >= 4 and t not in _TEAM_TOKEN_STOP}
+
+
+def is_youtube_full_highlight(title, match):
+    """(keep, reason) — the full-highlight standard above, applied to an
+    oEmbed title for `match` (dict with home/away/scoreHome/scoreAway/
+    matchDate)."""
+    t = _fold(title)
+    if not t.strip():
+        return False, "empty title"
+    for sig in YT_TALKING_SIGNALS:
+        if sig in t:
+            return False, f"talking signal {sig!r}"
+    if "highlight" not in t and "resumen" not in t:
+        return False, "no full-highlight signal (highlight/resumen)"
+    for pat in YT_MOMENT_PATTERNS:
+        if re.search(pat, t):
+            return False, f"single-moment pattern {pat!r}"
+    for side in ("home", "away"):
+        toks = _team_tokens(match[side])
+        if toks and not any(tok in t for tok in toks):
+            return False, f"{side} team not named in title"
+    md = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", t)
+    if md:
+        month, day, year = int(md.group(1)), int(md.group(2)), int(md.group(3))
+        if year < 100:
+            year += 2000
+        want = (match["matchDate"] or "")[:10]  # YYYY-MM-DD (UTC kickoff)
+        if f"{year:04d}-{month:02d}-{day:02d}" != want:
+            return False, (f"title date {month}/{day}/{year} != match date {want} "
+                           "(wrong match?)")
+    scores = re.findall(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\b", t)
+    if scores and (str(match["scoreHome"]), str(match["scoreAway"])) not in scores:
+        return False, (f"title score(s) {scores} != match score "
+                       f"{match['scoreHome']}-{match['scoreAway']} (wrong match?)")
+    return True, "full-highlight title"
+
+
+def youtube_title_gate(meta, match, origin):
+    """Apply the full-highlight standard to an oEmbed result. Returns the
+    title when the video may become a source, else None (drop logged)."""
+    title = (meta or {}).get("title") or ""
+    keep, reason = is_youtube_full_highlight(title, match)
+    if not keep:
+        log(f"    - {origin} youtube dropped: {title!r} ({reason})")
+        return None
+    return title
+
+
 def youtube_search(query, limit=6):
     """Replaceable YouTube search (no API key): parse the search-results page
     for videoIds. Returns [] on any failure — callers must treat an empty
@@ -241,6 +399,8 @@ def seed_sources_for(match):
             log(f"    - seed {seed['ref']} for {match['home']} v {match['away']}: "
                 "oEmbed FAILED at run time — dropped")
             continue
+        if youtube_title_gate(meta, match, "seed") is None:
+            continue
         author = meta.get("author_name") or seed["label"]
         out.append({
             "kind": "youtube",
@@ -255,20 +415,25 @@ def seed_sources_for(match):
 
 
 def generic_youtube_sources(match):
-    """Best-effort generic search for a match with no YouTube source yet."""
+    """Best-effort generic search for a match with no YouTube source yet.
+    Every candidate must pass oEmbed AND the full-highlight title
+    standard (is_youtube_full_highlight — both teams named, highlight
+    signal, no talking/moment signals, date/score consistent). The old
+    first-word relevance gate let a year-old reverse-fixture video in
+    (see the classifier note); candidates are now scanned until
+    GENERIC_CANDIDATES_PER_MATCH have PASSED, not just been seen."""
     query = f"{match['home']} vs {match['away']} highlights"
     ids = youtube_search(query)
     out = []
-    for vid in ids[:GENERIC_CANDIDATES_PER_MATCH]:
+    for vid in ids:
+        if len(out) >= GENERIC_CANDIDATES_PER_MATCH:
+            break
         meta = youtube_verify(vid)
         if meta is None:
             continue
-        author = meta.get("author_name") or "YouTube"
-        title = (meta.get("title") or "").lower()
-        # Cheap relevance gate: at least one team name fragment in the title.
-        frags = [match["home"].split()[0].lower(), match["away"].split()[0].lower()]
-        if not any(f in title for f in frags):
+        if youtube_title_gate(meta, match, "search") is None:
             continue
+        author = meta.get("author_name") or "YouTube"
         out.append({
             "kind": "youtube",
             "ref": vid,
@@ -323,6 +488,11 @@ def merge(existing, fresh_matches, days):
         if md is not None and md < cutoff:
             pruned += 1
             continue
+        # Heal legacy entries written before iso_canon existed.
+        try:
+            m["matchDate"] = iso_canon(m["matchDate"])
+        except Exception:  # noqa: BLE001
+            pass
         m.pop("slug", None)
         kept.append(m)
     kept.sort(key=lambda x: x["matchDate"], reverse=True)
@@ -338,13 +508,23 @@ def push_and_verify():
            "--branch", "main", "--message", "highlights: collector seed/update",
            "--source-dir", REPO_ROOT, "--paths-file", MANIFEST_PATH]
     log("$ " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    log(proc.stdout.strip())
-    if proc.stderr.strip():
-        log("stderr: " + proc.stderr.strip())
-    if proc.returncode != 0:
-        log(f"! push failed rc={proc.returncode}")
-        return False
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        # FL-405 follow-up (observed twice, 2026-11-22 + 2026-11-23):
+        # in unattended runs the push-files call can stall past the
+        # timeout on its approval round-trip while the commit lands
+        # server-side anyway. Ground truth is the remote content —
+        # fall through to the verify loop instead of failing here.
+        log("! push-files timed out after 600s — verifying by remote content")
+        proc = None
+    if proc is not None:
+        log(proc.stdout.strip())
+        if proc.stderr.strip():
+            log("stderr: " + proc.stderr.strip())
+        if proc.returncode != 0:
+            log(f"! push failed rc={proc.returncode}")
+            return False
     local = open(OUT_PATH, "rb").read()
     local_md5 = hashlib.md5(local).hexdigest()
     log(f"local highlights.json: {len(local)} bytes md5={local_md5}")
