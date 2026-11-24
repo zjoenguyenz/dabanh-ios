@@ -129,10 +129,51 @@ enum TitleEscapes {
     }
 }
 
+/// The year for a playlist "DD/MM HH:MM" stamp, which carries no
+/// year (H1, AUDIT.md). The stamp is read in Asia/Ho_Chi_Minh and
+/// placed in whichever of the years y−1, y, y+1 (y = the current
+/// ICT year) puts it nearest to `now`. Shared by KickoffParser and
+/// PlaylistStore's UpdatedStamp so the two can never disagree.
+///
+/// It replaces the Android-port rule "current year, rolled forward
+/// 365 days when more than 30 days in the past", which read a
+/// 23:00 31/12 kickoff as next December once the clock passed
+/// midnight on 1/1, landed New Year fixtures a day early when the
+/// 365 days spanned 29 February, and read an Updated stamp more
+/// than 30 days old as a stamp in the future (always fresh).
+/// Whenever the current-year reading lies within 30 days either
+/// side of `now`, both rules give the same instant.
+enum StampYear {
+
+    static func resolve(month: Int, day: Int, hour: Int, minute: Int,
+                        now: Date) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+        let year = calendar.component(.year, from: now)
+        var best: Date?
+        // Current year first, so an exact tie keeps the current year.
+        for candidate in [year, year - 1, year + 1] {
+            var comps = DateComponents()
+            comps.year = candidate
+            comps.month = month
+            comps.day = day
+            comps.hour = hour
+            comps.minute = minute
+            comps.second = 0
+            guard let date = calendar.date(from: comps) else { continue }
+            if let current = best,
+               abs(current.timeIntervalSince(now)) <= abs(date.timeIntervalSince(now)) {
+                continue
+            }
+            best = date
+        }
+        return best
+    }
+}
+
 /// Kickoff extraction, ported from Android kickoffOf: the first
 /// "HH:MM DD/MM" pattern anywhere in the title, interpreted in
-/// Asia/Ho_Chi_Minh with the current year; a result more than 30 days in
-/// the past is rolled forward 365 days (New Year fixtures).
+/// Asia/Ho_Chi_Minh, in the year StampYear picks (nearest to now).
 enum KickoffParser {
 
     private static let regex = try! NSRegularExpression(pattern: #"(\d{1,2}):(\d{2})\s+(\d{1,2})/(\d{1,2})"#)
@@ -146,20 +187,6 @@ enum KickoffParser {
         }
         guard let hour = intAt(1), let minute = intAt(2),
               let day = intAt(3), let month = intAt(4) else { return nil }
-
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
-        var comps = DateComponents()
-        comps.year = calendar.component(.year, from: now)
-        comps.month = month
-        comps.day = day
-        comps.hour = hour
-        comps.minute = minute
-        comps.second = 0
-        guard var date = calendar.date(from: comps) else { return nil }
-        if date.timeIntervalSince(now) < -30 * 24 * 3600 {
-            date = date.addingTimeInterval(365 * 24 * 3600)
-        }
-        return date
+        return StampYear.resolve(month: month, day: day, hour: hour, minute: minute, now: now)
     }
 }

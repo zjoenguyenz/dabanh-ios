@@ -2553,17 +2553,22 @@ private enum SourcePrewarmer {
 /// the player asks; at most two warm fetches run at once, every
 /// fetch is byte-capped, and the queue only ever touches
 /// network state — playback is never blocked by it. A source it
-/// proves dead is remembered for the rest of the app run, so
-/// the player's automatic advance can skip that rung instantly
+/// proves dead is remembered for the hub's dead-verdict TTL
+/// (ResolveHub.provenDeadTTL, 30 s — E1, AUDIT.md), so the
+/// player's automatic advance can skip that rung instantly
 /// (PlayerView.advance); an explicit board pick still tries
-/// the row the viewer chose. Warmth is per app run: a source
-/// warmed or proven dead once is not re-fetched for later
+/// the row the viewer chose. Once the verdict expires the URL
+/// reads as never convicted, exactly like an expired hub
+/// verdict, and a later warm() may warm it again. Warmth is per
+/// app run: a source warmed once is not re-fetched for later
 /// boards or sessions of the same fixture.
 @MainActor
 final class SourcePrewarmStore {
     static let shared = SourcePrewarmStore()
 
-    private enum WarmState { case warming, warm, dead }
+    /// `.dead` carries the time of its verdict (E1): the verdict
+    /// expires lazily on read, on the hub's TTL, in `state(of:)`.
+    private enum WarmState: Equatable { case warming, warm, dead(Date) }
     private var states: [String: WarmState] = [:]
     private var pending: [Channel] = []
     private var driver: Task<Void, Never>?
@@ -2571,7 +2576,23 @@ final class SourcePrewarmStore {
 
     private init() {}
 
-    func isDead(_ url: String) -> Bool { states[url] == .dead }
+    func isDead(_ url: String) -> Bool {
+        if case .dead? = state(of: url) { return true }
+        return false
+    }
+
+    /// The URL's state as read now. A dead verdict older than
+    /// the hub's TTL is dropped on the spot and the URL reads as
+    /// never convicted — the same lazy expiry as
+    /// ResolveHub.isProvenDead (no timers, no sweeps).
+    private func state(of url: String) -> WarmState? {
+        if case .dead(let stampedAt)? = states[url],
+           Date().timeIntervalSince(stampedAt) > ResolveHub.provenDeadTTL {
+            states[url] = nil
+            return nil
+        }
+        return states[url]
+    }
 
     /// Enqueue a ladder for warming. `startingAfter` re-bases
     /// the priority: the rungs behind that URL go first (the
@@ -2591,7 +2612,7 @@ final class SourcePrewarmStore {
         var seen = Set<String>()
         pending = ordered.filter { ch in
             !excluding.contains(ch.url)
-                && states[ch.url] == nil
+                && state(of: ch.url) == nil
                 && seen.insert(ch.url).inserted
         }
         startDriverIfNeeded()
@@ -2674,7 +2695,7 @@ final class SourcePrewarmStore {
                 if !Task.isCancelled {
                     switch outcome {
                     case .dead:
-                        states[url] = .dead
+                        states[url] = .dead(Date())
                         if let ch = channelsByURL[url] {
                             DiagLog.log("player",
                                         "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
@@ -2792,7 +2813,9 @@ final class ResolveHub {
 
     /// The dead-verdict memory: 30 s, mirroring the web
     /// board's health map.
-    private static let provenDeadTTL: TimeInterval = 30
+    /// Internal (not private) so SourcePrewarmStore's verdicts
+    /// expire on the same TTL (E1).
+    static let provenDeadTTL: TimeInterval = 30
 
     /// Whether a settled resolve has already proven this URL
     /// dead during this app run — and the verdict is still

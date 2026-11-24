@@ -798,14 +798,16 @@ private enum LinkProbe {
 
 /// The playlist files carry their generation time as a first
 /// pseudo-entry ("Updated DD/MM HH:MM", Vietnam time). Parsed with
-/// the same calendar rules as kickoffs; a stamp slightly in the
-/// future (clock skew) reads as fresh, no stamp reads as unknown.
-private enum UpdatedStamp {
+/// the same calendar rules as kickoffs (StampYear); a stamp slightly
+/// in the future (clock skew) reads as fresh, no stamp reads as
+/// unknown. Internal (not private) only so the unit tests can call
+/// it with a fixed `now`.
+enum UpdatedStamp {
 
     private static let regex = try! NSRegularExpression(
         pattern: #"Updated\s+(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})"#)
 
-    static func parse(_ text: String) -> Date? {
+    static func parse(_ text: String, now: Date = Date()) -> Date? {
         let head = String(text.prefix(512))
         let range = NSRange(head.startIndex..., in: head)
         guard let m = regex.firstMatch(in: head, range: range) else { return nil }
@@ -815,20 +817,6 @@ private enum UpdatedStamp {
         }
         guard let day = intAt(1), let month = intAt(2),
               let hour = intAt(3), let minute = intAt(4) else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
-        let now = Date()
-        var comps = DateComponents()
-        comps.year = calendar.component(.year, from: now)
-        comps.month = month
-        comps.day = day
-        comps.hour = hour
-        comps.minute = minute
-        comps.second = 0
-        guard var date = calendar.date(from: comps) else { return nil }
-        if date.timeIntervalSince(now) < -30 * 24 * 3600 {
-            date = date.addingTimeInterval(365 * 24 * 3600)
-        }
-        return date
+        return StampYear.resolve(month: month, day: day, hour: hour, minute: minute, now: now)
     }
 }
