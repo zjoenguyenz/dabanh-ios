@@ -781,6 +781,11 @@ final class LivePlayerViewController: UIViewController {
     private var firedFail = false
     private var firedReady = false
     private var firedPlaying = false
+    /// FIX-142: the last playback status refreshPlaybackUI
+    /// wrote to DiagLog — the state line fires on
+    /// TRANSITION only, so a pause inside a rotation
+    /// window carries its exact second (DIAG-142 §3).
+    private var lastLoggedPlaybackStatus: AVPlayer.TimeControlStatus?
     private var hideTimer: Timer?
     /// FIX-130 (P-3): the stall watchdog (DB-11). AVPlayer has
     /// no stall event: a source that connects but never
@@ -866,45 +871,80 @@ final class LivePlayerViewController: UIViewController {
         }
     }
 
-    /// FIX-141: own the rotation transition for the MU
-    /// chrome (DIAG-140 §4.3, §5 direction 9). Before this,
-    /// the MU layout derived its page purely from
-    /// view.bounds at whatever layout pass happened to run,
-    /// so a mid-transition pass could compute the portrait
-    /// page on landscape bounds (or vice versa) and leave
-    /// videoView.frame as the narrow strip the owner filmed,
-    /// with no pass re-asserting the settled layout. Now:
-    /// the transition is marked in flight on the chrome's
-    /// state bag (muToggleFullscreen coalesces against it),
-    /// the alongside animation lays the chrome out against
-    /// the transition's FINAL size, and the completion
-    /// clears the flag and re-asserts the settled layout
-    /// through viewDidLayoutSubviews with the real final
-    /// bounds. The classic (non-MU) surface is unaffected:
-    /// the guard makes this a no-op when isMUChrome is false.
+    /// FIX-142: the rotation transition belongs to the
+    /// system again. FIX-141 owned it (DIAG-140 §4.3, §5
+    /// direction 9): the alongside block laid the chrome
+    /// out against the transition's FINAL size and the
+    /// completion forced a settle re-assertion pass.
+    /// DIAG-142 convicted both — the alongside pass ran
+    /// with pre-rotation safe-area insets, so the settle
+    /// pass necessarily produced DIFFERENT frames after
+    /// the animation had already landed: a visible snap
+    /// after every rotation, while the settled state (all
+    /// the log could see) stayed correct. This override
+    /// now does bookkeeping ONLY: it marks the transition
+    /// in flight on the chrome's state bag, and its
+    /// completion (finishMURotation) clears the flag, logs
+    /// the settled landing, and services a fullscreen
+    /// toggle queued mid-transition. Layout is driven
+    /// solely by viewDidLayoutSubviews from live bounds,
+    /// carried by the system's animation — the FIX-139-era
+    /// single authority. The classic (non-MU) surface is
+    /// unaffected: the guard makes this a no-op when
+    /// isMUChrome is false.
     override func viewWillTransition(to size: CGSize,
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         guard isMUChrome, let mu = muChrome else { return }
         mu.transitionInFlight = true
-        let started = coordinator.animate(alongsideTransition: { [weak self] _ in
-            self?.layoutMUChrome(targetSize: size)
+        let started = coordinator.animate(alongsideTransition: { _ in
+            // Bookkeeping only — no layout here, at any
+            // phase (FIX-142). The system's animation and
+            // viewDidLayoutSubviews own the geometry.
         }, completion: { [weak self] _ in
-            guard let self, let mu = self.muChrome else { return }
-            mu.transitionInFlight = false
-            // The settle re-assertion: one more layout pass
-            // keyed to the real, settled bounds.
-            self.view.setNeedsLayout()
-            self.view.layoutIfNeeded()
+            self?.finishMURotation()
         })
         if !started {
             // No coordinator animation could be scheduled:
-            // still lay out against the target size and
-            // clear the flag, so the chrome never sits in
-            // the coalescing state with no transition to
-            // complete it.
-            layoutMUChrome(targetSize: size)
-            mu.transitionInFlight = false
+            // settle immediately, still with no layout call,
+            // so the chrome never sits in the in-flight
+            // state with no completion to clear it.
+            finishMURotation()
+        }
+    }
+
+    /// FIX-142: the rotation's completion bookkeeping —
+    /// clear the in-flight flag, log the settled landing
+    /// (interface, size, playback state: the landing
+    /// confirmation DIAG-140 §4.3 found missing from the
+    /// record), and run a fullscreen toggle that was
+    /// queued mid-transition (the parity bit on the
+    /// chrome's state bag) FRESH through the FIX-139
+    /// decision, which re-reads the settled live layout.
+    /// Never lays out anything.
+    private func finishMURotation() {
+        guard let mu = muChrome else { return }
+        mu.transitionInFlight = false
+        // Gate fix (REVIEW-142 B-2): a completion landing
+        // after the player was torn down (closed
+        // mid-transition, VC still alive) must not act on
+        // the dead player — above all it must not service
+        // a queued toggle, which would write the global
+        // MUFullscreenState record and fire a lock request
+        // from beyond the grave. Drop the bit and log
+        // nothing: there is no landing to confirm.
+        if torn {
+            mu.pendingToggle = false
+            return
+        }
+        let live = view.window?.windowScene?.interfaceOrientation
+        DiagLog.log("player",
+                    "rotation settled: interface=\(live?.rawValue ?? -1) "
+                    + "size=\(Int(view.bounds.width.rounded()))x\(Int(view.bounds.height.rounded())) "
+                    + "state=\(playbackStateName)")
+        if mu.pendingToggle {
+            mu.pendingToggle = false
+            muToggleFullscreen()
         }
     }
 
@@ -1243,7 +1283,36 @@ final class LivePlayerViewController: UIViewController {
         fireFailOnce()
     }
 
+    /// FIX-142: the DiagLog spelling of a playback status
+    /// (playing / waiting / paused / none) — the rotation,
+    /// toggle and state-transition lines all stamp states
+    /// in these words (DIAG-142 §3).
+    private func diagPlaybackState(_ status: AVPlayer.TimeControlStatus?) -> String {
+        switch status {
+        case .playing: return "playing"
+        case .waitingToPlayAtSpecifiedRate: return "waiting"
+        case .paused: return "paused"
+        default: return "none"
+        }
+    }
+
+    /// FIX-142: this player's current playback state, in
+    /// diagPlaybackState's words.
+    var playbackStateName: String { diagPlaybackState(player?.timeControlStatus) }
+
     private func refreshPlaybackUI(_ player: AVPlayer) {
+        // FIX-142: log playback-state TRANSITIONS (the
+        // icon logic below runs per call; this line fires
+        // only when the status actually changes, so a
+        // pause or stall inside a rotation window is
+        // attributable to its exact second).
+        let status = player.timeControlStatus
+        if status != lastLoggedPlaybackStatus {
+            let old = lastLoggedPlaybackStatus
+            lastLoggedPlaybackStatus = status
+            DiagLog.log("player",
+                        "playback state: \(diagPlaybackState(old)) -> \(diagPlaybackState(status))")
+        }
         switch player.timeControlStatus {
         case .playing:
             spinner.stopAnimating()
@@ -1321,7 +1390,15 @@ final class LivePlayerViewController: UIViewController {
 
     @objc func togglePlayPause() {
         guard let player else { return }
+        // FIX-142: log the tap and the state change it
+        // makes, so a ▶ frame is permanently attributable —
+        // a tap line here means the viewer's own tap; a
+        // state-transition line without one means the
+        // system paused (DIAG-142 §3).
+        let from = playbackStateName
         if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+        DiagLog.log("player",
+                    "playpause tap: \(from) -> \(playbackStateName)")
         refreshPlaybackUI(player)
         showControls()
     }

@@ -116,10 +116,22 @@ final class MUChromeViews {
     /// FIX-141: a rotation transition (viewWillTransition)
     /// is in flight for this chrome. Set by the view
     /// controller's transition override in PlayerView.swift,
-    /// read by muToggleFullscreen to coalesce fullscreen
-    /// toggles fired mid-rotation, and cleared in the
-    /// transition's completion (the settle re-assertion).
+    /// read by muToggleFullscreen, and cleared in the
+    /// transition's completion. FIX-142: the completion
+    /// now does bookkeeping only (the settle layout pass
+    /// is deleted), and a toggle fired mid-transition is
+    /// no longer dropped — it flips pendingToggle below.
     var transitionInFlight = false
+    /// FIX-142: the pending-toggle parity bit. A
+    /// fullscreen toggle fired while a rotation
+    /// transition is in flight flips this bit instead of
+    /// being dropped (FIX-141's coalescing ate genuine
+    /// taps, DIAG-142); when the transition settles, the
+    /// completion runs ONE fresh toggle if the bit is
+    /// set. Two mid-flight taps cancel out (parity, not
+    /// a counter), so geometry requests never stack
+    /// (DIAG-140's disease) and no tap is ever eaten.
+    var pendingToggle = false
     /// FIX-141: the last (page, size) pair layoutMUChrome
     /// wrote to DiagLog — layout passes log only when the
     /// chosen page or the size used changes, so the strip
@@ -651,23 +663,21 @@ extension LivePlayerViewController {
     /// video block; landscape: full-bleed) — viewDidLayoutSubviews
     /// routes here whenever the MU chrome is active, so a
     /// rotation reflows between the two pages live.
+    ///
+    /// FIX-142: this again computes from the view's LIVE
+    /// bounds — the single pre-FIX-141 authority. The
+    /// FIX-141 target-size variant (an explicit size
+    /// parameter, fed by viewWillTransition's alongside
+    /// block) was convicted in DIAG-142 of fighting the
+    /// live-bounds passes the system drives during its
+    /// rotation animation; it is deleted outright, not
+    /// kept as an option — one layout authority, keyed
+    /// to live bounds. The geometry below is byte-for-byte
+    /// the former body: the old no-arg form fed it exactly
+    /// this bounds (origin .zero, the view's live size).
     func layoutMUChrome() {
-        layoutMUChrome(targetSize: view.bounds.size)
-    }
-
-    /// FIX-141: the same layout, computed against an
-    /// explicit target size instead of whatever bounds a
-    /// mid-transition layout pass happens to see (DIAG-140
-    /// §4.3, §5 direction 9). The portrait/landscape choice
-    /// and all page geometry derive from the passed bounds
-    /// exactly as they derived from view.bounds before —
-    /// one code path, no forked page layouts. The no-arg
-    /// form above delegates with the view's live bounds;
-    /// viewWillTransition (PlayerView.swift) passes the
-    /// transition's final size.
-    func layoutMUChrome(targetSize: CGSize) {
         guard let mu = muChrome else { return }
-        let bounds = CGRect(origin: .zero, size: targetSize)
+        let bounds = CGRect(origin: .zero, size: view.bounds.size)
         let safe = view.safeAreaInsets
         // FIX-MU-3 (finding 9): the chip font differs per
         // orientation — when a rotation flips the page,
@@ -1064,17 +1074,26 @@ extension LivePlayerViewController {
     /// chosen direction are logged with every toggle so the
     /// device log can convict any residual mismatch.
     @objc func muToggleFullscreen() {
-        // FIX-141: coalesce toggles fired while a rotation
-        // transition is in flight (DIAG-140 §4.3: 12 toggles
-        // in 28 s on device, each firing an un-coalesced
-        // geometry request). The tap still gives feedback
-        // via showControls(), but no second lock/geometry
-        // request starts until the in-flight transition has
-        // settled. The FIX-139 decision below is untouched
-        // and runs as before once no transition is in flight.
-        if muChrome?.transitionInFlight == true {
+        // FIX-142: a toggle fired while a rotation
+        // transition is in flight is QUEUED, not dropped.
+        // FIX-141's coalescing discarded it outright (no
+        // second lock/geometry request until the in-flight
+        // transition settled), which ate the corrective
+        // tap a viewer fires mid-rotation (DIAG-142). Now
+        // the tap flips the pendingToggle parity bit on
+        // the chrome's state bag, and the transition's
+        // completion (finishMURotation, PlayerView.swift)
+        // runs ONE fresh toggle through the FIX-139
+        // decision below — two mid-flight taps cancel
+        // (parity, not a counter), so requests still
+        // never stack (DIAG-140's disease). The FIX-139
+        // decision below is untouched and runs as before
+        // once no transition is in flight.
+        if let mu = muChrome, mu.transitionInFlight {
+            mu.pendingToggle.toggle()
             DiagLog.log("player",
-                        "mu fullscreen toggle: coalesced — rotation transition in flight")
+                        "mu fullscreen toggle: queued (transition in flight) "
+                        + "state=\(playbackStateName)")
             showControls()
             return
         }
@@ -1083,7 +1102,8 @@ extension LivePlayerViewController {
         DiagLog.log("player",
                     "mu fullscreen toggle: interface=\(live?.rawValue ?? -1) "
                     + "layoutLandscape=\(isLandscape) "
-                    + "direction=\(isLandscape ? "exit" : "enter")")
+                    + "direction=\(isLandscape ? "exit" : "enter") "
+                    + "state=\(playbackStateName)")
         if isLandscape {
             MUFullscreenState.isActive = false
             OrientationHelper.lock(.all, rotateTo: .portrait)
