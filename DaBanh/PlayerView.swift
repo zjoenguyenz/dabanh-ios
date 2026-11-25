@@ -786,6 +786,28 @@ final class LivePlayerViewController: UIViewController {
     /// TRANSITION only, so a pause inside a rotation
     /// window carries its exact second (DIAG-142 §3).
     private var lastLoggedPlaybackStatus: AVPlayer.TimeControlStatus?
+    /// SOURCE-REP: this surface's reputation tier + host
+    /// key, read ONCE at surface creation (viewDidLoad)
+    /// from the current rung and frozen for the surface's
+    /// life — a record written mid-load by a sibling
+    /// surface never retunes a running timer (spec §4.5).
+    private var repTier: SourceReputation.Tier = .average
+    private var repHostKey: String?
+    /// SOURCE-REP: the one new instrument (spec §2.2) —
+    /// stamped when the item is handed to the player in
+    /// viewDidLoad; time-to-first-frame is measured from
+    /// here to the .playing transition in
+    /// refreshPlaybackUI. (iOS kept no load-start stamp
+    /// before this round.)
+    private var loadStartedAt: Date?
+    /// SOURCE-REP: the per-rung TOTAL wait cap timer
+    /// (spec §4.5 — a NEW timer on iOS): elapsed from item
+    /// handover to first frame, for tiers that carry a
+    /// cap (GOOD 30 s / BAD 15 s; AVERAGE has none —
+    /// leader's R6 resolution). Armed in viewDidLoad,
+    /// disarmed at the first frame, on failure and at
+    /// teardown.
+    private var totalCapTimer: Timer?
     private var hideTimer: Timer?
     /// FIX-130 (P-3): the stall watchdog (DB-11). AVPlayer has
     /// no stall event: a source that connects but never
@@ -810,6 +832,22 @@ final class LivePlayerViewController: UIViewController {
         guard let channel else { return }
         DiagLog.log("player",
                     "try source #\(sourceIndex): \(diagSourceTag(channel))")
+
+        // SOURCE-REP: freeze this surface's reputation
+        // tier from the rung's host — read ONCE, here at
+        // surface creation, and never re-read (spec §4.5)
+        // — and log the wait budget it sets (the owner's
+        // requirement: every tiered wait names its tier).
+        repHostKey = SourceReputation.key(for: channel.url)
+        if let repHostKey {
+            repTier = SourceReputation.tier(forKey: repHostKey)
+        }
+        let capText = repTier.totalCap.map { "\(Int($0))s" } ?? "none"
+        DiagLog.log("player",
+                    "wait budget: source #\(sourceIndex) \(diagSourceTag(channel)) "
+                    + "— tier \(repTier.label), "
+                    + "no-progress \(Int(repTier.noProgressPreFrame))s, "
+                    + "total cap \(capText)")
 
         // Audio session for background / PiP playback.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
@@ -847,6 +885,10 @@ final class LivePlayerViewController: UIViewController {
         }
         observe(item: item, player: player)
         setupRemoteCommands(channel: channel)
+        // SOURCE-REP: the load-start stamp — the item is
+        // handed to the player here; time-to-first-frame
+        // is measured from this instant (spec §2.2).
+        loadStartedAt = Date()
         player.play()
         // FIX-130 (P-3): arm the stall watchdog for the
         // pre-frame wait right away — the status KVO below
@@ -854,6 +896,9 @@ final class LivePlayerViewController: UIViewController {
         // that never leaves the initial waiting state must be
         // covered from the first second.
         armStallWatchdog()
+        // SOURCE-REP: arm the per-rung total wait cap
+        // beside the watchdog (spec §4.5).
+        armTotalCapTimer()
         // DB-05: NO hide timer here. The chrome starts visible and
         // stays visible until the item is ready to play — the
         // fade clock starts in the ready handler below, and
@@ -892,23 +937,42 @@ final class LivePlayerViewController: UIViewController {
     /// single authority. The classic (non-MU) surface is
     /// unaffected: the guard makes this a no-op when
     /// isMUChrome is false.
+    ///
+    /// FIX-143 (Option B): the alongside closure now DOES
+    /// run layout — the bounds-driven layout, performed
+    /// INSIDE the coordinator's animation, so the frame
+    /// changes it produces are interpolated by the
+    /// transition instead of snapping at the first pass.
+    /// The FIX-141 errors do NOT return: layout still
+    /// computes from LIVE bounds only (no target-size
+    /// parameter — it stays deleted), and the completion
+    /// forces NO geometry pass (the settle re-assertion
+    /// stays deleted — finishMURotation's one settle pass
+    /// exists to land the deferred PRESENTATION, and its
+    /// settle-delta line proves the picture's frame does
+    /// not move in it). While in flight, layoutMUChrome
+    /// runs its geometry layer only (DIAG-143 §2).
     override func viewWillTransition(to size: CGSize,
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         guard isMUChrome, let mu = muChrome else { return }
         mu.transitionInFlight = true
-        let started = coordinator.animate(alongsideTransition: { _ in
-            // Bookkeeping only — no layout here, at any
-            // phase (FIX-142). The system's animation and
-            // viewDidLayoutSubviews own the geometry.
+        mu.inFlightPassCount = 0
+        let started = coordinator.animate(alongsideTransition: { [weak self] _ in
+            // FIX-143: lay out inside the system's
+            // animation (see the doc above). The layout
+            // this drives is the same live-bounds layout
+            // viewDidLayoutSubviews performs — geometry
+            // only while the transition is in flight.
+            self?.view.layoutIfNeeded()
         }, completion: { [weak self] _ in
             self?.finishMURotation()
         })
         if !started {
             // No coordinator animation could be scheduled:
-            // settle immediately, still with no layout call,
-            // so the chrome never sits in the in-flight
-            // state with no completion to clear it.
+            // settle immediately, so the chrome never sits
+            // in the in-flight state with no completion to
+            // clear it.
             finishMURotation()
         }
     }
@@ -921,7 +985,19 @@ final class LivePlayerViewController: UIViewController {
     /// queued mid-transition (the parity bit on the
     /// chrome's state bag) FRESH through the FIX-139
     /// decision, which re-reads the settled live layout.
-    /// Never lays out anything.
+    ///
+    /// FIX-143: the completion now also lands the
+    /// presentation the transition deferred — through ONE
+    /// layoutMUChrome settle pass (which applies the
+    /// presentation first, then the geometry, settling
+    /// intrinsic-size-driven frames at rest). This is not
+    /// FIX-141's settle re-assertion: that pass re-ran
+    /// GEOMETRY to correct the landing; this one exists
+    /// because fonts/chips/visibility were deliberately
+    /// held back during the turn, and the settle-delta
+    /// line below proves from the log that the picture's
+    /// own frame does not move in it (delta zero is the
+    /// pass criterion — DIAG-143 §3.3).
     private func finishMURotation() {
         guard let mu = muChrome else { return }
         mu.transitionInFlight = false
@@ -937,6 +1013,13 @@ final class LivePlayerViewController: UIViewController {
             mu.pendingToggle = false
             return
         }
+        let frameBefore = videoView.frame
+        layoutMUChrome()
+        let frameAfter = videoView.frame
+        DiagLog.log("player",
+                    "rotation settle-delta: video=\(muFmtRect(frameBefore)) "
+                    + "-> \(muFmtRect(frameAfter))")
+        logMULayerLine(context: "settle")
         let live = view.window?.windowScene?.interfaceOrientation
         DiagLog.log("player",
                     "rotation settled: interface=\(live?.rawValue ?? -1) "
@@ -1152,6 +1235,21 @@ final class LivePlayerViewController: UIViewController {
     private func fireFailOnce() {
         guard !firedFail else { return }
         firedFail = true
+        // SOURCE-REP (spec §2.2): the FAILURE write — this
+        // surface is advancing off a rung that never
+        // reached its first frame (item failure and stall
+        // alike funnel here). A rung that DID play writes
+        // nothing: its success landed at the .playing
+        // transition, and a later mid-play death is a
+        // different event with different causes — writing
+        // a failure for it would punish exactly the hosts
+        // that start fast. A viewer's manual source switch
+        // writes nothing either: it is a teardown, and the
+        // torn guard keeps this record honest even if a
+        // fail signal races the dismantle.
+        if !firedPlaying, !torn, let key = repHostKey {
+            SourceReputation.recordFailure(key: key)
+        }
         DispatchQueue.main.async { self.onFail?() }
     }
 
@@ -1163,6 +1261,7 @@ final class LivePlayerViewController: UIViewController {
     private func noteFailure(_ error: Error?) {
         guard !firedFail else { return }
         disarmStallWatchdog()
+        disarmTotalCapTimer()
         if let channel {
             DiagLog.log("player",
                         "source #\(sourceIndex) failed: \(diagSourceTag(channel))"
@@ -1241,9 +1340,19 @@ final class LivePlayerViewController: UIViewController {
     /// Arm (or re-arm) the watchdog with the threshold for
     /// this surface's phase: 6 s before the first frame has
     /// ever played, 10 s once playback has flowed (D-1).
+    ///
+    /// SOURCE-REP (spec §4.5): the pre-first-frame
+    /// threshold now comes from this surface's frozen
+    /// reputation tier — GOOD earns 12 s (the FL-486 fix
+    /// from the owner's side: the slow-but-alive hosts a
+    /// bare 6 s kept killing are exactly the ones that
+    /// earn GOOD); AVERAGE and BAD keep 6 s — the floor
+    /// is NEVER cut. The post-first-frame 10 s NEVER
+    /// changes per tier: mid-play stall handling is a
+    /// different disease (D-1 doctrine).
     private func armStallWatchdog() {
         stallTimer?.invalidate()
-        let threshold: TimeInterval = firedPlaying ? 10 : 6
+        let threshold: TimeInterval = firedPlaying ? 10 : repTier.noProgressPreFrame
         stallTimer = Timer.scheduledTimer(withTimeInterval: threshold, repeats: false) { [weak self] _ in
             self?.stallWatchdogFired(threshold: threshold)
         }
@@ -1252,6 +1361,48 @@ final class LivePlayerViewController: UIViewController {
     private func disarmStallWatchdog() {
         stallTimer?.invalidate()
         stallTimer = nil
+    }
+
+    /// SOURCE-REP (spec §4.5): arm the per-rung TOTAL
+    /// wait cap — a NEW timer on iOS (1.42 had none): a
+    /// rung that keeps trickling progress resets the
+    /// no-progress watchdog forever, so only a total cap
+    /// bounds its wait. GOOD carries 30 s, BAD 15 s;
+    /// AVERAGE — every host with no data included —
+    /// carries NO cap: today's uncapped behaviour,
+    /// unchanged (leader's R6 resolution).
+    private func armTotalCapTimer() {
+        totalCapTimer?.invalidate()
+        totalCapTimer = nil
+        guard !firedPlaying, let cap = repTier.totalCap else { return }
+        totalCapTimer = Timer.scheduledTimer(withTimeInterval: cap, repeats: false) { [weak self] _ in
+            self?.totalCapFired(cap: cap)
+        }
+    }
+
+    private func disarmTotalCapTimer() {
+        totalCapTimer?.invalidate()
+        totalCapTimer = nil
+    }
+
+    /// The total cap expired before the first frame: log
+    /// it (the tier named, per the owner's requirement),
+    /// run the same definitive-failure classification a
+    /// stall gets, then fire the EXISTING fail path —
+    /// advance, skip and slate logic reused untouched
+    /// (spec §4.5).
+    private func totalCapFired(cap: TimeInterval) {
+        guard !firedFail, !torn, !firedPlaying else { return }
+        if let channel {
+            DiagLog.log("player",
+                        "stall: source #\(sourceIndex) \(diagSourceTag(channel)) "
+                        + "— total wait cap \(Int(cap))s reached "
+                        + "(tier \(repTier.label)), advancing")
+        }
+        if let reason = definitiveFailureReason(for: playerItem?.error) {
+            onDefinitiveFail?(reason)
+        }
+        fireFailOnce()
     }
 
     /// Playback progress (D-1): while the player is waiting,
@@ -1273,9 +1424,12 @@ final class LivePlayerViewController: UIViewController {
     private func stallWatchdogFired(threshold: TimeInterval) {
         guard !firedFail, !torn else { return }
         if let channel {
+            // SOURCE-REP: the stall line names the tier
+            // whose budget fired (spec §4.5 logging).
             DiagLog.log("player",
                         "stall: source #\(sourceIndex) \(diagSourceTag(channel)) "
-                        + "— no playback progress in \(Int(threshold))s, advancing")
+                        + "— no playback progress in \(Int(threshold))s "
+                        + "(tier \(repTier.label)), advancing")
         }
         if let reason = definitiveFailureReason(for: playerItem?.error) {
             onDefinitiveFail?(reason)
@@ -1319,6 +1473,9 @@ final class LivePlayerViewController: UIViewController {
             // FIX-130 (P-3): reaching .playing IS progress —
             // the watchdog's clock is moot while frames flow.
             disarmStallWatchdog()
+            // SOURCE-REP: the first frame is up — the total
+            // wait cap has done its job (or never applied).
+            disarmTotalCapTimer()
             playPauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
             if !firedPlaying {
                 firedPlaying = true
@@ -1328,6 +1485,20 @@ final class LivePlayerViewController: UIViewController {
                 if let channel {
                     DiagLog.log("player",
                                 "playback started: source #\(sourceIndex) \(diagSourceTag(channel))")
+                }
+                // SOURCE-REP (spec §2.2): the SUCCESS
+                // write — this rung reached its first
+                // frame. Only real playback teaches
+                // reputation; the measure is the surface's
+                // own load-start stamp → this transition.
+                // An absurd TTFF (negative, or > 120 s —
+                // spec §7) is discarded, not recorded.
+                if let key = repHostKey, let started = loadStartedAt {
+                    let ttff = Date().timeIntervalSince(started)
+                    if ttff >= 0, ttff <= 120 {
+                        SourceReputation.recordSuccess(
+                            key: key, ttffMs: Int((ttff * 1000).rounded()))
+                    }
                 }
             }
             // Playback is (again) real: resume the normal fade.
@@ -1520,6 +1691,10 @@ final class LivePlayerViewController: UIViewController {
         torn = true
         hideTimer?.invalidate()
         disarmStallWatchdog()
+        disarmTotalCapTimer()
+        // SOURCE-REP (spec §6.1): the session-writes
+        // summary flushes at player close.
+        SourceReputation.flushSessionWrites()
         if pipController?.isPictureInPictureActive == true {
             pipController?.stopPictureInPicture()
         }
@@ -1917,6 +2092,10 @@ final class MatchPlaySession: ObservableObject {
     /// published prefix never moves (R-2).
     private var raceOrderURLs: [String]?
     private var raceTask: Task<Void, Never>?
+    /// SOURCE-REP (spec §6.2): the last ladder-order line
+    /// this session logged — an identical order re-made
+    /// real (race settle, then final publish) logs once.
+    private var lastReputationOrderSignature: String?
     /// FIX-141: the deferred single-rung warm armed by
     /// beginPrewarming(after:) — see its doc. Cancelled and
     /// re-armed on every switch; cancelled for good by
@@ -2234,19 +2413,65 @@ final class MatchPlaySession: ObservableObject {
     /// race annotates this order and nothing else: it never
     /// re-orders, replaces or delays a publication (R-2).
     func advanceOrder(in ladder: [Channel]) -> [Int] {
-        guard let raceOrderURLs else { return Array(ladder.indices) }
-        var order: [Int] = []
-        var used = Set<Int>()
-        for url in raceOrderURLs {
-            if let i = ladder.firstIndex(where: { $0.url == url }),
-               used.insert(i).inserted {
+        let base: [Int]
+        if let raceOrderURLs {
+            var order: [Int] = []
+            var used = Set<Int>()
+            for url in raceOrderURLs {
+                if let i = ladder.firstIndex(where: { $0.url == url }),
+                   used.insert(i).inserted {
+                    order.append(i)
+                }
+            }
+            for i in ladder.indices where !used.contains(i) {
                 order.append(i)
             }
+            base = order
+        } else {
+            base = Array(ladder.indices)
         }
-        for i in ladder.indices where !used.contains(i) {
-            order.append(i)
+        // SOURCE-REP Hook B (spec §4.1): the walk re-sorts
+        // by reputation tier — GOOD first, BAD last — as a
+        // stable sort on tier keys snapshotted before
+        // sorting; within a tier the order above (race
+        // result, then ladder order) stands untouched.
+        // Nothing is removed and nothing is skipped: a
+        // BAD rung still walks, just last, and the race
+        // still probes every rung, so a demoted host keeps
+        // producing fresh evidence and can redeem itself
+        // through the natural failover traffic (spec
+        // §4.4). With an empty reputation table every key
+        // is AVERAGE and this sort is the identity —
+        // today's walk, exactly.
+        let tiers = base.map { SourceReputation.tier(for: ladder[$0]) }
+        return base.enumerated().sorted { a, b in
+            if tiers[a.offset] != tiers[b.offset] {
+                return tiers[a.offset].rank < tiers[b.offset].rank
+            }
+            return a.offset < b.offset
+        }.map { $0.element }
+    }
+
+    /// SOURCE-REP (spec §6.2): ONE line at the moments
+    /// order becomes real — the race settle and the final
+    /// publish — listing every rung in the order it will
+    /// be walked/published, with the record behind each
+    /// rung's tier (or `no record`). Signature-deduped:
+    /// an identical ladder re-made real in the same
+    /// session does not re-log.
+    private func logReputationOrder(_ channels: [Channel]) {
+        guard !channels.isEmpty else { return }
+        var parts: [String] = []
+        for (i, ch) in channels.enumerated() {
+            let host = ch.streamURL?.host ?? URL(string: ch.url)?.host ?? "?"
+            let record = SourceReputation.key(for: ch.url)
+                .map { SourceReputation.describe(key: $0) } ?? "no record"
+            parts.append("\(i + 1). \(host) (\(record))")
         }
-        return order
+        let line = parts.joined(separator: " ")
+        guard line != lastReputationOrderSignature else { return }
+        lastReputationOrderSignature = line
+        DiagLog.log("player", "reputation: ladder order — \(line)")
     }
 
     /// FIX-130 (P-2): the latency race itself — every rung of
@@ -2303,6 +2528,11 @@ final class MatchPlaySession: ObservableObject {
                     "probe: race order for "
                     + "'\(ladder.first.map { MatchTitle.clean($0.title) } ?? "?")' "
                     + "— \(parts.joined(separator: ", "))")
+        // SOURCE-REP (spec §6.2): the failover order the
+        // race just made real — advanceOrder with the
+        // reputation re-sort applied — with the record
+        // behind each rung's tier.
+        logReputationOrder(advanceOrder(in: ladder).map { ladder[$0] })
     }
 
     /// FIX-129 (Item C): the player failed this source with a
@@ -2358,14 +2588,32 @@ final class MatchPlaySession: ObservableObject {
         /// Publish per the contract above. `final` also appends
         /// the kept tail.
         func publish(final: Bool) {
+            // SOURCE-REP Hook A (spec §4.2): reputation
+            // enters the published verified tier ONLY as
+            // the tie-break between the quality key and the
+            // candidate-index key — (quality desc, tier
+            // asc, index asc) — with tier keys snapshotted
+            // before sorting. Quality still outranks
+            // history: reputation decides exactly the cases
+            // quality can't (two verified rungs of equal
+            // parsed quality, one on a proven host, one on
+            // a convicted one). The published prefix still
+            // never moves after publication.
+            let tierByIndex = Dictionary(uniqueKeysWithValues:
+                verified.map { ($0.0, SourceReputation.tier(for: $0.1)) })
             let ordered = verified.sorted { a, b in
+                let ta = tierByIndex[a.0] ?? .average
+                let tb = tierByIndex[b.0] ?? .average
                 switch (a.2, b.2) {
                 case let (qa?, qb?):
                     if qa != qb { return qa > qb }
+                    if ta != tb { return ta.rank < tb.rank }
                     return a.0 < b.0
                 case (_?, nil): return true
                 case (nil, _?): return false
-                case (nil, nil): return a.0 < b.0
+                case (nil, nil):
+                    if ta != tb { return ta.rank < tb.rank }
+                    return a.0 < b.0
                 }
             }.map { $0.1 }
             // Merge into the published ladder: a channel whose
@@ -2423,6 +2671,13 @@ final class MatchPlaySession: ObservableObject {
                             "ladder first batch: \(self.sources.count) source(s) "
                             + "published for "
                             + "'\(ladder.first.map { MatchTitle.clean($0.title) } ?? "?")'")
+            }
+            // SOURCE-REP (spec §6.2): the final publish is
+            // the other moment order becomes real — the
+            // published ladder, with the record behind
+            // each rung's tier.
+            if final {
+                self.logReputationOrder(self.sources)
             }
         }
 
@@ -2505,6 +2760,9 @@ final class MatchPlaySession: ObservableObject {
             deadURLs: deadURLs.union(playerDeadURLs),
             verifiedURLs: Set(verified.map { $0.1.url }),
             from: self)
+        // SOURCE-REP (spec §6.1): the session-writes
+        // summary also flushes at session settle.
+        SourceReputation.flushSessionWrites()
     }
 }
 
@@ -3209,6 +3467,296 @@ enum VerdictDisk {
             prewarm: SourcePrewarmStore.shared.verdictSnapshot())
         cachedPayload = payload
         didLoad = true
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+}
+
+/// SOURCE-REP (owner order 2026-11-25; spec in
+/// SOURCE-REP/spec.md): the per-HOST source reputation —
+/// the long memory beside VerdictDisk's short one.
+/// VerdictDisk answers "is THIS url dead right now?"
+/// (per-URL, minutes, verdict-shaped); this store answers
+/// "is this HOST usually good?" (per-host, days,
+/// statistics-shaped: success/failure counts + a
+/// time-to-first-frame EMA). It is fed ONLY by real
+/// playback outcomes (spec §2 — probe, prewarm and
+/// verifier evidence NEVER writes here; FL-486 convicted
+/// that conflation), it only ever REORDERS (it has no
+/// skip API — VerdictDisk's fresh dead verdicts always
+/// win, spec §4.3), and a host with no record is AVERAGE,
+/// which behaves exactly as no data.
+///
+/// The record and tier semantics are the tvOS 1.7.10
+/// SourceReputation's, byte-for-byte (family
+/// consistency); the plumbing mirrors VerdictDisk
+/// instead — a versioned JSON file in Caches with
+/// coalesced saves — because iOS's record sites already
+/// run on the main actor (spec §1.3). The failure
+/// doctrine is VerdictDisk's: ANY load failure yields an
+/// empty table, never a crash.
+@MainActor
+enum SourceReputation {
+
+    struct Entry: Codable {
+        var successes: Int
+        var failures: Int
+        /// Time-to-first-frame EMA (ms), α 0.3; seeded by
+        /// the first success.
+        var emaMs: Double
+        /// Epoch seconds of the last recorded outcome.
+        var lastSeen: TimeInterval
+    }
+
+    enum Tier {
+        case good, average, bad
+
+        var label: String {
+            switch self {
+            case .good: return "GOOD"
+            case .average: return "AVERAGE"
+            case .bad: return "BAD"
+            }
+        }
+
+        /// Sort rank for the ranking hooks (spec §4):
+        /// GOOD walks first, BAD last.
+        var rank: Int {
+            switch self {
+            case .good: return 0
+            case .average: return 1
+            case .bad: return 2
+            }
+        }
+
+        /// The pre-first-frame no-progress watchdog for a
+        /// surface on this tier (spec §4.5): GOOD earns
+        /// 12 s (the slow-but-alive hosts a bare 6 s kept
+        /// killing are the ones that earn GOOD); AVERAGE
+        /// and BAD keep today's 6 s — the floor is NEVER
+        /// cut (the tvOS record carries a first frame at
+        /// 5.882 s).
+        var noProgressPreFrame: TimeInterval {
+            switch self {
+            case .good: return 12
+            case .average, .bad: return 6
+            }
+        }
+
+        /// The per-rung TOTAL wait cap (spec §4.5 — a NEW
+        /// timer on iOS): GOOD 30 s, BAD 15 s. AVERAGE —
+        /// which includes every host with no data — is
+        /// nil: NO cap, exactly 1.42's uncapped behaviour
+        /// (leader's R6 resolution: the tvOS-standard
+        /// 20 s AVERAGE cap does NOT apply on iOS, where
+        /// no total cap exists today; caps are earned by
+        /// data, in both directions).
+        var totalCap: TimeInterval? {
+            switch self {
+            case .good: return 30
+            case .bad: return 15
+            case .average: return nil
+            }
+        }
+    }
+
+    private struct Payload: Codable {
+        var version: Int
+        var hosts: [String: Entry]
+    }
+
+    private static let maxHosts = 300
+    private static let idleExpiry: TimeInterval = 30 * 24 * 3600
+
+    private static var fileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dabanh-reputation.json")
+    }
+
+    private static var table: [String: Entry]?
+    private static var pendingSave: Task<Void, Never>?
+    /// Spec §6.1: write descriptions accumulated since
+    /// the last flush — the summary line is counted, not
+    /// per-event, so a busy evening cannot flood the log.
+    private static var sessionWrites: [String] = []
+
+    // MARK: Keys
+
+    /// The reputation key for a source URL: the host,
+    /// lowercased — with ONE data-derived fold (spec
+    /// §1.2): the AWS IVS ephemeral shape
+    /// `<hash>.<region>.playback.live-video.net` mints a
+    /// new host per match, so a host key there could
+    /// never learn; hosts with ≥ 4 labels ending in
+    /// `.playback.live-video.net` fold to the single key
+    /// `*.playback.live-video.net`. Numbered siblings
+    /// (live05. ≠ live2., pull. ≠ pull1.) stay distinct
+    /// keys — NO registrable-domain collapse.
+    static func key(for url: String) -> String? {
+        guard let host = URL(string: url)?.host?.lowercased(),
+              !host.isEmpty else { return nil }
+        if host.hasSuffix(".playback.live-video.net"),
+           host.split(separator: ".").count >= 4 {
+            return "*.playback.live-video.net"
+        }
+        return host
+    }
+
+    // MARK: Reads
+
+    static func tier(forKey key: String) -> Tier {
+        guard let entry = load()[key] else { return .average }
+        return tier(of: entry)
+    }
+
+    static func tier(for channel: Channel) -> Tier {
+        guard let key = key(for: channel.url) else { return .average }
+        return tier(forKey: key)
+    }
+
+    /// The single tier formula (tvOS's, verbatim): GOOD
+    /// at ≥3 successes AND successes ≥ 3× failures; BAD
+    /// at ≥3 failures AND failures ≥ 3× successes; else
+    /// AVERAGE. No record → AVERAGE → no data.
+    private static func tier(of entry: Entry) -> Tier {
+        if entry.successes >= 3, entry.successes >= 3 * entry.failures {
+            return .good
+        }
+        if entry.failures >= 3, entry.failures >= 3 * entry.successes {
+            return .bad
+        }
+        return .average
+    }
+
+    /// The log spelling of a host's record (spec §6):
+    /// `tier GOOD · 9 ok / 1 fail, first-frame ema 5410 ms`
+    /// — the EMA clause appears only once a success has
+    /// seeded it — or `no record`.
+    static func describe(key: String) -> String {
+        guard let entry = load()[key] else { return "no record" }
+        var text = "tier \(tier(of: entry).label) · "
+            + "\(entry.successes) ok / \(entry.failures) fail"
+        if entry.successes > 0 {
+            text += ", first-frame ema \(Int(entry.emaMs.rounded())) ms"
+        }
+        return text
+    }
+
+    // MARK: Writes (real playback outcomes ONLY — spec §2)
+
+    /// A rung reached its first frame: successes += 1 and
+    /// the TTFF EMA moves (α 0.3; the first success seeds
+    /// it).
+    static func recordSuccess(key: String, ttffMs: Int) {
+        var hosts = load()
+        let before = hosts[key].map { tier(of: $0) } ?? .average
+        var entry = hosts[key] ?? Entry(successes: 0, failures: 0,
+                                        emaMs: 0, lastSeen: 0)
+        let firstSuccess = entry.successes == 0
+        entry.successes += 1
+        entry.emaMs = firstSuccess
+            ? Double(ttffMs)
+            : 0.3 * Double(ttffMs) + 0.7 * entry.emaMs
+        entry.lastSeen = Date().timeIntervalSince1970
+        hosts[key] = entry
+        evictIfNeeded(&hosts)
+        table = hosts
+        sessionWrites.append("\(key) +1 ok (ttff \(ttffMs) ms)")
+        logTierChange(key: key, before: before, after: tier(of: entry))
+        scheduleSave()
+    }
+
+    /// A surface advanced off a rung that never reached
+    /// its first frame: failures += 1.
+    static func recordFailure(key: String) {
+        var hosts = load()
+        let before = hosts[key].map { tier(of: $0) } ?? .average
+        var entry = hosts[key] ?? Entry(successes: 0, failures: 0,
+                                        emaMs: 0, lastSeen: 0)
+        entry.failures += 1
+        entry.lastSeen = Date().timeIntervalSince1970
+        hosts[key] = entry
+        evictIfNeeded(&hosts)
+        table = hosts
+        sessionWrites.append("\(key) +1 fail")
+        logTierChange(key: key, before: before, after: tier(of: entry))
+        scheduleSave()
+    }
+
+    /// Tier-change lines are never sampled away (spec
+    /// §6.1): when a write moves a host's tier, the new
+    /// tier and the record behind it log immediately.
+    private static func logTierChange(key: String, before: Tier, after: Tier) {
+        guard before != after else { return }
+        DiagLog.log("player",
+                    "reputation: \(key) is now \(after.label) "
+                    + "— \(describe(key: key))")
+    }
+
+    /// Spec §6.1: ONE summary line per player close and
+    /// per session settle, listing the writes since the
+    /// last flush. An empty journal logs nothing.
+    static func flushSessionWrites() {
+        guard !sessionWrites.isEmpty else { return }
+        let writes = sessionWrites
+        sessionWrites = []
+        DiagLog.log("player",
+                    "reputation: session writes — "
+                    + writes.joined(separator: ", "))
+    }
+
+    // MARK: Storage (VerdictDisk's shape — spec §1.3)
+
+    /// The table, read from disk at most once per launch;
+    /// hosts idle 30 days expire AT LOAD (spec §3). Any
+    /// failure — missing file, corrupt JSON, version ≠ 1
+    /// — yields the empty table: a cold start, never a
+    /// crash. A future-dated lastSeen reads as expired,
+    /// never as fresh (VerdictDisk's age doctrine).
+    private static func load() -> [String: Entry] {
+        if let table { return table }
+        var hosts: [String: Entry] = [:]
+        if let data = try? Data(contentsOf: fileURL),
+           let decoded = try? JSONDecoder().decode(Payload.self, from: data),
+           decoded.version == 1 {
+            hosts = decoded.hosts
+        }
+        let now = Date().timeIntervalSince1970
+        hosts = hosts.filter {
+            (0...idleExpiry).contains(now - $0.value.lastSeen)
+        }
+        table = hosts
+        return hosts
+    }
+
+    /// Cap 300 hosts, least-recently-touched evicted
+    /// first (spec §1.1). Runs at write time.
+    private static func evictIfNeeded(_ hosts: inout [String: Entry]) {
+        guard hosts.count > maxHosts else { return }
+        let evicted = hosts.sorted { $0.value.lastSeen < $1.value.lastSeen }
+            .prefix(hosts.count - maxHosts)
+        for (key, _) in evicted {
+            hosts.removeValue(forKey: key)
+        }
+    }
+
+    /// Coalesced save, VerdictDisk's pattern: cancel any
+    /// pending save and start a new one that sleeps 1 s,
+    /// then writes. Record calls are in-memory mutations;
+    /// the disk sees ≤ 1 write per burst (spec §7).
+    private static func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task {
+            try? await Task.sleep(for: .seconds(1))
+            if Task.isCancelled { return }
+            writeNow()
+        }
+    }
+
+    private static func writeNow() {
+        guard let table else { return }
+        let payload = Payload(version: 1, hosts: table)
         if let data = try? JSONEncoder().encode(payload) {
             try? data.write(to: fileURL, options: .atomic)
         }

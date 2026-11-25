@@ -139,6 +139,31 @@ final class MUChromeViews {
     /// line per pass.
     var lastLoggedLayoutPage: String?
     var lastLoggedLayoutSize: CGSize?
+    /// FIX-143: the orientation the PRESENTATION layer
+    /// (fonts + kern, chip spacing + rebuild, scrim /
+    /// footer / source-label visibility) was last applied
+    /// for — true = landscape, false = portrait, nil =
+    /// never applied. While a rotation transition is in
+    /// flight the presentation is DEFERRED (the elements
+    /// ride the turn at their old presentation — DIAG-143
+    /// Option B); finishMURotation applies it at settle,
+    /// where this flag is compared against the settled
+    /// page. Deliberately separate from `landscape` above:
+    /// that flag is the GEOMETRY page and follows the live
+    /// bounds on every pass, in flight or not.
+    var presentationLandscape: Bool?
+    /// FIX-143: a chip rebuild was requested while a
+    /// transition was in flight (a content refresh) and
+    /// deferred — chips are never rebuilt mid-flight
+    /// (DIAG-143 §2.3); the settle presentation honours
+    /// this bit even when the page itself did not change.
+    var chipsDirty = false
+    /// FIX-143 (§3.1): layout passes counted while a
+    /// transition is in flight — reset by
+    /// viewWillTransition, incremented per in-flight pass
+    /// by layoutMUChrome; the per-pass in-flight log line
+    /// carries the count as its pass index.
+    var inFlightPassCount = 0
     let scrimTop = UIView()
     let scrimBottom = UIView()
     var chipButtons: [UIButton] = []
@@ -605,6 +630,17 @@ extension LivePlayerViewController {
     /// state (maroon fill, gold border, check).
     private func rebuildMUChips() {
         guard let mu = muChrome else { return }
+        // FIX-143 (§2.3): chips are NEVER rebuilt while a
+        // rotation transition is in flight — the rebuild
+        // destroys and recreates every chip button, the
+        // single most violent mid-turn swap DIAG-143
+        // convicted. A rebuild requested mid-flight (a
+        // content refresh) is deferred via chipsDirty and
+        // lands in finishMURotation's settle presentation.
+        if mu.transitionInFlight {
+            mu.chipsDirty = true
+            return
+        }
         for button in mu.chipButtons {
             mu.chipsStack.removeArrangedSubview(button)
             button.removeFromSuperview()
@@ -675,13 +711,27 @@ extension LivePlayerViewController {
     /// to live bounds. The geometry below is byte-for-byte
     /// the former body: the old no-arg form fed it exactly
     /// this bounds (origin .zero, the view's live size).
+    ///
+    /// FIX-143 (Option B): the pass is now TWO layers.
+    /// GEOMETRY (the page functions: frames from bounds)
+    /// runs on every pass, as always. PRESENTATION (page
+    /// fonts + kern rebuild, chip spacing + rebuild,
+    /// scrim / footer / source-label visibility —
+    /// applyMUPresentation) applies immediately on passes
+    /// outside a transition, exactly as in 1.42, but is
+    /// DEFERRED while a rotation transition is in flight:
+    /// in 1.42 those writes fired inside the flip pass as
+    /// model-layer writes outside any animation block, so
+    /// the new page's composition teleported in mid-turn
+    /// while the canvas was still rotating (DIAG-143's
+    /// conviction — the rotation was two motions, not
+    /// one). Deferred, the elements ride the turn at
+    /// their old presentation and update once, at rest,
+    /// in finishMURotation's settle pass.
     func layoutMUChrome() {
         guard let mu = muChrome else { return }
         let bounds = CGRect(origin: .zero, size: view.bounds.size)
         let safe = view.safeAreaInsets
-        // FIX-MU-3 (finding 9): the chip font differs per
-        // orientation — when a rotation flips the page,
-        // rebuild the chips so they pick up the new size.
         let isLandscape = bounds.width > bounds.height
         // FIX-141: layout observability — one DiagLog line
         // when the chosen page or the size used changes
@@ -695,15 +745,15 @@ extension LivePlayerViewController {
                         "mu layout: page=\(page) "
                         + "size=\(Int(bounds.width.rounded()))x\(Int(bounds.height.rounded()))")
         }
+        // The GEOMETRY page flag follows the live bounds on
+        // every pass, in flight or not (the FIX-139 toggle
+        // decision reads this flag — its timing is part of
+        // that proven path and does not change).
         if mu.landscape != isLandscape {
             mu.landscape = isLandscape
-            // FIX-133 (audit D17): the landscape page's chip
-            // gap is the spec's 12; portrait keeps 8. Set
-            // here, on the flip, so layoutChips' width
-            // accounting (which reads the stack spacing)
-            // always agrees with the stack itself.
-            mu.chipsStack.spacing = isLandscape ? 12 : 8
-            rebuildMUChips()
+        }
+        if !mu.transitionInFlight {
+            applyMUPresentation(mu, isLandscape: isLandscape)
         }
         if bounds.height >= bounds.width {
             layoutMUPortrait(mu, bounds: bounds, safe: safe)
@@ -711,21 +761,127 @@ extension LivePlayerViewController {
             layoutMULandscape(mu, bounds: bounds, safe: safe)
         }
         spinner.center = CGPoint(x: videoView.frame.midX, y: videoView.frame.midY)
+        // FIX-143 (§3.1/§3.2): while a transition is in
+        // flight, EVERY pass logs — no dedupe — carrying
+        // the pass index, the live bounds, the safe-area
+        // insets THIS pass saw (the B-5 inset-phase suspect
+        // becomes decidable), the chosen page and the
+        // picture's own frame; the first in-flight pass
+        // also logs the layer line.
+        if mu.transitionInFlight {
+            mu.inFlightPassCount += 1
+            DiagLog.log("player",
+                        "mu layout (in flight #\(mu.inFlightPassCount)): page=\(page) "
+                        + "bounds=\(muFmtRect(bounds)) "
+                        + "safe=\(muFmtInsets(safe)) "
+                        + "video=\(muFmtRect(videoView.frame))")
+            if mu.inFlightPassCount == 1 {
+                logMULayerLine(context: "first in-flight pass")
+            }
+        }
+    }
+
+    /// FIX-143: the PRESENTATION layer of the MU pages —
+    /// page fonts + the title's kern rebuild, the chips'
+    /// spacing + rebuild, and the scrim / footer /
+    /// source-label visibility. Split out of the page
+    /// functions (where 1.42 interleaved these writes with
+    /// the frame math) so a rotation transition can defer
+    /// them to the settle: layoutMUChrome calls this on
+    /// every pass outside a transition, and
+    /// finishMURotation's settle pass calls it (through
+    /// layoutMUChrome) once the turn has landed. The
+    /// writes are exactly 1.42's, in 1.42's values — the
+    /// settled pages do not change; only their timing
+    /// during a turn does. (layoutMiniScore's font writes
+    /// stay in the geometry layer deliberately: its font
+    /// size is 11 on BOTH pages, so those writes are
+    /// value-identical across the flip and cannot
+    /// teleport; its frames depend on the intrinsic sizes
+    /// those fonts produce, in the same pass.)
+    private func applyMUPresentation(_ mu: MUChromeViews, isLandscape: Bool) {
+        if isLandscape {
+            mu.scrimTop.isHidden = false
+            mu.scrimBottom.isHidden = false
+            mu.footerLabel.isHidden = true
+            mu.sourceLabel.isHidden = true
+            mu.nameLabel.font = MUFont.uiBody(14, .semibold)
+            mu.noteLabel.font = MUFont.uiBody(9)
+            mu.titleLabel.font = MUFont.uiDisplay(25)
+            applyMUKern(mu.titleLabel, factor: -0.015)
+            mu.statusLabel.font = MUFont.uiBody(9)
+        } else {
+            mu.scrimTop.isHidden = true
+            mu.scrimBottom.isHidden = true
+            mu.footerLabel.isHidden = false
+            mu.sourceLabel.isHidden = false
+            mu.nameLabel.font = MUFont.uiBody(17, .semibold)
+            mu.noteLabel.font = MUFont.uiBody(10)
+            mu.titleLabel.font = MUFont.uiDisplay(32)
+            applyMUKern(mu.titleLabel, factor: -0.015)
+            // 1.42's portrait page never wrote
+            // statusLabel.font (frame only) — preserved.
+        }
+        // Chips: the spacing + rebuild land only when the
+        // applied presentation's orientation changes, or
+        // when a rebuild was deferred mid-flight. (FIX-MU-3
+        // finding 9: the chip font differs per orientation,
+        // 11 portrait / 10 landscape — makeMUChip reads the
+        // geometry flag, which layoutMUChrome has already
+        // set to this same page. FIX-133 D17: the spacing
+        // is set with the rebuild so layoutChips' width
+        // accounting always agrees with the stack itself.)
+        if mu.presentationLandscape != isLandscape || mu.chipsDirty {
+            mu.presentationLandscape = isLandscape
+            mu.chipsStack.spacing = isLandscape ? 12 : 8
+            rebuildMUChips()
+            mu.chipsDirty = false
+        }
+    }
+
+    /// FIX-143 (§3.2): the picture layer's own numbers —
+    /// videoView.frame, its backing player layer's frame
+    /// (PlayerLayerView's layer IS the AVPlayerLayer, so
+    /// the two must track) and the video gravity — logged
+    /// at the fullscreen toggle, at the first in-flight
+    /// layout pass and at the settle, so the picture's
+    /// geometry is observable DURING a transition for the
+    /// first time (in 1.42 nothing logged it at all).
+    func logMULayerLine(context: String) {
+        let layer = videoView.playerLayer
+        DiagLog.log("player",
+                    "mu layer (\(context)): video=\(muFmtRect(videoView.frame)) "
+                    + "layer=\(muFmtRect(layer.frame)) "
+                    + "gravity=\(layer.videoGravity.rawValue)")
+    }
+
+    /// Compact rect spelling for the FIX-143 log lines:
+    /// "x,y WxH", points rounded.
+    func muFmtRect(_ rect: CGRect) -> String {
+        "\(Int(rect.origin.x.rounded())),\(Int(rect.origin.y.rounded())) "
+            + "\(Int(rect.width.rounded()))x\(Int(rect.height.rounded()))"
+    }
+
+    /// Compact insets spelling for the FIX-143 log lines:
+    /// "top,left,bottom,right", points rounded.
+    func muFmtInsets(_ insets: UIEdgeInsets) -> String {
+        "\(Int(insets.top.rounded())),\(Int(insets.left.rounded())),"
+            + "\(Int(insets.bottom.rounded())),\(Int(insets.right.rounded()))"
     }
 
     private func layoutMUPortrait(_ mu: MUChromeViews, bounds: CGRect, safe: UIEdgeInsets) {
-        mu.scrimTop.isHidden = true
-        mu.scrimBottom.isHidden = true
-        mu.footerLabel.isHidden = false
+        // FIX-143: GEOMETRY ONLY — the scrim/footer
+        // visibility and the header fonts this function
+        // used to write live in applyMUPresentation now,
+        // so a rotation transition can defer them to the
+        // settle instead of teleporting them mid-turn.
         let w = bounds.width
         let pad: CGFloat = 16
         let top = safe.top
 
         // Header row (56): name + note left, close top-right.
         mu.nameLabel.frame = CGRect(x: pad, y: top + 4, width: w - pad - 48 - 24, height: 22)
-        mu.nameLabel.font = MUFont.uiBody(17, .semibold)
         mu.noteLabel.frame = CGRect(x: pad, y: top + 28, width: w - pad - 48 - 24, height: 14)
-        mu.noteLabel.font = MUFont.uiBody(10)
         closeButton.frame = CGRect(x: w - pad - 48, y: top + 4, width: 48, height: 48)
 
         // Mini-score chip under the header (absent for a
@@ -780,8 +936,6 @@ extension LivePlayerViewController {
         layoutEyebrowRow(mu, x: pad, y: y, width: w - pad * 2, titleSize: 32)
         y += 20 + 9 * gapScale
         mu.titleLabel.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: 40)
-        mu.titleLabel.font = MUFont.uiDisplay(32)
-        applyMUKern(mu.titleLabel, factor: -0.015)
         y += 40 + 8 * gapScale
         mu.statusLabel.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: 15)
         y += 15 + 12 * gapScale
@@ -803,10 +957,10 @@ extension LivePlayerViewController {
     }
 
     private func layoutMULandscape(_ mu: MUChromeViews, bounds: CGRect, safe: UIEdgeInsets) {
-        mu.scrimTop.isHidden = false
-        mu.scrimBottom.isHidden = false
-        // Spec: no portrait footer in the landscape page.
-        mu.footerLabel.isHidden = true
+        // FIX-143: GEOMETRY ONLY — the scrim/footer
+        // visibility and the page fonts this function used
+        // to write live in applyMUPresentation now (see
+        // layoutMUPortrait's note).
         let w = bounds.width
         let h = bounds.height
         let insetX = safe.left + 12
@@ -821,9 +975,7 @@ extension LivePlayerViewController {
 
         // Header top-left; close top-right (spec: y12).
         mu.nameLabel.frame = CGRect(x: insetX, y: 12, width: w - insetX * 2 - 60, height: 19)
-        mu.nameLabel.font = MUFont.uiBody(14, .semibold)
         mu.noteLabel.frame = CGRect(x: insetX, y: 33, width: w - insetX * 2 - 60, height: 12)
-        mu.noteLabel.font = MUFont.uiBody(9)
         closeButton.frame = CGRect(x: w - insetX - 48, y: 12, width: 48, height: 48)
 
         layoutMiniScore(mu, x: insetX, y: 73, height: 28, crest: 20, fontSize: 11)
@@ -838,7 +990,6 @@ extension LivePlayerViewController {
         let chipsY = bottom - 44
         layoutChips(mu, x: insetX + 106, y: chipsY, width: contentW - 106)
         mu.allSourcesButton.frame = CGRect(x: insetX, y: chipsY, width: 94, height: 44)
-        mu.sourceLabel.isHidden = true
         let progressY = chipsY - 12 - 28
         layoutProgress(mu, x: insetX, y: progressY, width: contentW)
         let timeY = progressY - 4 - 14
@@ -847,10 +998,7 @@ extension LivePlayerViewController {
         // Title block (left half).
         layoutEyebrowRow(mu, x: insetX, y: rowY, width: contentW / 2 - 12, titleSize: 25)
         mu.titleLabel.frame = CGRect(x: insetX, y: rowY + 26, width: contentW / 2 - 12, height: 30)
-        mu.titleLabel.font = MUFont.uiDisplay(25)
-        applyMUKern(mu.titleLabel, factor: -0.015)
         mu.statusLabel.frame = CGRect(x: insetX, y: rowY + 58, width: contentW / 2 - 12, height: 12)
-        mu.statusLabel.font = MUFont.uiBody(9)
         // Toolbar (right half, right-aligned).
         layoutToolbar(mu, x: insetX + contentW / 2 + 12, y: rowY + 9, width: contentW / 2 - 12)
     }
@@ -957,7 +1105,9 @@ extension LivePlayerViewController {
     }
 
     private func layoutSourceHeader(_ mu: MUChromeViews, x: CGFloat, y: CGFloat, width: CGFloat) {
-        mu.sourceLabel.isHidden = false
+        // FIX-143: the source label's visibility is
+        // presentation (applyMUPresentation); only its
+        // frame is geometry and stays here.
         mu.sourceLabel.frame = CGRect(x: x, y: y, width: width - 120, height: 44)
         mu.allSourcesButton.frame = CGRect(x: x + width - 120, y: y, width: 120, height: 44)
     }
@@ -1074,6 +1224,11 @@ extension LivePlayerViewController {
     /// chosen direction are logged with every toggle so the
     /// device log can convict any residual mismatch.
     @objc func muToggleFullscreen() {
+        // FIX-143 (§3.2): the picture layer's numbers at
+        // the toggle itself. Pure instrumentation — the
+        // FIX-142 queue and the FIX-139 decision below are
+        // untouched.
+        logMULayerLine(context: "toggle")
         // FIX-142: a toggle fired while a rotation
         // transition is in flight is QUEUED, not dropped.
         // FIX-141's coalescing discarded it outright (no
