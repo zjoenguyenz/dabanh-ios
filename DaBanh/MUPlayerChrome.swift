@@ -251,6 +251,13 @@ final class MUChromeViews {
     /// receive its second delivery AFTER that settle —
     /// this record keeps such a re-delivery deduped.
     weak var lastSettledCoordinator: AnyObject?
+    /// FIX-150: an enter decided from the portrait page
+    /// waits for the window's own turn to land before the
+    /// fullscreen controller is presented (see
+    /// presentMUFullscreenAtLandscapeRest). Set while that
+    /// presentation is owed; cleared when it is made, or
+    /// when the state it was owed to (isActive) is gone.
+    var hostingDeferred = false
     /// FIX-147: the after-exit fallback's generation — a
     /// one-shot guard per request (no timer, no repeat),
     /// so a stale fallback from an earlier request never
@@ -316,6 +323,23 @@ enum MUFullscreenState {
     /// teardown release and the successor adoption, so
     /// the two are order-independent.
     static weak var hostedController: LivePlayerViewController?
+    /// FIX-150 (REVIEW-150 gate fix, Lens A-2): the
+    /// transition coordinator of the turn currently in
+    /// flight on the (single) live MU surface, recorded
+    /// globally because a surface that never received
+    /// the turn — a successor born mid-turn — has no
+    /// in-flight flag of its own to consult, and its
+    /// layout + interface readings can both say
+    /// "landscape" while the turn's animation is still
+    /// running. Written by muWillTransition alongside
+    /// the per-surface slot; cleared, identity-checked,
+    /// by the active settle in finishMURotation (before
+    /// its torn guard, so even a torn surface's
+    /// completion releases it). Weak: if a completion
+    /// somehow never fires, the record dies with the
+    /// coordinator instead of wedging every later rest
+    /// test.
+    static weak var activeTurnCoordinator: AnyObject?
 }
 
 /// FIX-144 (Option A): the presented fullscreen
@@ -999,6 +1023,21 @@ extension LivePlayerViewController {
         // that proven path and does not change).
         if mu.landscape != isLandscape {
             mu.landscape = isLandscape
+        }
+        // FIX-150: while an enter presentation is owed,
+        // every pass offers it to the service hop — never
+        // presented from inside the layout pass itself.
+        // The hop is scheduled on EVERY pass, not only on
+        // a pass that already sees the landscape rest: the
+        // interface can land after the last pass a turn
+        // produces, so a rest-gated trigger can starve
+        // (REVIEW-150 gate, Lens A-1). The service re-reads
+        // the full rest predicate and reschedules itself
+        // on a bounded retry.
+        if mu.hostingDeferred {
+            DispatchQueue.main.async { [weak self] in
+                self?.serviceMUDeferredHosting()
+            }
         }
         if !mu.transitionInFlight {
             applyMUPresentation(mu, isLandscape: isLandscape)
@@ -1815,7 +1854,15 @@ extension LivePlayerViewController {
         // (FIX-147, serviceMUAfterExit).
         // Mid-flight taps ride the parity queue like any
         // toggle (see openBoardAfterExit on MUChromeViews).
-        if MUFullscreenState.presentedController != nil, let mu = muChrome {
+        if let mu = muChrome,
+           MUFullscreenState.presentedController != nil || mu.hostingDeferred {
+            // FIX-150 (REVIEW-150 gate, Lens A-3): a board
+            // tap while an enter presentation is still owed
+            // takes this same exit-first path — during the
+            // deferred window presentedController is nil,
+            // and without this the tap would open the board
+            // immediately over the still-turning surface, an
+            // ordering the shipped code could not produce.
             mu.openBoardAfterExit = true
             // FIX-147: the board now opens at the portrait
             // rest (serviceMUAfterExit), with the same 1 s
@@ -1969,12 +2016,144 @@ extension LivePlayerViewController {
     func syncMUFullscreenHosting() {
         guard isMUChrome, let mu = muChrome else { return }
         if MUFullscreenState.isActive {
-            guard MUFullscreenState.presentedController == nil else { return }
-            beginMUFullscreenPresentation(mu)
+            guard MUFullscreenState.presentedController == nil else {
+                mu.hostingDeferred = false
+                return
+            }
+            presentMUFullscreenAtLandscapeRest(mu, why: "toggle")
         } else {
+            if mu.hostingDeferred {
+                mu.hostingDeferred = false
+                DiagLog.log("player",
+                            "mu fullscreen hosting: deferred presentation cancelled (exit)")
+            }
             guard MUFullscreenState.presentedController != nil else { return }
             beginMUFullscreenDismissal(mu)
         }
+    }
+
+    /// FIX-150: "landscape rest" for the deferred enter
+    /// presentation — the layout is on the landscape page,
+    /// no transition is in flight on this surface, the
+    /// scene's interface orientation has itself landed on
+    /// landscape, AND no turn is in flight anywhere in
+    /// the window (the shared MUFullscreenState record).
+    /// The third condition is the port's hardening of the
+    /// original predicate (layout + flag only):
+    /// DEVICE-149 showed the window's bounds reach
+    /// landscape size while the interface is still
+    /// portrait (interface=1 at the present completion),
+    /// so layout alone cannot tell mid-turn from rest.
+    /// The fourth condition (REVIEW-150 gate, Lens A-2)
+    /// covers the complementary case: a successor
+    /// surface born mid-turn (an in-place source swap
+    /// during the deferred window) carries no in-flight
+    /// flag of its own, and once the geometry update is
+    /// granted its layout AND interface readings both say
+    /// landscape while the turn's animation is still
+    /// running — only the shared record still says a
+    /// turn is in flight. With no window to consult, the
+    /// layout reading stands alone.
+    func muAtLandscapeRest(_ mu: MUChromeViews) -> Bool {
+        guard mu.landscape, !mu.transitionInFlight,
+              MUFullscreenState.activeTurnCoordinator == nil
+        else { return false }
+        guard let orientation = view.window?.windowScene?
+            .interfaceOrientation else { return true }
+        return orientation.isLandscape
+    }
+
+    /// FIX-150 — ENTER ORDER: turn first, then host.
+    ///
+    /// The shipped order presented the fullscreen
+    /// controller in the same main-thread turn as the
+    /// FIX-139 geometry request. The scene's landscape
+    /// geometry then landed while that .fullScreen
+    /// presentation was still in progress (DEVICE-149: the
+    /// first and only layout, viewDidAppear and the present
+    /// completion all at +0.41 s, the window already 956x440
+    /// with interface=1). No coordinated rotation ran — no
+    /// viewWillTransition anywhere — so the canvas cut, and
+    /// the interface orientation caught up afterwards with
+    /// no size change: the ~84° swing.
+    ///
+    /// Now an enter decided while the page is still
+    /// portrait (or while a turn is in flight) presents
+    /// nothing yet. The geometry request is judged against
+    /// the cover's host — the topmost controller, exactly as
+    /// on every exit — so the window runs its ordinary
+    /// coordinated turn, delivered to this surface directly,
+    /// and the shipped rigid flight carries the picture
+    /// (FIX-147). At the landscape REST the presentation is
+    /// made (serviceMUDeferredHosting): the window is
+    /// already landscapeRight, the app mask .landscape, so
+    /// presenting changes no orientation — the view moves
+    /// into a container of the same size at the same place.
+    /// At a landscape rest it presents immediately, as
+    /// before.
+    func presentMUFullscreenAtLandscapeRest(_ mu: MUChromeViews, why: String) {
+        if !muAtLandscapeRest(mu) {
+            if !mu.hostingDeferred {
+                DiagLog.log("player",
+                            "mu fullscreen hosting: deferred to the landscape rest (\(why)) "
+                            + "layoutLandscape=\(mu.landscape) inFlight=\(mu.transitionInFlight)")
+            }
+            mu.hostingDeferred = true
+            return
+        }
+        mu.hostingDeferred = false
+        beginMUFullscreenPresentation(mu)
+    }
+
+    /// FIX-150: make the owed presentation once this
+    /// surface is at a landscape rest. Scheduled (one hop
+    /// on the main queue, never from inside a layout pass)
+    /// by layoutMUChrome on every pass while the
+    /// presentation is owed — the enter's settle pass is
+    /// one. Idempotent: every guard is re-read here, so
+    /// several scheduled hops present at most once, and
+    /// an exit / teardown / close serviced in the
+    /// meantime leaves nothing to do.
+    func serviceMUDeferredHosting() {
+        serviceMUDeferredHosting(attempt: 0)
+    }
+
+    /// FIX-150 (REVIEW-150 gate fix, Lens A-1): the
+    /// not-at-rest case re-examines itself on a bounded
+    /// retry instead of depending on a further layout
+    /// pass: the interface orientation can land after
+    /// the last pass a turn produces (DEVICE-149's
+    /// bounds/interface split), and a successor surface
+    /// has no settle pass of its own at all. The retry
+    /// is bounded (40 × 50 ms ≈ 2 s — several whole
+    /// turns) and every hop re-reads the same guards, so
+    /// a cancellation, a teardown or the presentation
+    /// itself stops every chain; the rejected-turn case
+    /// (never at rest) simply lets the chain expire,
+    /// leaving the flag set exactly as before.
+    private func serviceMUDeferredHosting(attempt: Int) {
+        guard isMUChrome, let mu = muChrome, mu.hostingDeferred, !isTorn else { return }
+        guard MUFullscreenState.isActive else {
+            mu.hostingDeferred = false
+            return
+        }
+        guard MUFullscreenState.presentedController == nil else {
+            mu.hostingDeferred = false
+            return
+        }
+        guard muAtLandscapeRest(mu) else {
+            if attempt < 40 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.serviceMUDeferredHosting(attempt: attempt + 1)
+                }
+            }
+            return
+        }
+        DiagLog.log("player",
+                    "mu fullscreen hosting: landscape rest reached — presenting "
+                    + "interface=\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
+        mu.hostingDeferred = false
+        beginMUFullscreenPresentation(mu)
     }
 
     /// The presenter for the fullscreen controller: this
@@ -2249,7 +2428,10 @@ extension LivePlayerViewController {
             DiagLog.log("player",
                         "mu fullscreen hosting: successor found no "
                         + "presentation up — re-presenting")
-            beginMUFullscreenPresentation(mu)
+            // FIX-150: through the same enter-order rule —
+            // a successor born mid-turn (or still portrait)
+            // presents at its landscape rest, not mid-turn.
+            presentMUFullscreenAtLandscapeRest(mu, why: "successor")
             return
         }
         guard let host = view.superview, host !== fsVC.view else { return }

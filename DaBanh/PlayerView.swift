@@ -1034,6 +1034,15 @@ final class LivePlayerViewController: UIViewController {
             return
         }
         mu.activeTransitionCoordinator = key
+        // FIX-150 (REVIEW-150 gate fix, Lens A-2): the
+        // window-level in-flight record — a successor
+        // surface that never received this turn consults
+        // it in its landscape-rest test. Written here,
+        // beside the per-surface slot, so both dedupe
+        // early-returns above leave it untouched, and a
+        // superseding delivery overwrites it with the
+        // newer coordinator, exactly like the slot.
+        MUFullscreenState.activeTurnCoordinator = key
         if forwarded {
             DiagLog.log("player",
                         "mu transition: forwarded from the fullscreen controller "
@@ -1121,6 +1130,15 @@ final class LivePlayerViewController: UIViewController {
         }
         mu.activeTransitionCoordinator = nil
         mu.lastSettledCoordinator = coordinator as AnyObject
+        // FIX-150 (REVIEW-150 gate fix, Lens A-2): clear
+        // the window-level record with the slot — only
+        // the ACTIVE settle reaches this line (the
+        // identity guard above), and it runs before the
+        // torn guard below, so even a torn surface's
+        // completion releases the record.
+        if MUFullscreenState.activeTurnCoordinator === coordinator as AnyObject {
+            MUFullscreenState.activeTurnCoordinator = nil
+        }
         // FIX-147: the turn is over — return the window to
         // real time and retire the picture's flight state
         // (its transform is already identity in the model;
