@@ -2020,7 +2020,7 @@ extension LivePlayerViewController {
                 DiagLog.log("player",
                             "mu fullscreen hosting: present completed "
                             + "(teardown deferred) "
-                            + "window=\(muFmtRect(fsVC.view.window?.frame ?? .zero)) "
+                            + "window=\(self.muFmtRect(fsVC.view.window?.frame ?? .zero)) "
                             + "interface=\(fsVC.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
                 self.releaseMUFullscreenHostingForTeardown()
                 return
@@ -2041,7 +2041,7 @@ extension LivePlayerViewController {
                 DiagLog.log("player",
                             "mu fullscreen hosting: present completed "
                             + "(superseded surface) "
-                            + "window=\(muFmtRect(fsVC.view.window?.frame ?? .zero)) "
+                            + "window=\(self.muFmtRect(fsVC.view.window?.frame ?? .zero)) "
                             + "interface=\(fsVC.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
                 return
             }
@@ -2054,7 +2054,7 @@ extension LivePlayerViewController {
             // missing anchor (DIAG-147 §4.1).
             DiagLog.log("player",
                         "mu fullscreen hosting: present completed "
-                        + "window=\(muFmtRect(self.view.window?.frame ?? .zero)) "
+                        + "window=\(self.muFmtRect(self.view.window?.frame ?? .zero)) "
                         + "interface=\(self.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
         }
         // FIX-144 gate Round 1 (B-2): present() can be
