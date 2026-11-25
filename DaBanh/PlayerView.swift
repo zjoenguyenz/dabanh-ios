@@ -987,7 +987,59 @@ final class LivePlayerViewController: UIViewController {
     override func viewWillTransition(to size: CGSize,
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
+        muWillTransition(to: size, with: coordinator, forwarded: false)
+    }
+
+    /// FIX-149: the window's transition, forwarded by the
+    /// fullscreen controller while this surface's view is
+    /// hosted inside it (MUFullscreenViewController). While
+    /// hosted, UIKit never delivers viewWillTransition here:
+    /// this controller's parent chain is the cover's SwiftUI
+    /// host, which the .fullScreen presentation has taken
+    /// out of the window, and the transition is delivered to
+    /// the presented controller instead. The forwarded call
+    /// runs the SAME MU transition path as a direct one.
+    func muHostedWillTransition(to size: CGSize,
+                                with coordinator: UIViewControllerTransitionCoordinator) {
+        muWillTransition(to: size, with: coordinator, forwarded: true)
+    }
+
+    /// The MU transition path (FIX-142/143/147), shared by
+    /// the direct delivery and the FIX-149 forward. One
+    /// transition is handled ONCE: a second delivery of the
+    /// same coordinator (direct + forwarded, e.g. an exit
+    /// whose turn starts with the view still hosted) is
+    /// ignored and logged.
+    private func muWillTransition(to size: CGSize,
+                                  with coordinator: UIViewControllerTransitionCoordinator,
+                                  forwarded: Bool) {
         guard isMUChrome, let mu = muChrome else { return }
+        let key = coordinator as AnyObject
+        if let active = mu.activeTransitionCoordinator, active === key {
+            DiagLog.log("player",
+                        "mu transition: second delivery of the same transition "
+                        + "(\(forwarded ? "forwarded" : "direct")) — ignored")
+            return
+        }
+        // FIX-149 (REVIEW-149 gate, R2A-2): a re-delivery
+        // of the transition that settled LAST — the twin
+        // delivery of an immediately-settled (!started)
+        // transition arrives after its settle cleared the
+        // active slot, and must not run the path (or the
+        // settle, or the after-exit service) a second time.
+        if let settled = mu.lastSettledCoordinator, settled === key {
+            DiagLog.log("player",
+                        "mu transition: re-delivery of an already-settled transition "
+                        + "(\(forwarded ? "forwarded" : "direct")) — ignored")
+            return
+        }
+        mu.activeTransitionCoordinator = key
+        if forwarded {
+            DiagLog.log("player",
+                        "mu transition: forwarded from the fullscreen controller "
+                        + "size=\(Int(size.width.rounded()))x\(Int(size.height.rounded())) "
+                        + "from=\(Int(view.bounds.width.rounded()))x\(Int(view.bounds.height.rounded()))")
+        }
         mu.transitionInFlight = true
         mu.inFlightPassCount = 0
         // FIX-147: arm the picture's rigid flight (see
@@ -1012,14 +1064,14 @@ final class LivePlayerViewController: UIViewController {
             // only while the transition is in flight.
             self?.view.layoutIfNeeded()
         }, completion: { [weak self] _ in
-            self?.finishMURotation()
+            self?.finishMURotation(for: coordinator)
         })
         if !started {
             // No coordinator animation could be scheduled:
             // settle immediately, so the chrome never sits
             // in the in-flight state with no completion to
             // clear it.
-            finishMURotation()
+            finishMURotation(for: coordinator)
         }
     }
 
@@ -1044,8 +1096,31 @@ final class LivePlayerViewController: UIViewController {
     /// line below proves from the log that the picture's
     /// own frame does not move in it (delta zero is the
     /// pass criterion — DIAG-143 §3.3).
-    private func finishMURotation() {
+    ///
+    /// FIX-149 (REVIEW-149 gate Round 1, Lens A-1/A-4):
+    /// the settle is IDENTITY-AWARE. A delivery whose
+    /// coordinator differs from the one in flight
+    /// SUPERSEDES it (the slot is overwritten and the
+    /// flight re-armed in muWillTransition) — two system
+    /// transitions can overlap on one surface (the enter
+    /// swing of DIAG-147 may itself be a second geometry
+    /// update inside the first turn). Only the ACTIVE
+    /// coordinator's completion settles: a superseded
+    /// completion is logged and dropped BEFORE it can
+    /// end the successor's turn clock, retire its
+    /// flight, stamp its arm time, consume its queued
+    /// toggle or run its after-exit service. The active
+    /// settle also CLEARS the slot, so the dedupe record
+    /// never outlives the transition it names.
+    private func finishMURotation(for coordinator: UIViewControllerTransitionCoordinator) {
         guard let mu = muChrome else { return }
+        guard mu.activeTransitionCoordinator === coordinator as AnyObject else {
+            DiagLog.log("player",
+                        "rotation settle: superseded transition — ignored")
+            return
+        }
+        mu.activeTransitionCoordinator = nil
+        mu.lastSettledCoordinator = coordinator as AnyObject
         // FIX-147: the turn is over — return the window to
         // real time and retire the picture's flight state
         // (its transform is already identity in the model;

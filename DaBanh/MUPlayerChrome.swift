@@ -239,6 +239,18 @@ final class MUChromeViews {
     /// that settled last (recorded at the settle, before
     /// any toggle the settle services can arm another).
     var lastSettledArmedAt: CFTimeInterval = 0
+    /// FIX-149: the transition coordinator whose
+    /// transition is being handled — a second delivery of
+    /// the same one (direct + forwarded) is ignored.
+    weak var activeTransitionCoordinator: AnyObject?
+    /// FIX-149 (REVIEW-149 gate, R2A-2): the coordinator
+    /// whose transition settled LAST on this surface. A
+    /// settle clears the active slot (so the record never
+    /// outlives its transition), but an immediately-
+    /// settling transition (the !started fallback) can
+    /// receive its second delivery AFTER that settle —
+    /// this record keeps such a re-delivery deduped.
+    weak var lastSettledCoordinator: AnyObject?
     /// FIX-147: the after-exit fallback's generation — a
     /// one-shot guard per request (no timer, no repeat),
     /// so a stale fallback from an earlier request never
@@ -365,16 +377,33 @@ final class MUFullscreenViewController: UIViewController {
         .landscapeRight
     }
 
-    /// FIX-148 (log-only): this controller's own
-    /// transition delivery and appearance size. DIAG-147
-    /// found the hosted PLAYER VC never receives
-    /// viewWillTransition on an enter; whether the fsVC
-    /// receives it — and at what size / interface
-    /// orientation the presentation completes — is the
-    /// enter mechanism's missing evidence. Note the line
-    /// pairs the TARGET size with the PRE-transition
-    /// interface orientation (the scene has not turned
-    /// yet at callback time): read it as a from→to record.
+    /// FIX-148 (log) + FIX-149 (forward): this
+    /// controller's own transition delivery and
+    /// appearance size. DIAG-147 found the hosted
+    /// PLAYER VC never receives viewWillTransition on
+    /// an enter; whether the fsVC receives it — and at
+    /// what size / interface orientation the
+    /// presentation completes — is the enter mechanism's
+    /// missing evidence. Note the line pairs the TARGET
+    /// size with the PRE-transition interface
+    /// orientation (the scene has not turned yet at
+    /// callback time): read it as a from→to record.
+    ///
+    /// FIX-149: the delivery is also FORWARDED to the
+    /// hosted player surface. While its view is hosted
+    /// here, the surface's own controller is outside
+    /// the window's controller hierarchy (its parent,
+    /// the cover's SwiftUI host, was removed from the
+    /// window by this .fullScreen presentation), so
+    /// UIKit delivers the turn to THIS controller
+    /// only — and the enter turn ran with no rigid
+    /// flight, no in-flight state and no settle
+    /// (DIAG-147: zero flight lines on 5/5 enters).
+    /// This adds no animation and no animator: the
+    /// surface schedules its own alongside work on the
+    /// SAME system coordinator, exactly as on a direct
+    /// delivery. Forwarded only while the hosted view
+    /// is actually inside this controller's view.
     override func viewWillTransition(to size: CGSize,
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
@@ -384,6 +413,15 @@ final class MUFullscreenViewController: UIViewController {
                     + "(target size) interfaceNow="
                     + "\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1) "
                     + "(pre-transition)")
+        // FIX-149 (REVIEW-149 gate Round 1, Lens A-3):
+        // never forward to a TORN surface — in the
+        // deferred-release window the record still names
+        // it, but its settle is neutered by design, so a
+        // forward there would only arm a dead player.
+        guard let hosted = MUFullscreenState.hostedController,
+              hosted.isViewLoaded, !hosted.isTorn,
+              hosted.view.superview === view else { return }
+        hosted.muHostedWillTransition(to: size, with: coordinator)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -2193,6 +2231,11 @@ extension LivePlayerViewController {
         guard isMUChrome, let mu = muChrome else { return }
         guard MUFullscreenState.isActive,
               MUFullscreenState.hostedController !== self else { return }
+        // FIX-149 (REVIEW-149 gate Round 1, Lens A-2):
+        // the outgoing hosted surface, captured before
+        // the re-point below — the in-flight transition
+        // transfer at the end of this function reads it.
+        let predecessor = MUFullscreenState.hostedController
         // FIX-144 gate Round 1 (B-4): teardown-before-
         // adopt ordering — the previous surface's
         // teardown release already retired the
@@ -2236,6 +2279,83 @@ extension LivePlayerViewController {
                     + "#\(sourceIndex) (in-place swap under the presentation) "
                     + "frame=\(muFmtRect(view.frame)) "
                     + "interface=\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
+        // FIX-149 (REVIEW-149 gate Round 1, Lens A-2;
+        // completed by the restarted round's R2A-1/R2A-3):
+        // if the predecessor was MID-TURN when the swap
+        // landed, MOVE its in-flight transition to this
+        // surface — the turn AND its cargo:
+        //   * the flag + the dedupe slot (this surface's
+        //     toggles queue and its presentation defers
+        //     for the remainder, like any in-flight
+        //     surface);
+        //   * the turn's arm instant (the settle stamps
+        //     it as lastSettledArmedAt — the after-exit
+        //     retry predicate reads it against the
+        //     inherited issued-at);
+        //   * the queued parity toggle and any waiting
+        //     close / board request with its bookkeeping
+        //     (issued / issued-at / retried / awaiting-
+        //     hosting) — work queued on the predecessor
+        //     must not die with its bag.
+        // The predecessor's copies are CLEARED as they
+        // are taken (a move, not a copy): its own
+        // completion, if it still fires, fails the
+        // identity guard and services nothing, and its
+        // armed fallback finds no request bit. A waiting
+        // request re-arms the 1 s fallback on THIS
+        // surface (the predecessor's fallback is guarded
+        // by its torn state and its now-cleared bits).
+        // This surface registers its OWN settle on the
+        // same coordinator — the predecessor's completion
+        // is [weak self] and may land on a torn bag or
+        // never land at all. The rigid FLIGHT is not
+        // inherited: this view was born at the adoption
+        // cut above, so placeMUVideo places it plainly
+        // for the remainder (its flight branch needs a
+        // start frame armed by a delivery on THIS
+        // surface). If the predecessor's turn already
+        // ended, its flag is down and nothing transfers —
+        // the surface is simply at rest.
+        if let prevMu = predecessor?.muChrome,
+           prevMu.transitionInFlight,
+           let coordinator = prevMu.activeTransitionCoordinator
+                as? UIViewControllerTransitionCoordinator {
+            mu.transitionInFlight = true
+            mu.activeTransitionCoordinator = coordinator as AnyObject
+            mu.flightArmedAt = prevMu.flightArmedAt
+            mu.pendingToggle = prevMu.pendingToggle
+            mu.afterExitClose = prevMu.afterExitClose
+            mu.openBoardAfterExit = prevMu.openBoardAfterExit
+            mu.afterExitAwaitingHosting = prevMu.afterExitAwaitingHosting
+            mu.afterExitExitIssued = prevMu.afterExitExitIssued
+            mu.afterExitIssuedAt = prevMu.afterExitIssuedAt
+            mu.afterExitRetried = prevMu.afterExitRetried
+            let inheritedRequest = mu.afterExitClose || mu.openBoardAfterExit
+            prevMu.transitionInFlight = false
+            prevMu.activeTransitionCoordinator = nil
+            prevMu.pendingToggle = false
+            prevMu.afterExitClose = false
+            prevMu.openBoardAfterExit = false
+            resetMUAfterExitBookkeeping(prevMu)
+            DiagLog.log("player",
+                        "mu fullscreen hosting: in-flight transition "
+                        + "inherited by source #\(sourceIndex) "
+                        + "(settle re-registered on the same coordinator; "
+                        + "toggle=\(mu.pendingToggle) "
+                        + "close=\(mu.afterExitClose) "
+                        + "board=\(mu.openBoardAfterExit))")
+            if inheritedRequest {
+                armMUAfterExitFallback()
+            }
+            let started = coordinator.animate(alongsideTransition: { [weak self] _ in
+                self?.view.layoutIfNeeded()
+            }, completion: { [weak self] _ in
+                self?.finishMURotation(for: coordinator)
+            })
+            if !started {
+                finishMURotation(for: coordinator)
+            }
+        }
     }
 
     /// FIX-144: teardown of the HOSTED surface with no
