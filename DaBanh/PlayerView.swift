@@ -3103,7 +3103,7 @@ enum VerdictDisk {
     static func prewarmSlice(now: Date = Date()) -> [String: StoredWarm] {
         load().prewarm.filter {
             (0...prewarmHorizon).contains(
-                now.timeIntervalSince(Date(timeIntervalSince1970: $0.stamp)))
+                now.timeIntervalSince(Date(timeIntervalSince1970: $0.value.stamp)))
         }
     }
 
