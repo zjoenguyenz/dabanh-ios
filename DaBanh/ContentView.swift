@@ -265,7 +265,15 @@ struct ContentView: View {
             // close of board or player — the one place the
             // orientation lock widens back to .all. A route
             // flip never reaches here (the cover stays up).
-            OrientationHelper.lock(.all, rotateTo: .portrait)
+            if themeStore.isMU {
+                // FIX-147 (R2): MU — the portrait request
+                // waits until no presentation transition is
+                // in flight (OrientationHelper.lockWhenSettled).
+                OrientationHelper.lockWhenSettled(.all, rotateTo: .portrait,
+                                                  reason: "cover dismissed")
+            } else {
+                OrientationHelper.lock(.all, rotateTo: .portrait)
+            }
         }) {
             routeContent
         }
@@ -309,7 +317,17 @@ struct ContentView: View {
                 // board until the whole cover was dismissed.
                 // The cover's onDismiss repeats the same call
                 // on a genuine close; both are the one widen.
-                OrientationHelper.lock(.all, rotateTo: .portrait)
+                if themeStore.isMU {
+                    // FIX-147 (R2): MU — this branch runs
+                    // inside the route/surface teardown, with
+                    // the fullscreen hosting possibly still
+                    // being dismissed; the portrait request
+                    // waits that out (lockWhenSettled).
+                    OrientationHelper.lockWhenSettled(.all, rotateTo: .portrait,
+                                                      reason: "player route ended")
+                } else {
+                    OrientationHelper.lock(.all, rotateTo: .portrait)
+                }
             }
         }
         .sheet(isPresented: $showDiagLog) {

@@ -916,10 +916,22 @@ final class LivePlayerViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        videoView.frame = view.bounds
-        controlsView.frame = view.bounds
-        if isMUChrome {
+        if isMUChrome, muChrome != nil {
+            // FIX-147: under MU the picture has ONE writer —
+            // layoutMUChrome's page functions, through
+            // placeMUVideo (MUPlayerChrome.swift). The old
+            // full-bounds write here was immediately
+            // overwritten by the page frame on every pass;
+            // inside a rotation it added a second animated
+            // frame write to the picture, which the rigid
+            // flight below cannot own. Both MU pages set the
+            // picture's frame on every pass, so the settled
+            // pages are unchanged.
+            controlsView.frame = view.bounds
             layoutMUChrome()
+        } else {
+            videoView.frame = view.bounds
+            controlsView.frame = view.bounds
         }
     }
 
@@ -978,6 +990,20 @@ final class LivePlayerViewController: UIViewController {
         guard isMUChrome, let mu = muChrome else { return }
         mu.transitionInFlight = true
         mu.inFlightPassCount = 0
+        // FIX-147: arm the picture's rigid flight (see
+        // placeMUVideo in MUPlayerChrome.swift) with the
+        // picture's settled frame BEFORE the turn, and — for
+        // an interface turn (the aspect flips) — start the
+        // turn clock, which runs this window's animations
+        // faster for the duration of the turn only.
+        let isTurn = (size.width > size.height)
+            != (view.bounds.width > view.bounds.height)
+        armMURigidFlight(duration: coordinator.transitionDuration,
+                         curve: coordinator.completionCurve,
+                         isTurn: isTurn)
+        if isTurn {
+            beginMUTurnClock()
+        }
         let started = coordinator.animate(alongsideTransition: { [weak self] _ in
             // FIX-143: lay out inside the system's
             // animation (see the doc above). The layout
@@ -1020,6 +1046,15 @@ final class LivePlayerViewController: UIViewController {
     /// pass criterion — DIAG-143 §3.3).
     private func finishMURotation() {
         guard let mu = muChrome else { return }
+        // FIX-147: the turn is over — return the window to
+        // real time and retire the picture's flight state
+        // (its transform is already identity in the model;
+        // this is the guarantee). Both run before the torn
+        // guard below: a window must never be left on the
+        // turn clock, even for a dead player.
+        endMUTurnClock()
+        mu.lastSettledArmedAt = mu.flightArmedAt
+        retireMURigidFlight()
         mu.transitionInFlight = false
         // Gate fix (REVIEW-142 B-2): a completion landing
         // after the player was torn down (closed
@@ -1031,6 +1066,9 @@ final class LivePlayerViewController: UIViewController {
         // nothing: there is no landing to confirm.
         if torn {
             mu.pendingToggle = false
+            mu.afterExitClose = false
+            mu.openBoardAfterExit = false
+            mu.afterExitAwaitingHosting = false
             return
         }
         let frameBefore = videoView.frame
@@ -1045,10 +1083,15 @@ final class LivePlayerViewController: UIViewController {
                     "rotation settled: interface=\(live?.rawValue ?? -1) "
                     + "size=\(Int(view.bounds.width.rounded()))x\(Int(view.bounds.height.rounded())) "
                     + "state=\(playbackStateName)")
+        let servicedToggle = mu.pendingToggle
         if mu.pendingToggle {
             mu.pendingToggle = false
             muToggleFullscreen()
         }
+        // FIX-147: a close or board request that waited for
+        // the turn back to portrait is serviced here, at the
+        // portrait rest (see serviceMUAfterExit).
+        serviceMUAfterExit(servicedToggleThisSettle: servicedToggle)
     }
 
     // MARK: - Controls
@@ -1551,7 +1594,17 @@ final class LivePlayerViewController: UIViewController {
 
     // MARK: - Actions
 
-    @objc func closeTapped() { onClose?() }
+    @objc func closeTapped() {
+        // FIX-147: under MU a close from the landscape page
+        // (fullscreen or a free-rotation landscape) first
+        // turns the player back to portrait and closes at
+        // the portrait rest, so the cover is never dismissed
+        // in landscape — no portrait request can then be
+        // judged mid-teardown (MUPlayerChrome.swift,
+        // requestMUCloseAfterExit). Classic: unchanged.
+        if isMUChrome, requestMUCloseAfterExit() { return }
+        onClose?()
+    }
 
     @objc private func sourceSwitchTapped() {
         onSourceSwitch?()
@@ -1715,6 +1768,9 @@ final class LivePlayerViewController: UIViewController {
         // adopts it instead — the release is
         // identity-checked, see MUPlayerChrome.swift).
         if isMUChrome {
+            // FIX-147: a teardown inside a turn must not
+            // leave the window on the turn clock.
+            endMUTurnClock(reason: "teardown")
             releaseMUFullscreenHostingForTeardown()
         }
         hideTimer?.invalidate()

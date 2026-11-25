@@ -204,10 +204,69 @@ final class MUChromeViews {
     /// fullscreen presentation was up — the SwiftUI
     /// board sheet stacks on the cover, UNDER the
     /// presentation, so the tap exits fullscreen first
-    /// and the dismissal's completion opens the board
-    /// once the player view is home. A fresh enter
-    /// (a parity-serviced toggle) cancels the request.
+    /// and the board opens once the player view is home
+    /// AND the turn back has settled in portrait
+    /// (FIX-147: serviceMUAfterExit — it used to open in
+    /// the dismissal's completion, before the turn). A
+    /// fresh enter (a parity-serviced toggle) cancels the
+    /// request.
     var openBoardAfterExit = false
+    /// FIX-147: the close button was tapped on the
+    /// landscape page — the player first turns back to
+    /// portrait (the FIX-139 exit, unchanged) and closes at
+    /// the portrait rest (serviceMUAfterExit), so the cover
+    /// is never dismissed in landscape.
+    var afterExitClose = false
+    /// FIX-147 (R2, Finding 2): the after-exit exit has
+    /// been ISSUED (a toggle that turns to portrait has
+    /// run since the request), and when. A settle can only
+    /// count as a failed landing of that exit if its
+    /// transition began after this instant.
+    var afterExitExitIssued = false
+    var afterExitIssuedAt: CFTimeInterval = 0
+    /// FIX-147 (R2): the ONE retry, spent only by a settle
+    /// that landed on the landscape page although its
+    /// transition began after the exit was issued — a
+    /// landing that genuinely failed to reach portrait.
+    /// Nothing else (the dismissal completion included)
+    /// may spend it.
+    var afterExitRetried = false
+    /// FIX-147 (R2): a portrait settle found the hosting
+    /// still presented; the dismissal's completion runs
+    /// the waiting action — and only in that case.
+    var afterExitAwaitingHosting = false
+    /// FIX-147 (R2): the arm instant of the transition
+    /// that settled last (recorded at the settle, before
+    /// any toggle the settle services can arm another).
+    var lastSettledArmedAt: CFTimeInterval = 0
+    /// FIX-147: the after-exit fallback's generation — a
+    /// one-shot guard per request (no timer, no repeat),
+    /// so a stale fallback from an earlier request never
+    /// acts on a newer one.
+    var afterExitGeneration = 0
+    /// FIX-144/147: the player view filled its host slot
+    /// at enter (frame == host bounds). The exit restore
+    /// then re-fills the slot from the host's CURRENT
+    /// bounds instead of replaying the enter-time frame,
+    /// which is the portrait size while the window is
+    /// still landscape.
+    var hostOriginalFilledHost = false
+    /// FIX-147 — the picture's rigid flight across a
+    /// rotation. `flightStartFrame` is the picture's
+    /// settled frame captured in viewWillTransition (nil =
+    /// no flight armed); `flightApplied` is set by the one
+    /// placeMUVideo call that turns it into a transform
+    /// flight (or consumes it without one), so later
+    /// in-flight passes never re-apply it.
+    var flightStartFrame: CGRect?
+    var flightApplied = false
+    /// The coordinator's duration / curve and the arm
+    /// instant, for the explicit-animation branch of
+    /// placeMUVideo (an in-flight pass outside any UIKit
+    /// animation block).
+    var flightDuration: TimeInterval = 0
+    var flightCurve: UIView.AnimationCurve = .easeInOut
+    var flightArmedAt: CFTimeInterval = 0
     let scrimTop = UIView()
     let scrimBottom = UIView()
     var chipButtons: [UIButton] = []
@@ -968,6 +1027,400 @@ extension LivePlayerViewController {
             + "\(Int(insets.bottom.rounded())),\(Int(insets.right.rounded()))"
     }
 
+    // MARK: - Rigid picture flight + turn clock (FIX-147)
+
+    /// FIX-147 — the turn clock's rate. For the duration of
+    /// an interface turn the window layer's animations run
+    /// this many times faster (CAMediaTiming `speed` on the
+    /// window layer, applied before the turn's animations
+    /// are created and restored exactly in the turn's
+    /// completion). The system turn measured ~0.37 s;
+    /// ×1.4 brings it to ~0.26 s (≈8 frames at 30 fps),
+    /// inside the ≤0.30 s acceptance bound and close to the
+    /// YouTube reference. Picture, chrome and the window's
+    /// own rotation share the one clock, so they stay one
+    /// motion. 1 disables the clock entirely (the turn is
+    /// then the system's own, at its own duration).
+    static let muTurnSpeed: Float = 1.4
+
+    /// FIX-147: arm the picture's rigid flight for the
+    /// transition that is about to run — called from
+    /// viewWillTransition, before any in-flight layout pass,
+    /// with the picture at its settled frame.
+    func armMURigidFlight(duration: TimeInterval,
+                          curve: UIView.AnimationCurve,
+                          isTurn: Bool) {
+        guard let mu = muChrome else { return }
+        // A flight left over from a transition whose
+        // completion never came is retired first.
+        retireMURigidFlight()
+        mu.flightStartFrame = videoView.frame
+        mu.flightApplied = false
+        mu.flightDuration = duration
+        mu.flightCurve = curve
+        mu.flightArmedAt = CACurrentMediaTime()
+        DiagLog.log("player",
+                    "mu rigid flight: armed start=\(muFmtRect(videoView.frame)) "
+                    + "duration=\(String(format: "%.3f", duration))s "
+                    + "curve=\(curve.rawValue) turn=\(isTurn)")
+    }
+
+    /// FIX-147: clear the flight state at the settle. The
+    /// flight leaves the model at identity transform and
+    /// the final frame, so this is normally bookkeeping
+    /// only; a live transform here (a transition that
+    /// ended without its animation running out) is reset
+    /// to identity around the same centre and bounds, so
+    /// the settled page is exactly the plain layout's.
+    func retireMURigidFlight() {
+        guard let mu = muChrome else { return }
+        mu.flightStartFrame = nil
+        mu.flightApplied = false
+        if videoView.transform != .identity {
+            let center = videoView.center
+            let size = videoView.bounds.size
+            videoView.layer.removeAllAnimations()
+            videoView.transform = .identity
+            videoView.bounds = CGRect(origin: .zero, size: size)
+            videoView.center = center
+            DiagLog.log("player",
+                        "mu rigid flight: retired with a live transform — reset to identity")
+        }
+    }
+
+    /// FIX-147 — the ONE writer of the picture's frame
+    /// under MU (both page functions call it).
+    ///
+    /// At rest — and for any pass with no flight armed —
+    /// it is exactly `videoView.frame = target`.
+    ///
+    /// On the first pass of an armed flight it does NOT
+    /// animate the frame. The picture is the BACKING
+    /// AVPlayerLayer of videoView, and AVPlayerLayer lays its
+    /// picture out against the layer's MODEL bounds: an
+    /// animated bounds change moves the layer's box
+    /// smoothly but its picture lands on the final mapping
+    /// at the first commit (the convicted one-frame step).
+    /// So the box is set to its FINAL size immediately and
+    /// without animation (the picture is mapped once, for
+    /// the size it will keep), and the motion is carried by
+    /// a uniform scale transform on that same plain subview
+    /// instead — transforms are composited, the picture
+    /// never re-maps mid-flight:
+    ///   - start: centre = the settled picture's centre,
+    ///     scale k = start picture width / final picture
+    ///     width (the picture rects of the two boxes under
+    ///     the current gravity — both have the video's own
+    ///     aspect, so one uniform k maps one exactly onto
+    ///     the other: no visible change at t = 0);
+    ///   - end: centre = the final centre, scale 1, i.e. the
+    ///     plain final frame.
+    /// The end values are written inside the transition's
+    /// own animation (the alongside block's inherited
+    /// animation), so scale and position glide on the same
+    /// curve and clock as the window's rotation and the
+    /// chrome — one object, one motion. If the pass runs
+    /// outside any animation block, the same end values are
+    /// animated explicitly over the turn's remaining time on
+    /// the coordinator's curve.
+    ///
+    /// The flying object is videoView — a plain subview this
+    /// controller created and owns — never a view
+    /// controller's root view, and no transition animator
+    /// is involved.
+    func placeMUVideo(_ mu: MUChromeViews, _ target: CGRect) {
+        guard mu.transitionInFlight, let start = mu.flightStartFrame else {
+            videoView.frame = target
+            return
+        }
+        if mu.flightApplied {
+            // Flown already this turn: the model is the
+            // final frame, so an in-flight pass computing
+            // the same target is a no-op (the flight keeps
+            // running). A pass computing a DIFFERENT target
+            // is unexpected (the settle-delta has always
+            // been zero) — place it plainly and say so.
+            if videoView.transform == .identity, videoView.frame == target { return }
+            DiagLog.log("player",
+                        "mu rigid flight: in-flight target moved "
+                        + "\(muFmtRect(videoView.frame)) -> \(muFmtRect(target)) — placed plainly")
+            videoView.transform = .identity
+            videoView.frame = target
+            return
+        }
+        mu.flightApplied = true
+        guard start != target,
+              start.width > 0, start.height > 0,
+              target.width > 0, target.height > 0 else {
+            videoView.frame = target
+            return
+        }
+        let k = muRigidScale(from: start.size, to: target.size)
+        let startCenter = CGPoint(x: start.midX, y: start.midY)
+        let endCenter = CGPoint(x: target.midX, y: target.midY)
+        let inherited = UIView.inheritedAnimationDuration
+        UIView.performWithoutAnimation {
+            // The system's own frame animations on the
+            // picture (the autoresizing write the turn's
+            // root-bounds change makes before this pass)
+            // are replaced by the flight below.
+            videoView.layer.removeAllAnimations()
+            videoView.transform = .identity
+            videoView.bounds = CGRect(origin: .zero, size: target.size)
+            videoView.center = startCenter
+            videoView.transform = CGAffineTransform(scaleX: k, y: k)
+        }
+        if inherited > 0 {
+            videoView.center = endCenter
+            videoView.transform = .identity
+        } else {
+            let speed = Double(MUTurnClock.isRunning ? Self.muTurnSpeed : 1)
+            let elapsedLocal = (CACurrentMediaTime() - mu.flightArmedAt) * speed
+            let remaining = max(0.05, mu.flightDuration - elapsedLocal)
+            let curve = UIView.AnimationOptions(rawValue: UInt(mu.flightCurve.rawValue) << 16)
+            UIView.animate(withDuration: remaining, delay: 0,
+                           options: [curve, .allowUserInteraction]) {
+                self.videoView.center = endCenter
+                self.videoView.transform = .identity
+            }
+        }
+        DiagLog.log("player",
+                    "mu rigid flight: applied start=\(muFmtRect(start)) "
+                    + "end=\(muFmtRect(target)) "
+                    + "scale=\(String(format: "%.4f", k)) "
+                    + "anim=\(inherited > 0 ? "inherited \(String(format: "%.3f", inherited))s" : "explicit")")
+    }
+
+    /// FIX-147: the uniform scale that maps the FINAL box's
+    /// picture onto the START box's picture, for the
+    /// layer's current gravity: aspect-fit (the default)
+    /// and aspect-fill both map the video's own aspect into
+    /// the box, centred, so the two picture rects differ by
+    /// one uniform factor. Before the item reports its
+    /// presentation size there is no picture to map; the
+    /// box's own fit ratio is used (nothing visible moves).
+    private func muRigidScale(from start: CGSize, to end: CGSize) -> CGFloat {
+        let natural = player?.currentItem?.presentationSize ?? .zero
+        guard natural.width > 0, natural.height > 0 else {
+            return min(start.width / end.width, start.height / end.height)
+        }
+        let fill = videoView.playerLayer.videoGravity == .resizeAspectFill
+        func pictureWidth(_ box: CGSize) -> CGFloat {
+            let sx = box.width / natural.width
+            let sy = box.height / natural.height
+            return natural.width * (fill ? max(sx, sy) : min(sx, sy))
+        }
+        let endWidth = pictureWidth(end)
+        guard endWidth > 0 else { return 1 }
+        return pictureWidth(start) / endWidth
+    }
+
+    /// FIX-147: start the turn clock for this turn (see
+    /// muTurnSpeed and MUTurnClock).
+    func beginMUTurnClock() {
+        guard muChrome != nil, Self.muTurnSpeed > 1,
+              let layer = view.window?.layer else { return }
+        MUTurnClock.begin(layer: layer, rate: Self.muTurnSpeed,
+                          expectedDuration: muChrome?.flightDuration ?? 0)
+    }
+
+    /// FIX-147: end the turn clock — time-continuously
+    /// (MUTurnClock.end). Called first thing in the turn's
+    /// completion (the settle AND the refusal path both
+    /// run finishMURotation) and at teardown; the clock is
+    /// process-wide, so a superseded surface's turn is
+    /// ended by whichever surface settles or tears down
+    /// next, and by the clock's own one-shot guard.
+    func endMUTurnClock(reason: String = "settle") {
+        MUTurnClock.end(reason: reason)
+    }
+
+    // MARK: - After-exit actions: close / board (FIX-147)
+
+    /// FIX-147: the close button on the landscape page. The
+    /// player is turned back to portrait FIRST — through the
+    /// unchanged FIX-139 decision (muToggleFullscreen reads
+    /// the live layout, which says landscape, so it is an
+    /// exit: lock .all + portrait, then the hosting
+    /// dismissal) — and the close runs at the portrait rest
+    /// (serviceMUAfterExit). By the time the cover is
+    /// dismissed the window is already portrait, so every
+    /// later portrait request (the cover's onDismiss and the
+    /// route-change re-assert in ContentView) asks for the
+    /// orientation the window already has, which is inside
+    /// any supported set — collapsed mid-transition or not.
+    /// Returns true when the close was deferred; false means
+    /// close now (portrait page, nothing to turn).
+    func requestMUCloseAfterExit() -> Bool {
+        guard let mu = muChrome else { return false }
+        if mu.afterExitClose {
+            DiagLog.log("player", "close: already waiting for the portrait rest")
+            return true
+        }
+        if mu.transitionInFlight {
+            resetMUAfterExitBookkeeping(mu)
+            mu.afterExitClose = true
+            DiagLog.log("player",
+                        "close: tapped mid-turn — deciding at the next settle")
+            armMUAfterExitFallback()
+            return true
+        }
+        guard mu.landscape else { return false }
+        resetMUAfterExitBookkeeping(mu)
+        mu.afterExitClose = true
+        DiagLog.log("player",
+                    "close: tapped on the landscape page — turning to portrait first, "
+                    + "closing at the portrait rest")
+        issueMUAfterExitExit(mu, why: "close tap")
+        return true
+    }
+
+    private func resetMUAfterExitBookkeeping(_ mu: MUChromeViews) {
+        mu.afterExitExitIssued = false
+        mu.afterExitIssuedAt = 0
+        mu.afterExitRetried = false
+        mu.afterExitAwaitingHosting = false
+    }
+
+    /// FIX-147 (R2): run the unchanged FIX-139 toggle from
+    /// the landscape page (an exit) on behalf of a waiting
+    /// action, record that the exit is issued, and arm the
+    /// one-shot guard for it.
+    private func issueMUAfterExitExit(_ mu: MUChromeViews, why: String) {
+        mu.afterExitExitIssued = true
+        mu.afterExitIssuedAt = CACurrentMediaTime()
+        DiagLog.log("player", "after-exit: exit issued (\(why))")
+        muToggleFullscreen()
+        armMUAfterExitFallback()
+    }
+
+    /// FIX-147 (R2): service a waiting close / board
+    /// request at a SETTLE — called only from
+    /// finishMURotation, after the parity-queued toggle
+    /// (Finding 2: the hosting dismissal's completion no
+    /// longer calls this; see completeMUAfterExitAtHostingHome).
+    ///
+    ///   portrait settle — run the action, unless the
+    ///     settle itself serviced a toggle (that was an
+    ///     ENTER about to turn the window: wait), or the
+    ///     hosting is not home yet (mark it; the
+    ///     dismissal's completion finishes the job).
+    ///   landscape settle —
+    ///     a toggle serviced in this settle: from the
+    ///       landscape page that is an exit; it counts as
+    ///       the issued exit.
+    ///     no exit issued yet (a tap that landed mid-turn):
+    ///       issue it now — this is the first exit, not a
+    ///       retry.
+    ///     exit issued, and THIS settle's transition began
+    ///       after it: the exit's landing failed to reach
+    ///       portrait — spend the one retry.
+    ///     exit issued, this transition began before it:
+    ///       the exit's own turn has not landed yet — wait.
+    func serviceMUAfterExit(servicedToggleThisSettle: Bool) {
+        guard let mu = muChrome, !isTorn,
+              mu.afterExitClose || mu.openBoardAfterExit,
+              !mu.transitionInFlight else { return }
+        if !mu.landscape {
+            if servicedToggleThisSettle { return }
+            guard MUFullscreenState.presentedController == nil else {
+                mu.afterExitAwaitingHosting = true
+                DiagLog.log("player",
+                            "after-exit: portrait settle — waiting for the hosting to be home")
+                return
+            }
+            runMUAfterExitActions(reason: "portrait rest")
+            return
+        }
+        if servicedToggleThisSettle {
+            mu.afterExitExitIssued = true
+            mu.afterExitIssuedAt = CACurrentMediaTime()
+            armMUAfterExitFallback()
+            return
+        }
+        if !mu.afterExitExitIssued {
+            issueMUAfterExitExit(mu, why: "landscape settle after a mid-turn request")
+            return
+        }
+        if mu.lastSettledArmedAt > mu.afterExitIssuedAt {
+            // C-R2-1: the retry covers BOTH waiting actions
+            // — a failed exit landing is the same event
+            // whether a close or the board is waiting.
+            if !mu.afterExitRetried {
+                mu.afterExitRetried = true
+                DiagLog.log("player",
+                            "after-exit: the exit's landing settled on the landscape page "
+                            + "— the one retry (close=\(mu.afterExitClose) "
+                            + "board=\(mu.openBoardAfterExit))")
+                issueMUAfterExitExit(mu, why: "retry")
+            }
+            return
+        }
+        DiagLog.log("player",
+                    "after-exit: landscape settle of a turn that began before the exit "
+                    + "— waiting for the exit's own turn")
+    }
+
+    /// FIX-147 (R2, Finding 2): the hosting dismissal's
+    /// completion. It never decides, never issues an exit
+    /// and never spends the retry: it only finishes an
+    /// action a PORTRAIT settle already approved and parked
+    /// for want of the hosting (afterExitAwaitingHosting).
+    func completeMUAfterExitAtHostingHome() {
+        guard let mu = muChrome, !isTorn, mu.afterExitAwaitingHosting,
+              mu.afterExitClose || mu.openBoardAfterExit,
+              !mu.transitionInFlight, !mu.landscape,
+              MUFullscreenState.presentedController == nil else { return }
+        runMUAfterExitActions(reason: "portrait rest (hosting home)")
+    }
+
+    private func runMUAfterExitActions(reason: String) {
+        guard let mu = muChrome else { return }
+        let close = mu.afterExitClose
+        let board = mu.openBoardAfterExit
+        mu.afterExitClose = false
+        mu.openBoardAfterExit = false
+        resetMUAfterExitBookkeeping(mu)
+        mu.afterExitGeneration += 1
+        let live = view.window?.windowScene?.interfaceOrientation
+        if close {
+            DiagLog.log("player",
+                        "close: closing at the \(reason) — interface=\(live?.rawValue ?? -1)")
+            onClose?()
+            return
+        }
+        if board {
+            DiagLog.log("player",
+                        "board: opening after exit at the \(reason) — interface=\(live?.rawValue ?? -1)")
+            onSourceSwitch?()
+            showControls()
+        }
+    }
+
+    /// FIX-147: the one-shot guard behind a waiting close /
+    /// board request — if no portrait turn has arrived 1 s
+    /// after the exit was requested (a rejected geometry
+    /// request), the action runs anyway rather than leave
+    /// the viewer stuck, and the log says so. One shot per
+    /// request (generation-checked), never repeating, and
+    /// only on these two user-action paths.
+    func armMUAfterExitFallback() {
+        guard let mu = muChrome else { return }
+        mu.afterExitGeneration += 1
+        let generation = mu.afterExitGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, let mu = self.muChrome, !self.isTorn,
+                  mu.afterExitGeneration == generation,
+                  mu.afterExitClose || mu.openBoardAfterExit,
+                  !mu.transitionInFlight else { return }
+            DiagLog.log("player",
+                        "after-exit: no portrait turn within 1 s "
+                        + "(layoutLandscape=\(mu.landscape)) — running the action anyway")
+            self.runMUAfterExitActions(reason: "1 s fallback")
+        }
+    }
+
     private func layoutMUPortrait(_ mu: MUChromeViews, bounds: CGRect, safe: UIEdgeInsets) {
         // FIX-143: GEOMETRY ONLY — the scrim/footer
         // visibility and the header fonts this function
@@ -1024,7 +1477,7 @@ extension LivePlayerViewController {
                 gapScale = max(0.35, (lowerGaps - remaining) / lowerGaps)
             }
         }
-        videoView.frame = CGRect(x: 0, y: videoY, width: w, height: videoH)
+        placeMUVideo(mu, CGRect(x: 0, y: videoY, width: w, height: videoH))
         layoutTransport(mu, centre: CGPoint(x: w / 2, y: videoY + videoH / 2),
                         playSize: 64, sideSize: 44, gap: 32)
 
@@ -1065,7 +1518,7 @@ extension LivePlayerViewController {
         let insetX = safe.left + 12
         let contentW = w - insetX * 2
 
-        videoView.frame = bounds
+        placeMUVideo(mu, bounds)
         mu.scrimTop.frame = CGRect(x: 0, y: 0, width: w, height: 110)
         mu.scrimBottom.frame = CGRect(x: 0, y: h - 170, width: w, height: 170)
         for scrim in [mu.scrimTop, mu.scrimBottom] {
@@ -1251,13 +1704,18 @@ extension LivePlayerViewController {
         // is up it would stack UNDER it (presentation
         // stacking follows the view-controller tree, and
         // the cover sits below the presented controller).
-        // Exit fullscreen first; the dismissal's completion
-        // opens the board once the player view is home.
+        // Exit fullscreen first; the board opens at the
+        // portrait rest once the player view is home
+        // (FIX-147, serviceMUAfterExit).
         // Mid-flight taps ride the parity queue like any
         // toggle (see openBoardAfterExit on MUChromeViews).
         if MUFullscreenState.presentedController != nil, let mu = muChrome {
             mu.openBoardAfterExit = true
-            muToggleFullscreen()
+            // FIX-147: the board now opens at the portrait
+            // rest (serviceMUAfterExit), with the same 1 s
+            // one-shot guard as the close.
+            if !mu.afterExitClose { resetMUAfterExitBookkeeping(mu) }
+            issueMUAfterExitExit(mu, why: "board tap")
             return
         }
         onSourceSwitch?()
@@ -1446,6 +1904,7 @@ extension LivePlayerViewController {
         mu.hostOriginalIndex = host.subviews.firstIndex(of: view) ?? host.subviews.count
         mu.hostOriginalFrame = view.frame
         mu.hostOriginalAutoresizingMask = view.autoresizingMask
+        mu.hostOriginalFilledHost = view.frame == host.bounds
         // A fresh enter cancels a board request left over
         // from an earlier exit path (the viewer's latest
         // act was this toggle).
@@ -1584,14 +2043,30 @@ extension LivePlayerViewController {
                 let index = min(mu?.hostOriginalIndex ?? host.subviews.count,
                                 host.subviews.count)
                 host.insertSubview(self.view, at: index)
-                self.view.frame = mu?.hostOriginalFrame ?? self.view.frame
+                // FIX-147: a view that filled its slot at
+                // enter re-fills it from the host's CURRENT
+                // bounds. The enter-time frame is the
+                // portrait size, and this completion lands
+                // before the turn back, while the window —
+                // and the host — are still landscape.
+                if mu?.hostOriginalFilledHost == true {
+                    self.view.frame = host.bounds
+                } else {
+                    self.view.frame = mu?.hostOriginalFrame ?? self.view.frame
+                }
                 self.view.autoresizingMask = mu?.hostOriginalAutoresizingMask ?? []
+                DiagLog.log("player",
+                            "mu fullscreen hosting: restored home at "
+                            + "\(self.muFmtRect(self.view.frame)) "
+                            + "(turn in flight=\(mu?.transitionInFlight ?? false))")
             }
-            if let mu, mu.openBoardAfterExit {
-                mu.openBoardAfterExit = false
-                self.onSourceSwitch?()
-                self.showControls()
-            }
+            // FIX-147 (R2, Finding 2): a waiting board (or
+            // close) request is decided at the turn's SETTLE,
+            // never here — this completion normally lands
+            // before the turn back has even started. It only
+            // finishes an action a portrait settle already
+            // approved and parked for the hosting.
+            self.completeMUAfterExitAtHostingHome()
         }
     }
 
@@ -1646,6 +2121,7 @@ extension LivePlayerViewController {
         mu.hostOriginalIndex = host.subviews.firstIndex(of: view) ?? host.subviews.count
         mu.hostOriginalFrame = view.frame
         mu.hostOriginalAutoresizingMask = view.autoresizingMask
+        mu.hostOriginalFilledHost = view.frame == host.bounds
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         fsVC.view.addSubview(view)
         view.frame = fsVC.view.bounds
@@ -1849,5 +2325,78 @@ extension LivePlayerViewController {
 extension LivePlayerViewController: UIPopoverPresentationControllerDelegate {
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         showControls()
+    }
+}
+
+// MARK: - FIX-147 turn clock
+
+/// FIX-147 (R2, Finding 1) — the turn clock, process-wide
+/// (one window turns at a time; any surface can end it).
+///
+/// CONTINUITY INVARIANT: the window layer's local time is
+/// a continuous function of media time at every switch.
+/// Local time is t_local = (t − beginTime) · speed +
+/// timeOffset, so each switch (on AND off) is made the same
+/// way, at one instant `now`:
+///     timeOffset ← local time at `now` (convertTime)
+///     beginTime  ← now
+///     speed      ← the new rate
+/// which makes t_local(now) identical before and after the
+/// write: nothing running on the window jumps, forwards or
+/// backwards. The pre-turn beginTime / timeOffset are NOT
+/// written back — after a 1.4× turn of T seconds the
+/// window's local time correctly leads its pre-turn
+/// mapping by 0.4·T, and replaying the old values would
+/// step it back by exactly that (the R1 defect). Only the
+/// RATE is restored exactly.
+///
+/// Every way out of a turn goes through end(): the settle
+/// and the refusal path (both run finishMURotation), the
+/// player's teardown, a superseded surface (the clock is
+/// not owned by a surface — the successor's settle or
+/// teardown ends it), and, as the last guard, one one-shot
+/// check per turn at 2× the expected duration + 0.5 s
+/// (generation-checked; never repeating).
+@MainActor
+enum MUTurnClock {
+    private static weak var layer: CALayer?
+    private static var savedSpeed: Float = 1
+    private static var generation = 0
+
+    static var isRunning: Bool { layer != nil }
+
+    static func begin(layer target: CALayer, rate: Float,
+                      expectedDuration: TimeInterval) {
+        guard layer == nil else { return }
+        savedSpeed = target.speed
+        switchRate(target, to: savedSpeed * rate)
+        layer = target
+        generation += 1
+        let mine = generation
+        DiagLog.log("player", "mu turn clock: on ×\(rate)")
+        let guardDelay = max(0.6, expectedDuration * 2 + 0.5)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(guardDelay))
+            guard generation == mine, layer != nil else { return }
+            end(reason: "guard — no settle within \(String(format: "%.2f", guardDelay))s")
+        }
+    }
+
+    static func end(reason: String) {
+        guard let target = layer else { return }
+        layer = nil
+        generation += 1
+        switchRate(target, to: savedSpeed)
+        DiagLog.log("player", "mu turn clock: off (\(reason))")
+    }
+
+    /// The one time-continuous rate switch (see the
+    /// invariant above).
+    private static func switchRate(_ target: CALayer, to speed: Float) {
+        let now = CACurrentMediaTime()
+        let local = target.convertTime(now, from: nil)
+        target.timeOffset = local
+        target.beginTime = now
+        target.speed = speed
     }
 }

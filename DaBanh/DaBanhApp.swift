@@ -66,8 +66,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 /// rejection to the diagnostic log (category "player").
 @MainActor
 enum OrientationHelper {
+    /// FIX-147 (R2): bumped by every lock — a deferred
+    /// request (lockWhenSettled) that finds a newer lock
+    /// has been made since never acts.
+    private static var lockGeneration = 0
+
     static func lock(_ mask: UIInterfaceOrientationMask,
                      rotateTo orientation: UIInterfaceOrientation? = nil) {
+        lockGeneration += 1
         AppDelegate.orientationLock = mask
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
@@ -96,5 +102,98 @@ enum OrientationHelper {
                     "orientation lock: mask=\(mask.rawValue) "
                     + "rotateTo=\(orientation?.rawValue ?? -1) "
                     + "now=\(scene.interfaceOrientation.rawValue)")
+    }
+    /// FIX-147 (R2, Finding 3) — the MU close path's
+    /// portrait request, for the two ContentView points
+    /// that end a player surface (the cover's onDismiss
+    /// and the route-to-nil branch).
+    ///
+    /// A geometry request is judged against the TOPMOST
+    /// presented controller, and while a presentation
+    /// transition is in flight the supported set collapses
+    /// to the current orientation — the convicted
+    /// "Requested: portrait; Supported: landscapeRight"
+    /// rejection, issued from inside a route/surface-driven
+    /// teardown while the fullscreen hosting (or the cover)
+    /// was still being dismissed. So:
+    ///   1. the mask widens NOW, exactly as lock() does
+    ///      (lock(mask) — no rotation target yet);
+    ///   2. the rotation request is issued only once no
+    ///      controller in the window's presentation chain
+    ///      is being presented or dismissed: each in-flight
+    ///      transition is waited out on its own
+    ///      coordinator's completion (or the next main-
+    ///      queue turn for an unanimated one), at most 6
+    ///      hops, then the request goes out regardless (and
+    ///      says so);
+    ///   3. a window already in the target orientation gets
+    ///      no request at all (there is nothing to turn);
+    ///   4. a newer lock() made in the meantime (a player
+    ///      re-opened) cancels it.
+    /// One-shot per call; no periodic work.
+    static func lockWhenSettled(_ mask: UIInterfaceOrientationMask,
+                                rotateTo orientation: UIInterfaceOrientation,
+                                reason: String) {
+        lock(mask)
+        let generation = lockGeneration
+        DispatchQueue.main.async {
+            settledAttempt(mask, orientation, reason, generation, hop: 0)
+        }
+    }
+
+    private static func settledAttempt(_ mask: UIInterfaceOrientationMask,
+                                       _ orientation: UIInterfaceOrientation,
+                                       _ reason: String,
+                                       _ generation: Int,
+                                       hop: Int) {
+        guard generation == lockGeneration else {
+            DiagLog.log("player",
+                        "orientation settled request (\(reason)): superseded by a newer lock — dropped")
+            return
+        }
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })
+            ?? UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene }).first
+        else { return }
+        if scene.interfaceOrientation == orientation {
+            DiagLog.log("player",
+                        "orientation settled request (\(reason)): already "
+                        + "\(orientation.rawValue) — no request")
+            return
+        }
+        var inFlight: UIViewController?
+        var vc = scene.keyWindow?.rootViewController
+        while let current = vc {
+            if current.isBeingPresented || current.isBeingDismissed
+                || current.transitionCoordinator != nil {
+                inFlight = current
+                break
+            }
+            vc = current.presentedViewController
+        }
+        if let busy = inFlight, hop < 6 {
+            let next = {
+                DispatchQueue.main.async {
+                    settledAttempt(mask, orientation, reason, generation, hop: hop + 1)
+                }
+            }
+            DiagLog.log("player",
+                        "orientation settled request (\(reason)): waiting out "
+                        + "\(type(of: busy))'s transition (hop \(hop))")
+            if let coordinator = busy.transitionCoordinator {
+                coordinator.animate(alongsideTransition: nil) { _ in next() }
+            } else {
+                next()
+            }
+            return
+        }
+        if inFlight != nil {
+            DiagLog.log("player",
+                        "orientation settled request (\(reason)): still in flight "
+                        + "after 6 hops — requesting anyway")
+        }
+        lock(mask, rotateTo: orientation)
     }
 }
