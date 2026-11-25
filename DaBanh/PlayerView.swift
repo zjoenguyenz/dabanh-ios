@@ -1112,7 +1112,7 @@ final class LivePlayerViewController: UIViewController {
     /// toggle or run its after-exit service. The active
     /// settle also CLEARS the slot, so the dedupe record
     /// never outlives the transition it names.
-    private func finishMURotation(for coordinator: UIViewControllerTransitionCoordinator) {
+    func finishMURotation(for coordinator: UIViewControllerTransitionCoordinator) {
         guard let mu = muChrome else { return }
         guard mu.activeTransitionCoordinator === coordinator as AnyObject else {
             DiagLog.log("player",
