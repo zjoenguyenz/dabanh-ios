@@ -825,6 +825,13 @@ final class LivePlayerViewController: UIViewController {
     private var lastLoadedRangeEnd: TimeInterval = -1
     private var controlsVisible = true
     private var torn = false
+    /// FIX-144 gate Round 1 (B-3): read-only access to
+    /// the teardown flag for the fullscreen transition
+    /// animator (MUPlayerChrome.swift) — its completion
+    /// must not re-insert this surface's view into the
+    /// live presentation after the surface was torn
+    /// down by a mid-flight source swap.
+    var isTorn: Bool { torn }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -916,6 +923,19 @@ final class LivePlayerViewController: UIViewController {
         }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // FIX-144: a surface born while the MU fullscreen
+        // presentation is up (an in-place source swap
+        // replaces this controller under the presented
+        // controller) adopts the hosting — see
+        // MUPlayerChrome.swift. A no-op in every other
+        // state, and for the classic surface.
+        if isMUChrome {
+            adoptMUFullscreenHostingIfNeeded()
+        }
+    }
+
     /// FIX-142: the rotation transition belongs to the
     /// system again. FIX-141 owned it (DIAG-140 §4.3, §5
     /// direction 9): the alongside block laid the chrome
@@ -956,6 +976,17 @@ final class LivePlayerViewController: UIViewController {
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         guard isMUChrome, let mu = muChrome else { return }
+        // FIX-144: while a fullscreen presentation /
+        // dismissal is driving the turn, the presentation
+        // driver owns the flight — it set the in-flight
+        // flag and its completion calls finishMURotation.
+        // The window still rotates under the presentation
+        // and this override still fires for it; running
+        // the alongside bookkeeping here too would settle
+        // the same turn twice. Physical rotations with no
+        // presentation driving keep the FIX-143 path
+        // below, unchanged.
+        if mu.fullscreenDriving { return }
         mu.transitionInFlight = true
         mu.inFlightPassCount = 0
         let started = coordinator.animate(alongsideTransition: { [weak self] _ in
@@ -998,7 +1029,11 @@ final class LivePlayerViewController: UIViewController {
     /// line below proves from the log that the picture's
     /// own frame does not move in it (delta zero is the
     /// pass criterion — DIAG-143 §3.3).
-    private func finishMURotation() {
+    // FIX-144: module-internal (was private) — the
+    // fullscreen presentation's completions in
+    // MUPlayerChrome.swift settle through this same
+    // function, so the FIX-143 settle exists exactly once.
+    func finishMURotation() {
         guard let mu = muChrome else { return }
         mu.transitionInFlight = false
         // Gate fix (REVIEW-142 B-2): a completion landing
@@ -1689,6 +1724,14 @@ final class LivePlayerViewController: UIViewController {
     func teardown() {
         guard !torn else { return }
         torn = true
+        // FIX-144: if this surface is the one hosted in
+        // the MU fullscreen presentation, release the
+        // presentation with it (a successor surface
+        // adopts it instead — the release is
+        // identity-checked, see MUPlayerChrome.swift).
+        if isMUChrome {
+            releaseMUFullscreenHostingForTeardown()
+        }
         hideTimer?.invalidate()
         disarmStallWatchdog()
         disarmTotalCapTimer()

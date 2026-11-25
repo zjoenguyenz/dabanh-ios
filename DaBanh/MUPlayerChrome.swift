@@ -164,6 +164,47 @@ final class MUChromeViews {
     /// by layoutMUChrome; the per-pass in-flight log line
     /// carries the count as its pass index.
     var inFlightPassCount = 0
+    /// FIX-144 (Option A): the fullscreen presentation's
+    /// scratch state for THIS surface — where the player
+    /// view lived in the SwiftUI host before it was moved
+    /// into the presented fullscreen controller, so the
+    /// dismissal can restore it exactly (KSPlayer's
+    /// originalSuperView / originalFrame pair; the view
+    /// is frame-based in the host, so there are no
+    /// constraints to save — SwiftUI owns that layout and
+    /// re-asserts it on its next pass regardless).
+    weak var hostOriginalSuperview: UIView?
+    var hostOriginalIndex = 0
+    var hostOriginalFrame: CGRect = .zero
+    /// FIX-144 gate Round 1 (F-A3): the view's
+    /// autoresizing mask in the host slot — ENTER sets
+    /// the flexible mask the fullscreen fill needs, so
+    /// the slot's own mask is part of what the dismissal
+    /// (and the present-refusal rollback) restores.
+    var hostOriginalAutoresizingMask: UIView.AutoresizingMask = []
+    /// FIX-144 gate Round 1 (B-4): teardown landed
+    /// while THIS surface's own fullscreen flight was
+    /// still driving — the release is deferred, not
+    /// executed against a running transition, and the
+    /// flight's completion services it (see
+    /// releaseMUFullscreenHostingForTeardown).
+    var releasePendingAfterFlight = false
+    /// FIX-144: a fullscreen presentation / dismissal
+    /// driven by the toggle is in flight and OWNS the
+    /// turn — it set transitionInFlight above, and its
+    /// completion calls finishMURotation. While this is
+    /// set, viewWillTransition (which still fires: the
+    /// window rotates under the presentation) must not
+    /// run a second, competing settle for the same turn.
+    var fullscreenDriving = false
+    /// FIX-144: "Tất cả nguồn" was tapped while the
+    /// fullscreen presentation was up — the SwiftUI
+    /// board sheet stacks on the cover, UNDER the
+    /// presentation, so the tap exits fullscreen first
+    /// and the dismissal's completion opens the board
+    /// once the player view is home. A fresh enter
+    /// (a parity-serviced toggle) cancels the request.
+    var openBoardAfterExit = false
     let scrimTop = UIView()
     let scrimBottom = UIView()
     var chipButtons: [UIButton] = []
@@ -186,6 +227,174 @@ final class MUChromeViews {
 @MainActor
 enum MUFullscreenState {
     static var isActive = false
+    /// FIX-144 (Option A): the live fullscreen
+    /// presentation, if one is up — the controller the
+    /// toggle's ENTER decision presented and the EXIT
+    /// decision dismisses, and the controller a successor
+    /// surface (an in-place source swap replaces the
+    /// player VC wholesale) adopts instead of presenting
+    /// a second one. Weak: the presentation itself keeps
+    /// the controller alive; these records must never
+    /// resurrect a dead one.
+    static weak var presentedController: MUFullscreenViewController?
+    /// FIX-144: the surface currently hosted inside the
+    /// presented controller — identity-checked by the
+    /// teardown release and the successor adoption, so
+    /// the two are order-independent.
+    static weak var hostedController: LivePlayerViewController?
+}
+
+/// FIX-144 (Option A): the presented fullscreen
+/// controller — KSPlayer's PlayerFullScreenViewController
+/// mapped onto this app. It exists to OWN the fullscreen
+/// transition: the whole existing player view is moved
+/// into it, and the interface rotation becomes the
+/// presentation's own rotation instead of an in-place
+/// rotation of the page hosting the player (DIAG-144).
+/// It declares the landscape orientation itself (the
+/// decision's OrientationHelper.lock has already narrowed
+/// the app-wide mask to match — the two agree by
+/// construction); KSPlayer's controller returns `.all`
+/// and lets its global carry the narrowing, which is the
+/// one deliberate mapping difference, noted here.
+final class MUFullscreenViewController: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
+    override var shouldAutorotate: Bool { false }
+    override var prefersHomeIndicatorAutoHidden: Bool { true }
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+}
+
+/// FIX-144 (Option A): the transition animator — a
+/// transcription of KSPlayer's PlayerTransitionAnimator
+/// (Sources/KSPlayerUI/View/PlayerTransitionAnimator.swift,
+/// read first-hand at the DIAG-143 study's commit), mapped
+/// onto this app's frame-based player view:
+/// - KSPlayer's player view is constraint-managed; it
+///   captures and reactivates the view's frame constraints
+///   around the flight. This app's player view is
+///   frame-based inside the SwiftUI host and inside the
+///   fullscreen controller (frame + flexible autoresizing),
+///   so there are no app-owned constraints to capture —
+///   those branches are omitted, and the restore below is
+///   the superview + index restore only.
+/// - KSPlayer computes the flight's start centre from the
+///   original superview's centre in window coordinates,
+///   re-expressed through a `reverse` point flip when the
+///   from-controller's view carries the rotation
+///   transform. That flip's body lives in KSPlayer's core
+///   module, distributed as a binary framework — not
+///   public source, so it is NOT transcribed blind. It is
+///   also unnecessary here: this player view FILLS its
+///   original superview (the surface fills the cover), so
+///   the point in question is the screen centre, which a
+///   quarter-turn maps to the transition container's
+///   centre under either flip formula. The centre logic
+///   below substitutes the container's centre for the
+///   flipped point — provably the same value for a
+///   full-bleed view.
+/// - Where KSPlayer's guard on the from-controller's
+///   transform returns without completing the transition
+///   (a wedged presentation if the controller were ever
+///   missing), this transcription falls back to identity
+///   so the transition always completes.
+/// The duration is 0.25 s (DIAG-144 §3's "~0.25 s class",
+/// inside §4's ≤0.30 s criterion; KSPlayer uses 0.3 s) and
+/// the curve is KSPlayer's easeInOut. During the flight
+/// the ONE moving object is the player view, driven by
+/// transform + center only — no layout pass is animated;
+/// the layout inside it happened once, at the final
+/// bounds, before the flight (see animateTransition).
+final class MUFullscreenTransitionAnimator: NSObject, UIViewControllerAnimatedTransitioning {
+    private let isDismiss: Bool
+    private let originalSuperview: UIView
+    private let animationView: UIView
+    private let fromCenter: CGPoint
+    /// FIX-144 gate Round 1 (B-3): the surface that
+    /// owns the flying view, held weakly. A source swap
+    /// landing INSIDE the 0.25 s flight tears that
+    /// surface down; the completion must then NOT put
+    /// its view back into the live presentation (the
+    /// successor's adopted view is what belongs there).
+    private weak var owner: LivePlayerViewController?
+
+    init(originalSuperview: UIView, animationView: UIView, isDismiss: Bool = false,
+         owner: LivePlayerViewController? = nil) {
+        self.originalSuperview = originalSuperview
+        self.animationView = animationView
+        self.isDismiss = isDismiss
+        self.owner = owner
+        fromCenter = originalSuperview.superview?.convert(originalSuperview.center, to: nil) ?? .zero
+        super.init()
+    }
+
+    func transitionDuration(using _: UIViewControllerContextTransitioning?) -> TimeInterval {
+        0.25
+    }
+
+    func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
+        let animationSuperView = animationView.superview
+        let animationViewIndex = animationSuperView?.subviews.firstIndex(of: animationView) ?? 0
+        let initSize = animationView.frame.size
+        guard let presentedView = transitionContext.view(forKey: isDismiss ? .from : .to) else {
+            // FIX-144 gate Round 1 (B-1): a transition
+            // that is never completed wedges UIKit AND
+            // both hosting flags (no present/dismiss
+            // completion ever fires to clear them). The
+            // transition ALWAYS completes — as failed,
+            // so UIKit restores the pre-transition state
+            // and the hosting completions still run.
+            transitionContext.completeTransition(false)
+            return
+        }
+        if isDismiss {
+            originalSuperview.layoutIfNeeded()
+            presentedView.bounds = originalSuperview.bounds
+            presentedView.removeFromSuperview()
+        } else {
+            if let viewController = transitionContext.viewController(forKey: .to) {
+                presentedView.frame = transitionContext.finalFrame(for: viewController)
+            }
+        }
+        presentedView.layoutIfNeeded()
+        transitionContext.containerView.addSubview(animationView)
+        animationView.translatesAutoresizingMaskIntoConstraints = true
+        let transform = transitionContext.viewController(forKey: .from)?.view.transform ?? .identity
+        animationView.transform = CGAffineTransform(
+            scaleX: initSize.width / animationView.frame.size.width,
+            y: initSize.height / animationView.frame.size.height)
+            .concatenating(transform)
+        let toCenter = transitionContext.containerView.center
+        let startCenter = transform == .identity ? fromCenter : toCenter
+        animationView.center = isDismiss ? toCenter : startCenter
+        UIView.animate(withDuration: transitionDuration(using: transitionContext),
+                       delay: 0, options: .curveEaseInOut) {
+            self.animationView.transform = .identity
+            self.animationView.center = self.isDismiss ? startCenter : toCenter
+        } completion: { _ in
+            // FIX-144 gate Round 1 (B-1/B-3): honour a
+            // cancelled transition, and re-insert the
+            // flying view into its flight superview ONLY
+            // if the surface that owns it is still alive
+            // and not torn down — a mid-flight source
+            // swap must not resurrect the dead surface's
+            // view into the presentation the successor
+            // has adopted.
+            let cancelled = transitionContext.transitionWasCancelled
+            let ownerLive = self.owner.map { owner in !owner.isTorn } ?? false
+            if !cancelled, ownerLive {
+                animationSuperView?.insertSubview(self.animationView, at: animationViewIndex)
+            }
+            if !self.isDismiss, !cancelled {
+                transitionContext.containerView.addSubview(presentedView)
+            }
+            transitionContext.completeTransition(!cancelled)
+        }
+    }
 }
 
 /// The Manchester United player chrome (theme-mu): the
@@ -852,6 +1061,7 @@ extension LivePlayerViewController {
         DiagLog.log("player",
                     "mu layer (\(context)): video=\(muFmtRect(videoView.frame)) "
                     + "layer=\(muFmtRect(layer.frame)) "
+                    + "videorect=\(muFmtRect(layer.videoRect)) "
                     + "gravity=\(layer.videoGravity.rawValue)")
     }
 
@@ -1147,6 +1357,20 @@ extension LivePlayerViewController {
     }
 
     @objc func muAllSourcesTapped() {
+        // FIX-144: the board is a SwiftUI sheet on the
+        // player cover — while the fullscreen presentation
+        // is up it would stack UNDER it (presentation
+        // stacking follows the view-controller tree, and
+        // the cover sits below the presented controller).
+        // Exit fullscreen first; the dismissal's completion
+        // opens the board once the player view is home.
+        // Mid-flight taps ride the parity queue like any
+        // toggle (see openBoardAfterExit on MUChromeViews).
+        if MUFullscreenState.presentedController != nil, let mu = muChrome {
+            mu.openBoardAfterExit = true
+            muToggleFullscreen()
+            return
+        }
         onSourceSwitch?()
         showControls()
     }
@@ -1267,6 +1491,328 @@ extension LivePlayerViewController {
             OrientationHelper.lock(.landscape, rotateTo: .landscapeRight)
         }
         showControls()
+        // FIX-144 (Option A): the FIX-139 decision above is
+        // unchanged — it still decides the direction from
+        // the live layout, still writes the state record,
+        // still makes the same lock requests. What carries
+        // the decision out is new: the fullscreen
+        // presentation that hosts this player. The sync is
+        // idempotent — it presents on an enter decision
+        // with no presentation up, dismisses on an exit
+        // decision with one up, and does nothing when the
+        // hosting already matches the decision (a toggle
+        // decided from a physically rotated page has no
+        // presentation to move).
+        syncMUFullscreenHosting()
+    }
+
+    // MARK: - Fullscreen hosting (FIX-144, Option A)
+
+    /// FIX-144: reconcile the fullscreen presentation with
+    /// the state the FIX-139 decision just wrote. Called
+    /// at the end of every unqueued toggle (a queued
+    /// toggle is serviced later by a fresh toggle through
+    /// finishMURotation, which lands here the same way).
+    func syncMUFullscreenHosting() {
+        guard isMUChrome, let mu = muChrome else { return }
+        if MUFullscreenState.isActive {
+            guard MUFullscreenState.presentedController == nil else { return }
+            beginMUFullscreenPresentation(mu)
+        } else {
+            guard MUFullscreenState.presentedController != nil else { return }
+            beginMUFullscreenDismissal(mu)
+        }
+    }
+
+    /// The presenter for the fullscreen controller: this
+    /// surface's topmost ancestor — the cover's hosting
+    /// controller, which outlives every surface swap (a
+    /// presentation anchored on a surface would be
+    /// dismissed automatically when that surface is
+    /// dismantled, stranding the successor).
+    private func muFullscreenPresenter() -> UIViewController {
+        var top: UIViewController = self
+        while let parent = top.parent { top = parent }
+        return top
+    }
+
+    /// ENTER: save the host slot, move the WHOLE player
+    /// view into a fresh fullscreen controller and present
+    /// it — KSPlayer's updateUI(isFullScreen:) mapped to
+    /// this app's frame-based view (its edge-pin
+    /// constraints are the frame + flexible autoresizing
+    /// set here; there are no app-owned constraints to
+    /// deactivate). The AVPlayer, its item, the session
+    /// and every observation stay exactly where they are:
+    /// only the view changes parent. The presentation's
+    /// completion runs the FIX-143 settle
+    /// (finishMURotation) at the hosted landscape rest.
+    private func beginMUFullscreenPresentation(_ mu: MUChromeViews) {
+        guard let host = view.superview else { return }
+        mu.hostOriginalSuperview = host
+        mu.hostOriginalIndex = host.subviews.firstIndex(of: view) ?? host.subviews.count
+        mu.hostOriginalFrame = view.frame
+        mu.hostOriginalAutoresizingMask = view.autoresizingMask
+        // A fresh enter cancels a board request left over
+        // from an earlier exit path (the viewer's latest
+        // act was this toggle).
+        mu.openBoardAfterExit = false
+        mu.transitionInFlight = true
+        mu.inFlightPassCount = 0
+        mu.fullscreenDriving = true
+        let fsVC = MUFullscreenViewController()
+        fsVC.modalPresentationStyle = .fullScreen
+        fsVC.modalPresentationCapturesStatusBarAppearance = true
+        fsVC.transitioningDelegate = self
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        fsVC.view.addSubview(view)
+        view.frame = fsVC.view.bounds
+        MUFullscreenState.presentedController = fsVC
+        MUFullscreenState.hostedController = self
+        DiagLog.log("player",
+                    "mu fullscreen hosting: presenting (host slot "
+                    + "\(muFmtRect(mu.hostOriginalFrame)))")
+        // FIX-144 gate restarted Round 1 (B-8): this
+        // completion captures self STRONGLY, on purpose.
+        // It is the ONLY service point for a teardown
+        // release deferred during the flight; with a weak
+        // capture, a surface SwiftUI deallocates inside
+        // the 0.25 s window (ladder exhaustion, no
+        // successor) would take the completion with it
+        // and strand the presented controller on screen
+        // with no living owner. The retention is bounded:
+        // UIKit holds the handler only until it fires —
+        // and drops it unrun on a refused present, where
+        // the rollback below has already restored the
+        // surface — so it cannot form a cycle: nothing on
+        // the surface retains the handler.
+        muFullscreenPresenter().present(fsVC, animated: true) {
+            guard let mu = self.muChrome else { return }
+            mu.fullscreenDriving = false
+            // FIX-144 gate Round 1 (B-4): a teardown
+            // that landed during this flight deferred
+            // its release to this completion — service
+            // it instead of settling a dead surface.
+            if mu.releasePendingAfterFlight {
+                mu.releasePendingAfterFlight = false
+                self.releaseMUFullscreenHostingForTeardown()
+                return
+            }
+            // FIX-144 gate Round 1 (B-3): if a successor
+            // adopted the presentation mid-flight, the
+            // hosting already landed on ITS surface (the
+            // adoption applied the full presentation);
+            // this flight's settle must not run on the
+            // old one.
+            guard MUFullscreenState.hostedController === self else {
+                DiagLog.log("player",
+                            "mu fullscreen hosting: present completion "
+                            + "on a superseded surface — settle skipped")
+                return
+            }
+            self.finishMURotation()
+        }
+        // FIX-144 gate Round 1 (B-2): present() can be
+        // refused (the presenter is already presenting
+        // or mid-transition) — a no-op whose completion
+        // never runs. An accepted presentation has its
+        // presentingViewController set synchronously, so
+        // a missing one here IS the refusal. Roll the
+        // whole enter back: the view returns to its host
+        // slot (picture never lost), the records are
+        // nilled, and the settle runs — the state record
+        // still says fullscreen, but the FIX-139 decision
+        // re-reads the LIVE layout, so the next toggle
+        // re-attempts the enter from the truth.
+        if fsVC.presentingViewController == nil {
+            MUFullscreenState.presentedController = nil
+            if MUFullscreenState.hostedController === self {
+                MUFullscreenState.hostedController = nil
+            }
+            let index = min(mu.hostOriginalIndex, host.subviews.count)
+            host.insertSubview(view, at: index)
+            view.frame = mu.hostOriginalFrame
+            view.autoresizingMask = mu.hostOriginalAutoresizingMask
+            mu.fullscreenDriving = false
+            DiagLog.log("player",
+                        "mu fullscreen hosting: present REFUSED — "
+                        + "enter rolled back to the host slot")
+            finishMURotation()
+        }
+    }
+
+    /// EXIT: dismiss the fullscreen controller; the
+    /// animator restores the player view into the
+    /// controller's view at the end of the flight, and
+    /// this completion then restores it HOME — the saved
+    /// superview, index and frame (KSPlayer's dismissal
+    /// completion) — before the FIX-143 settle runs at the
+    /// restored portrait rest.
+    private func beginMUFullscreenDismissal(_ mu: MUChromeViews) {
+        guard let fsVC = MUFullscreenState.presentedController else { return }
+        mu.transitionInFlight = true
+        mu.inFlightPassCount = 0
+        mu.fullscreenDriving = true
+        DiagLog.log("player", "mu fullscreen hosting: dismissing")
+        fsVC.dismiss(animated: true) { [weak self] in
+            guard let self else { return }
+            let mu = self.muChrome
+            mu?.fullscreenDriving = false
+            // The records are retired only if they still
+            // name THIS presentation. If they were
+            // re-pointed (a teardown release, or a
+            // successor's fresh presentation), this
+            // completion owns nothing — and the trip is
+            // LOGGED, not silent (gate Round 1, B-5).
+            guard MUFullscreenState.presentedController === fsVC else {
+                DiagLog.log("player",
+                            "mu fullscreen hosting: dismiss completion "
+                            + "for a superseded presentation — records kept")
+                return
+            }
+            MUFullscreenState.presentedController = nil
+            if MUFullscreenState.hostedController === self {
+                MUFullscreenState.hostedController = nil
+            }
+            // A surface torn down mid-dismissal (source
+            // swap inside the flight) restores nothing:
+            // its view is discarded with it, and no
+            // settle or board service runs on the dead.
+            if self.isTorn {
+                DiagLog.log("player",
+                            "mu fullscreen hosting: dismissed under "
+                            + "a torn surface — restore skipped")
+                return
+            }
+            // Restore the view HOME — the saved superview,
+            // index, frame and autoresizing mask
+            // (KSPlayer's dismissal completion) — before
+            // the FIX-143 settle runs at the restored
+            // portrait rest.
+            if let host = mu?.hostOriginalSuperview {
+                let index = min(mu?.hostOriginalIndex ?? host.subviews.count,
+                                host.subviews.count)
+                host.insertSubview(self.view, at: index)
+                self.view.frame = mu?.hostOriginalFrame ?? self.view.frame
+                self.view.autoresizingMask = mu?.hostOriginalAutoresizingMask ?? []
+            }
+            self.finishMURotation()
+            if let mu, mu.openBoardAfterExit {
+                mu.openBoardAfterExit = false
+                self.onSourceSwitch?()
+                self.showControls()
+            }
+        }
+    }
+
+    /// FIX-144: a surface born while the fullscreen
+    /// presentation is up — an in-place source advance or
+    /// chip switch replaces this controller wholesale
+    /// (the surface is keyed by rung), under the still-
+    /// presented fullscreen controller — adopts the
+    /// hosting: the previous surface's view is vacated
+    /// and this surface's view moves into the presented
+    /// controller in its place, at the hosted landscape
+    /// rest (the layout the move triggers applies the
+    /// full geometry + presentation, the same cut the
+    /// in-place swap made inside the rotated window in
+    /// 1.43). If the swap lands inside a flight, the
+    /// move is still safe: the animator's completion
+    /// will not re-insert the torn predecessor's view
+    /// over this one (gate Round 1, B-3). Called from
+    /// viewDidAppear; a no-op in every other state.
+    func adoptMUFullscreenHostingIfNeeded() {
+        guard isMUChrome, let mu = muChrome else { return }
+        guard MUFullscreenState.isActive,
+              MUFullscreenState.hostedController !== self else { return }
+        // FIX-144 gate Round 1 (B-4): teardown-before-
+        // adopt ordering — the previous surface's
+        // teardown release already retired the
+        // presentation before this successor appeared.
+        // The adoption then IS a fresh enter from this
+        // surface's own host slot, so the two orderings
+        // converge on the same end state. (If that
+        // present is refused, the B-2 rollback inside
+        // the enter keeps the picture in the host.)
+        guard let fsVC = MUFullscreenState.presentedController else {
+            DiagLog.log("player",
+                        "mu fullscreen hosting: successor found no "
+                        + "presentation up — re-presenting")
+            beginMUFullscreenPresentation(mu)
+            return
+        }
+        guard let host = view.superview, host !== fsVC.view else { return }
+        // Sweep whatever the previous surface left in
+        // the fullscreen view — its own view, or a dead
+        // predecessor's (whose controller record has
+        // already nilled): the presented view hosts
+        // exactly ONE player view, this surface's.
+        for subview in fsVC.view.subviews where subview !== view {
+            subview.removeFromSuperview()
+        }
+        mu.hostOriginalSuperview = host
+        mu.hostOriginalIndex = host.subviews.firstIndex(of: view) ?? host.subviews.count
+        mu.hostOriginalFrame = view.frame
+        mu.hostOriginalAutoresizingMask = view.autoresizingMask
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        fsVC.view.addSubview(view)
+        view.frame = fsVC.view.bounds
+        MUFullscreenState.hostedController = self
+        DiagLog.log("player",
+                    "mu fullscreen hosting: adopted by source "
+                    + "#\(sourceIndex) (in-place swap under the presentation)")
+    }
+
+    /// FIX-144: teardown of the HOSTED surface with no
+    /// successor adopting (the player is closing, or the
+    /// ladder ran out under it) releases the presentation
+    /// with it — the view is being discarded either way.
+    /// If a successor already adopted, the record names
+    /// it, not this surface, and this is a no-op; if the
+    /// successor has NOT adopted yet, its adoption finds
+    /// no presentation up and re-presents (gate Round 1,
+    /// B-4) — the two orderings converge. MUFullscreenState
+    /// .isActive is NOT touched — ContentView owns its
+    /// reset on a genuine close, as before.
+    func releaseMUFullscreenHostingForTeardown() {
+        guard MUFullscreenState.hostedController === self,
+              let fsVC = MUFullscreenState.presentedController else { return }
+        // FIX-144 gate Round 1 (B-4): never dismiss
+        // against a transition this surface is still
+        // driving — the records would be nilled while
+        // UIKit may still complete the presentation,
+        // leaving an on-screen controller no record
+        // names. Defer: the flight's completion services
+        // the release (and if a successor adopts first,
+        // the record no longer names this surface and
+        // the deferred release no-ops).
+        if let mu = muChrome, mu.fullscreenDriving {
+            mu.releasePendingAfterFlight = true
+            DiagLog.log("player",
+                        "mu fullscreen hosting: teardown during "
+                        + "a flight — release deferred to its completion")
+            return
+        }
+        MUFullscreenState.hostedController = nil
+        MUFullscreenState.presentedController = nil
+        DiagLog.log("player",
+                    "mu fullscreen hosting: released at teardown "
+                    + "(source #\(sourceIndex))")
+        fsVC.dismiss(animated: false)
+    }
+
+    /// FIX-144: the controller the MU action sheets
+    /// (More / Quality / Audio) present from. While the
+    /// fullscreen presentation is up, a sheet presented
+    /// from THIS controller would stack under it —
+    /// presentation stacking follows the view-controller
+    /// tree, and this controller sits in the cover's tree
+    /// below the presented controller, wherever its view
+    /// currently lives. The sheets therefore present from
+    /// the fullscreen controller while it is up, and from
+    /// this controller otherwise (the 1.43 behaviour).
+    private func muSheetPresenter() -> UIViewController {
+        MUFullscreenState.presentedController ?? self
     }
 
     /// Quality: a real rendition cap on the player item
@@ -1309,7 +1855,7 @@ extension LivePlayerViewController {
             popover.sourceRect = (muChrome?.moreButton ?? closeButton).bounds
             popover.delegate = self
         }
-        present(sheet, animated: true)
+        muSheetPresenter().present(sheet, animated: true)
     }
 
     @objc func muQualityTapped() {
@@ -1337,7 +1883,7 @@ extension LivePlayerViewController {
         // handler — the presentation delegate below releases
         // the keepControlsVisible pin on that path too.
         sheet.popoverPresentationController?.delegate = self
-        present(sheet, animated: true)
+        muSheetPresenter().present(sheet, animated: true)
     }
 
     /// Audio / subtitles: the item's own media selection
@@ -1390,7 +1936,7 @@ extension LivePlayerViewController {
         // F-2: same popover-dismissal pin release as the
         // quality sheet (see muQualityTapped).
         sheet.popoverPresentationController?.delegate = self
-        present(sheet, animated: true)
+        muSheetPresenter().present(sheet, animated: true)
     }
 }
 
@@ -1411,5 +1957,43 @@ extension LivePlayerViewController {
 extension LivePlayerViewController: UIPopoverPresentationControllerDelegate {
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         showControls()
+    }
+}
+
+/// FIX-144 (Option A): the fullscreen controller's
+/// transitioning delegate — KSPlayer's player view vends
+/// its PlayerTransitionAnimator the same way. The
+/// animator is built on the surface's saved host
+/// superview (the centre reference) and this controller's
+/// own root view (the one moving object). Without a saved
+/// host (no enter ran), no animator is vended and the
+/// presentation falls back to the system default.
+extension LivePlayerViewController: UIViewControllerTransitioningDelegate {
+    /// FIX-144 gate Round 1 (B-3): the delegate sits on
+    /// the surface that PRESENTED the fullscreen
+    /// controller, but after a source swap the HOSTED
+    /// surface is a successor — the animator must fly
+    /// the HOSTED surface's view (and restore toward
+    /// ITS saved host slot), never the presenter's
+    /// vacated one. Both vending paths therefore resolve
+    /// the hosted surface first and fall back to self
+    /// (the no-swap case, where the two are identical).
+    private func muAnimator(isDismiss: Bool) -> UIViewControllerAnimatedTransitioning? {
+        let host = MUFullscreenState.hostedController ?? self
+        guard let mu = host.muChrome, let original = mu.hostOriginalSuperview else { return nil }
+        return MUFullscreenTransitionAnimator(originalSuperview: original,
+                                              animationView: host.view, isDismiss: isDismiss,
+                                              owner: host)
+    }
+
+    func animationController(forPresented presented: UIViewController,
+                             presenting: UIViewController,
+                             source: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        muAnimator(isDismiss: false)
+    }
+
+    func animationController(forDismissed dismissed: UIViewController)
+        -> UIViewControllerAnimatedTransitioning? {
+        muAnimator(isDismiss: true)
     }
 }

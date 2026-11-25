@@ -73,15 +73,15 @@ targets:
         # This target's own settings pair (from 1.18): it previously
         # inherited the project base (1.5/6), which never matched
         # its info.properties pair — the pair the device shows.
-        MARKETING_VERSION: "1.43"
-        CURRENT_PROJECT_VERSION: "44"
+        MARKETING_VERSION: "1.44"
+        CURRENT_PROJECT_VERSION: "45"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: "Đá Banh"
         CFBundleName: "Đá Banh"
-        CFBundleShortVersionString: "1.43"
-        CFBundleVersion: "44"
+        CFBundleShortVersionString: "1.44"
+        CFBundleVersion: "45"
         UIAppFonts:
           - BarlowCondensed-ExtraBold.ttf
           - Manrope-Regular.ttf

@@ -157,12 +157,33 @@ enum DiagLog {
         }
     }
 
-    /// The current log text (the share sheet sends the file
-    /// itself; this feeds the in-app preview).
+    /// The in-app preview's log text (the share sheet sends
+    /// the file itself, so EXPORT always carries the full
+    /// text — only this preview is tailed; the two paths
+    /// share nothing but the file). FIX-144 (DB-33 /
+    /// FL-490): the viewer renders this string in ONE
+    /// SwiftUI Text, and the whole file (345 KB at the
+    /// owner's size — some 2,951 lines, ≈38,000 pt of view
+    /// height) exceeds a single view's backing-store limit
+    /// by ~7–14×, so the Text rasterised to nothing and
+    /// the sheet showed an empty body while the exported
+    /// file was complete (DIAG-144 Leg B). The preview now
+    /// returns only the last ~32 KB, cut at a line
+    /// boundary (the rotateIfNeeded pattern) — the "tail"
+    /// the viewer's own doc comment always promised
+    /// (ContentView.swift, DiagLogView). A file at or
+    /// under the cap returns whole, exactly as before.
     static func snapshot() -> String {
         queue.sync {
             guard let data = try? Data(contentsOf: fileURL) else { return "" }
-            return String(decoding: data, as: UTF8.self)
+            let tail = data.suffix(32 * 1024)
+            var start = tail.startIndex
+            if tail.count < data.count,
+               let newline = tail.firstIndex(of: UInt8(ascii: "\n")),
+               newline < tail.endIndex - 1 {
+                start = tail.index(after: newline)
+            }
+            return String(decoding: tail[start...], as: UTF8.self)
         }
     }
 
