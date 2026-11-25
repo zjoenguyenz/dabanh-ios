@@ -826,11 +826,11 @@ final class LivePlayerViewController: UIViewController {
     private var controlsVisible = true
     private var torn = false
     /// FIX-144 gate Round 1 (B-3): read-only access to
-    /// the teardown flag for the fullscreen transition
-    /// animator (MUPlayerChrome.swift) — its completion
-    /// must not re-insert this surface's view into the
-    /// live presentation after the surface was torn
-    /// down by a mid-flight source swap.
+    /// the teardown flag for the fullscreen hosting
+    /// guards (MUPlayerChrome.swift) — the dismissal
+    /// completion must not restore this surface's view
+    /// into the live presentation after the surface was
+    /// torn down by a mid-flight source swap.
     var isTorn: Bool { torn }
 
     override func viewDidLoad() {
@@ -976,17 +976,6 @@ final class LivePlayerViewController: UIViewController {
                                      with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         guard isMUChrome, let mu = muChrome else { return }
-        // FIX-144: while a fullscreen presentation /
-        // dismissal is driving the turn, the presentation
-        // driver owns the flight — it set the in-flight
-        // flag and its completion calls finishMURotation.
-        // The window still rotates under the presentation
-        // and this override still fires for it; running
-        // the alongside bookkeeping here too would settle
-        // the same turn twice. Physical rotations with no
-        // presentation driving keep the FIX-143 path
-        // below, unchanged.
-        if mu.fullscreenDriving { return }
         mu.transitionInFlight = true
         mu.inFlightPassCount = 0
         let started = coordinator.animate(alongsideTransition: { [weak self] _ in
@@ -1029,11 +1018,7 @@ final class LivePlayerViewController: UIViewController {
     /// line below proves from the log that the picture's
     /// own frame does not move in it (delta zero is the
     /// pass criterion — DIAG-143 §3.3).
-    // FIX-144: module-internal (was private) — the
-    // fullscreen presentation's completions in
-    // MUPlayerChrome.swift settle through this same
-    // function, so the FIX-143 settle exists exactly once.
-    func finishMURotation() {
+    private func finishMURotation() {
         guard let mu = muChrome else { return }
         mu.transitionInFlight = false
         // Gate fix (REVIEW-142 B-2): a completion landing
