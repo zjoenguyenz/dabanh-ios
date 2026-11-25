@@ -1,7 +1,77 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-24T19:51:10Z",
+  "generatedAt": "2026-11-24T23:58:55Z",
   "matches": [
+    {
+      "competition": "champions-league",
+      "home": "Arsenal",
+      "away": "Borussia Dortmund",
+      "scoreHome": 1,
+      "scoreAway": 1,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915295",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Como",
+      "away": "AEK Athens",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915296",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Feyenoord Rotterdam",
+      "away": "FC Porto",
+      "scoreHome": 0,
+      "scoreAway": 1,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915294",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Manchester City",
+      "away": "Napoli",
+      "scoreHome": 2,
+      "scoreAway": 2,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915379",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "RB Leipzig",
+      "away": "Lens",
+      "scoreHome": 3,
+      "scoreAway": 1,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915299",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Real Madrid",
+      "away": "PSV Eindhoven",
+      "scoreHome": 5,
+      "scoreAway": 1,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915298",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Slovan Bratislava",
+      "away": "Real Betis",
+      "scoreHome": 0,
+      "scoreAway": 2,
+      "matchDate": "2026-11-24T20:00:00Z",
+      "espnEventId": "401915297",
+      "sources": []
+    },
     {
       "competition": "champions-league",
       "home": "Bodo/Glimt",
