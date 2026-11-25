@@ -49,9 +49,13 @@ enum DiagLog {
 
     /// A fresh formatter per call: ISO8601DateFormatter is not
     /// concurrency-safe to share, and log volume is low.
+    /// FIX-148: fractional seconds — DIAG-147's enter event
+    /// lasts ≈0.50 s with ≈0.23 s legs, so second-granularity
+    /// stamps made inter-line timing underivable; every line
+    /// now carries milliseconds (same ISO8601 shape, extended).
     private static func timestamp() -> String {
         let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.string(from: Date())
     }
 

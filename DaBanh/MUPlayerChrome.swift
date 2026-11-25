@@ -341,6 +341,59 @@ final class MUFullscreenViewController: UIViewController {
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
     override var shouldAutorotate: Bool { false }
+
+    /// FIX-148: the presentation-time orientation target.
+    /// The enter's FIX-139 decision (muToggleFullscreen)
+    /// always locks `.landscape` rotating to
+    /// `.landscapeRight` — the toggle's target side is a
+    /// fixed choice, not a dynamic one — but that geometry
+    /// request is issued BEFORE this controller exists,
+    /// and with no preferred orientation the system's own
+    /// resolution at presentation time was unconstrained
+    /// by the VC itself. DIAG-147 measured the result on
+    /// device: enters landed in one frame, then the whole
+    /// interface swung ~80° toward portrait and back (2/2)
+    /// — a system re-evaluation exploiting the vacuum.
+    /// Declaring the same fixed target the lock requests
+    /// gives the presentation the app's own answer. This
+    /// does NOT narrow supportedInterfaceOrientations
+    /// (.all — the 1.45 veto law) and shouldAutorotate
+    /// stays false: the app-wide mask discipline still
+    /// carries the narrowing while hosted, and exits /
+    /// the close path never consult this property.
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        .landscapeRight
+    }
+
+    /// FIX-148 (log-only): this controller's own
+    /// transition delivery and appearance size. DIAG-147
+    /// found the hosted PLAYER VC never receives
+    /// viewWillTransition on an enter; whether the fsVC
+    /// receives it — and at what size / interface
+    /// orientation the presentation completes — is the
+    /// enter mechanism's missing evidence. Note the line
+    /// pairs the TARGET size with the PRE-transition
+    /// interface orientation (the scene has not turned
+    /// yet at callback time): read it as a from→to record.
+    override func viewWillTransition(to size: CGSize,
+                                     with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        DiagLog.log("player",
+                    "mu fsVC: viewWillTransition to "
+                    + "\(Int(size.width.rounded()))x\(Int(size.height.rounded())) "
+                    + "(target size) interfaceNow="
+                    + "\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1) "
+                    + "(pre-transition)")
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        DiagLog.log("player",
+                    "mu fsVC: viewDidAppear bounds="
+                    + "\(Int(view.bounds.width.rounded()))x\(Int(view.bounds.height.rounded())) "
+                    + "interface=\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
+    }
+
     override var prefersHomeIndicatorAutoHidden: Bool { true }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 }
@@ -1034,14 +1087,29 @@ extension LivePlayerViewController {
     /// this many times faster (CAMediaTiming `speed` on the
     /// window layer, applied before the turn's animations
     /// are created and restored exactly in the turn's
-    /// completion). The system turn measured ~0.37 s;
-    /// ×1.4 brings it to ~0.26 s (≈8 frames at 30 fps),
-    /// inside the ≤0.30 s acceptance bound and close to the
-    /// YouTube reference. Picture, chrome and the window's
-    /// own rotation share the one clock, so they stay one
-    /// motion. 1 disables the clock entirely (the turn is
-    /// then the system's own, at its own duration).
-    static let muTurnSpeed: Float = 1.4
+    /// completion). 1 disables the clock entirely (the turn
+    /// is then the system's own, at its own duration).
+    ///
+    /// FIX-148: set to 1 — the clock stays OFF. It shipped
+    /// at 1.4 in FIX-147 on the theory that picture, chrome
+    /// and the window's own rotation share the one clock;
+    /// DIAG-147 measured that FALSE for the rotation. The
+    /// clock sped the picture flight (a window sublayer:
+    /// 0.300 s / 1.4 ≈ 0.214 s ≈ 6 frames) but NOT the
+    /// system-driven window rotation (~10 frames, the stock
+    /// 0.300 s ease), so mid-turn the scale ran up to +33
+    /// percentage points ahead of the rotation, with a
+    /// worst single-frame scale step of −16.3% — the clock
+    /// manufactured the desync it existed to prevent. With
+    /// the clock off, flight and rotation both run the one
+    /// stock coordinator animation. Do NOT re-enable by
+    /// raising this constant without new device evidence
+    /// that the rotation itself follows the window layer's
+    /// speed. (At 1 the disable is total: beginMUTurnClock
+    /// guards on `muTurnSpeed > 1`, MUTurnClock never
+    /// begins, and placeMUVideo's explicit branch reads
+    /// speed 1 from `isRunning == false`.)
+    static let muTurnSpeed: Float = 1
 
     /// FIX-147: arm the picture's rigid flight for the
     /// transition that is about to run — called from
@@ -1944,6 +2012,16 @@ extension LivePlayerViewController {
             // it instead of acting for a dead surface.
             if mu.releasePendingAfterFlight {
                 mu.releasePendingAfterFlight = false
+                // FIX-148 (log-only): the completion
+                // anchor also fires on this path — the
+                // window/interface snapshot at completion
+                // time, taken from the fsVC before the
+                // deferred release dismisses it.
+                DiagLog.log("player",
+                            "mu fullscreen hosting: present completed "
+                            + "(teardown deferred) "
+                            + "window=\(muFmtRect(fsVC.view.window?.frame ?? .zero)) "
+                            + "interface=\(fsVC.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
                 self.releaseMUFullscreenHostingForTeardown()
                 return
             }
@@ -1956,11 +2034,28 @@ extension LivePlayerViewController {
                             "mu fullscreen hosting: present completion "
                             + "on a superseded surface — hosting already "
                             + "with the successor")
+                // FIX-148 (log-only): the completion
+                // anchor also fires on this path — the
+                // snapshot is the fsVC's (the live
+                // presentation), not the dead surface's.
+                DiagLog.log("player",
+                            "mu fullscreen hosting: present completed "
+                            + "(superseded surface) "
+                            + "window=\(muFmtRect(fsVC.view.window?.frame ?? .zero)) "
+                            + "interface=\(fsVC.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
                 return
             }
             // FIX-145: no settle here — the turn belongs
             // to the window's coordinator, whose completion
             // (finishMURotation) settles it, as in 1.43.
+            // FIX-148 (log-only): record the window's size
+            // and interface orientation at the instant the
+            // presentation completes — the enter path's
+            // missing anchor (DIAG-147 §4.1).
+            DiagLog.log("player",
+                        "mu fullscreen hosting: present completed "
+                        + "window=\(muFmtRect(self.view.window?.frame ?? .zero)) "
+                        + "interface=\(self.view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
         }
         // FIX-144 gate Round 1 (B-2): present() can be
         // refused (the presenter is already presenting
@@ -1987,9 +2082,15 @@ extension LivePlayerViewController {
             view.frame = mu.hostOriginalFrame
             view.autoresizingMask = mu.hostOriginalAutoresizingMask
             mu.hostingTransitionInFlight = false
+            // FIX-148: the REFUSED line also carries the
+            // window/interface snapshot (the completion
+            // never runs on a refusal, so this line is the
+            // path's only completion-side anchor).
             DiagLog.log("player",
                         "mu fullscreen hosting: present REFUSED — "
-                        + "enter rolled back to the host slot")
+                        + "enter rolled back to the host slot "
+                        + "window=\(muFmtRect(view.window?.frame ?? .zero)) "
+                        + "interface=\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
         }
     }
 
@@ -2126,9 +2227,15 @@ extension LivePlayerViewController {
         fsVC.view.addSubview(view)
         view.frame = fsVC.view.bounds
         MUFullscreenState.hostedController = self
+        // FIX-148: the line also records the adopted
+        // view's frame and the live interface orientation
+        // at adopt time (log-only; DIAG-147 §4.1 — the
+        // enter/adoption path's orientation evidence).
         DiagLog.log("player",
                     "mu fullscreen hosting: adopted by source "
-                    + "#\(sourceIndex) (in-place swap under the presentation)")
+                    + "#\(sourceIndex) (in-place swap under the presentation) "
+                    + "frame=\(muFmtRect(view.frame)) "
+                    + "interface=\(view.window?.windowScene?.interfaceOrientation.rawValue ?? -1)")
     }
 
     /// FIX-144: teardown of the HOSTED surface with no
