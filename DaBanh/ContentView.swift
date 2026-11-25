@@ -233,40 +233,12 @@ struct ContentView: View {
             // theme-mu: warm the shared wallpaper list early;
             // the MU surfaces read it, classic never paints it.
             Task { await MUWallpapers.refreshRemote() }
-            // Pre-resolve the fixtures the first screen leads with
-            // (the featured rail), so the likeliest first tap opens
-            // on already-verified sources. ResolveHub bounds the
-            // pass to three fixtures and shares any session a tap
-            // asks for while it runs (single-flight).
-            await MainActor.run {
-                ResolveHub.shared.preresolve(
-                    ladders: featuredEntries.prefix(3).map { store.sources(for: $0.channel) })
-                // FIX-129 (DB-07 residual, Item B): deep-warm the
-                // HEAD source of each fixture in the same launch
-                // preresolve set (bound: at most 3 heads, one per
-                // fixture, in featured order, through the pre-warm
-                // store's existing max-2-concurrent driver). The
-                // 1.28 device log's Andorra pick adopted its cached
-                // ladder instantly yet still took 8 s to first
-                // frame — pure cold-host load on live2.zktsva.app,
-                // a host the SAME log later served in 1 s once an
-                // earlier play had warmed it (Cercle Brugge).
-                // Verification alone does not warm the media
-                // path: pre-flight reads only the playlist head,
-                // while SourcePrewarmer descends to the first
-                // segment. One warm() call for all three heads —
-                // the store rebuilds its pending queue on every
-                // call, so per-fixture calls would drop each
-                // other's not-yet-started heads. A later board
-                // open re-prioritises the queue as before.
-                let heads = featuredEntries.prefix(3)
-                    .compactMap { store.sources(for: $0.channel).first }
-                if !heads.isEmpty {
-                    DiagLog.log("player",
-                                "prewarm: launch warm queued — \(heads.count) featured head source(s)")
-                    SourcePrewarmStore.shared.warm(ladder: heads)
-                }
-            }
+            // FIX-141: no launch preresolve and no launch
+            // head-warm (DIAG-140-SMOOTH §5 directions 1+2 —
+            // checking is scoped to the player now, and verdicts
+            // persist across launches via VerdictDisk, so the
+            // ambient launch drain the 1.40 log convicted is
+            // gone, not rebuilt).
             // The BLV Anh tab's addon source loads alongside
             // (in-memory cache, TTL-gated on later visits).
             await nuvio.loadIfNeeded()
@@ -435,28 +407,19 @@ struct ContentView: View {
                 .padding(.bottom, 4)
         }
         .presentationBackground(.clear)
-        .onAppear {
-            // FIX-128: the board being open is the viewer's
-            // intent on screen — start hub verification for
-            // this fixture NOW (the board's own .task already
-            // deep-warms it in the pre-warm store), so the row
-            // he picks seconds later adopts an in-flight or
-            // cached resolution from ResolveHub instead of
-            // starting verification at the tap. preresolve's
-            // supersede contract applies: this pass replaces
-            // any earlier pre-resolve pass, and sessions a tap
-            // has adopted are never cancelled by it.
-            ResolveHub.shared.preresolve(
-                ladders: [store.sources(for: entry.channel)])
-        }
+        // FIX-141: no board-open preresolve (the FIX-128
+        // .onAppear pass that lived here is removed —
+        // DIAG-140-SMOOTH §5 direction 2: checking is scoped
+        // to the player; the tap starts from the persisted /
+        // in-run verdicts and verification runs behind the
+        // published pick).
     }
 
 
     /// The MU match detail wearing the board route (theme-mu):
     /// a full page in the cover (not the classic dimmed panel),
     /// with the board's own play closures — the same DiagLog
-    /// lines, the same sessions, the same route flips — and
-    /// the board-open pre-resolve the classic panel performs.
+    /// lines, the same sessions, the same route flips.
     private func muDetailPanel(_ entry: FixtureEntry) -> some View {
         MUMatchDetailView(
             entry: entry,
@@ -488,10 +451,8 @@ struct ContentView: View {
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
         }
-        .onAppear {
-            ResolveHub.shared.preresolve(
-                ladders: [store.sources(for: entry.channel)])
-        }
+        // FIX-141: no board-open preresolve here either (see
+        // the classic panel above).
     }
 
     /// The theme pill (theme-mu): palette icon + the current

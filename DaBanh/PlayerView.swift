@@ -163,11 +163,12 @@ struct PlayerView: View {
                     channel: channel, onFail: advance,
                     onReady: {
                         switching = false
-                        // DB-07: the first frame is up — deep-warm
-                        // the rest of the ladder behind it (see
-                        // SourcePrewarmStore). Idempotent: a ready
-                        // after a switch just re-prioritises what
-                        // is still cold. Pure background work.
+                        // DB-07: the first frame is up — warm
+                        // behind it (see SourcePrewarmStore).
+                        // FIX-141: only the next rung, deferred
+                        // 5 s; a ready after a switch re-arms the
+                        // warm for the new rung. Pure background
+                        // work.
                         session.beginPrewarming(after: index)
                     },
                     onDefinitiveFail: { reason in
@@ -865,6 +866,48 @@ final class LivePlayerViewController: UIViewController {
         }
     }
 
+    /// FIX-141: own the rotation transition for the MU
+    /// chrome (DIAG-140 §4.3, §5 direction 9). Before this,
+    /// the MU layout derived its page purely from
+    /// view.bounds at whatever layout pass happened to run,
+    /// so a mid-transition pass could compute the portrait
+    /// page on landscape bounds (or vice versa) and leave
+    /// videoView.frame as the narrow strip the owner filmed,
+    /// with no pass re-asserting the settled layout. Now:
+    /// the transition is marked in flight on the chrome's
+    /// state bag (muToggleFullscreen coalesces against it),
+    /// the alongside animation lays the chrome out against
+    /// the transition's FINAL size, and the completion
+    /// clears the flag and re-asserts the settled layout
+    /// through viewDidLayoutSubviews with the real final
+    /// bounds. The classic (non-MU) surface is unaffected:
+    /// the guard makes this a no-op when isMUChrome is false.
+    override func viewWillTransition(to size: CGSize,
+                                     with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        guard isMUChrome, let mu = muChrome else { return }
+        mu.transitionInFlight = true
+        let started = coordinator.animate(alongsideTransition: { [weak self] _ in
+            self?.layoutMUChrome(targetSize: size)
+        }, completion: { [weak self] _ in
+            guard let self, let mu = self.muChrome else { return }
+            mu.transitionInFlight = false
+            // The settle re-assertion: one more layout pass
+            // keyed to the real, settled bounds.
+            self.view.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        })
+        if !started {
+            // No coordinator animation could be scheduled:
+            // still lay out against the target size and
+            // clear the flag, so the chrome never sits in
+            // the coalescing state with no transition to
+            // complete it.
+            layoutMUChrome(targetSize: size)
+            mu.transitionInFlight = false
+        }
+    }
+
     // MARK: - Controls
 
     private func buildControls(channel: Channel) {
@@ -1535,59 +1578,59 @@ private enum PreflightOutcome: Sendable {
 ///   tunnel is off right now" — the same reason the whole-list
 ///   validator never hides a link on 403. The plugin drops it;
 ///   the demotion is the deliberate local deviation.
-/// - Transient failures (5xx, network errors, timeouts) retry —
-///   3 attempts total, 0.5 s / 1.0 s backoff, 4 s per attempt —
-///   all bounded by the session's hard deadline. A network-level
-///   failure still failing after the retries counts as death only
-///   for a channel that should be serving right now (live window
-///   or 24/7); a 5xx never convicts on its own.
+/// - FIX-141: ONE shot, ≤3 s — no retry loop (DIAG-140-SMOOTH
+///   §5 direction 3: the verifier takes the race's shape on the
+///   publish path; the old 3-attempt loop made one hanging URL
+///   cost 13.5 s). A transient failure (5xx, network error,
+///   timeout) is answered from that single fetch: a network-level
+///   failure counts as death only for a channel that should be
+///   serving right now (live window or 24/7); a 5xx never
+///   convicts on its own. Anything retry-shaped belongs to
+///   background re-validation, never to a publish gate. The one
+///   retry that survives is the Referer repair above: it is a
+///   different request, not a repeat of a failed one.
 /// Nonisolated, like LinkProbe: it touches no actor state.
 private enum SourcePreflight {
 
     static func verify(_ ch: Channel, session: URLSession, deadline: Date) async -> PreflightOutcome {
         guard let url = ch.streamURL else { return .dead }
-        var attempt = 0
-        while true {
-            attempt += 1
-            switch await fetch(ch, url: url, referrer: ch.referrer, session: session) {
-            case .ok(let quality):
-                return .verified(ch, quality)
-            case .unauthorized:
-                // Referer repair: one retry with the Referer the
-                // stream's own host implies. Skipped when that is
-                // the Referer already sent (nothing to repair).
-                if let repaired = repairedReferer(for: url), repaired != ch.referrer {
-                    switch await fetch(ch, url: url, referrer: repaired, session: session) {
-                    case .ok(let quality):
-                        let fixed = Channel(title: ch.title, logo: ch.logo, group: ch.group,
-                                            url: ch.url, kickoff: ch.kickoff,
-                                            leagueRank: ch.leagueRank,
-                                            referrer: repaired, userAgent: ch.userAgent)
-                        return .verified(fixed, quality)
-                    case .unauthorized, .transient, .other:
-                        return .kept(ch)
-                    case .dead:
-                        return .dead
-                    }
-                }
-                return .kept(ch)
-            case .dead:
-                return .dead
-            case .other:
-                return .kept(ch)
-            case .transient(let networkLevel):
-                if Task.isCancelled { return .kept(ch) }
-                if attempt >= 3 || Date() >= deadline {
-                    if networkLevel && mustBeServing(ch) { return .dead }
+        // FIX-141: exactly one fetch (see the type doc). The
+        // Referer-repair retry below is the sole second fetch,
+        // and only while the session's deadline still allows it.
+        switch await fetch(ch, url: url, referrer: ch.referrer, session: session) {
+        case .ok(let quality):
+            return .verified(ch, quality)
+        case .unauthorized:
+            // Referer repair: one retry with the Referer the
+            // stream's own host implies. Skipped when that is
+            // the Referer already sent (nothing to repair), and
+            // skipped once the deadline has passed — a repair
+            // that cannot land inside the publish window is
+            // background work, not this path's.
+            if let repaired = repairedReferer(for: url), repaired != ch.referrer,
+               Date() < deadline {
+                switch await fetch(ch, url: url, referrer: repaired, session: session) {
+                case .ok(let quality):
+                    let fixed = Channel(title: ch.title, logo: ch.logo, group: ch.group,
+                                        url: ch.url, kickoff: ch.kickoff,
+                                        leagueRank: ch.leagueRank,
+                                        referrer: repaired, userAgent: ch.userAgent)
+                    return .verified(fixed, quality)
+                case .unauthorized, .transient, .other:
                     return .kept(ch)
-                }
-                try? await Task.sleep(for: .milliseconds(attempt == 1 ? 500 : 1000))
-                if Task.isCancelled { return .kept(ch) }
-                if Date() >= deadline {
-                    if networkLevel && mustBeServing(ch) { return .dead }
-                    return .kept(ch)
+                case .dead:
+                    return .dead
                 }
             }
+            return .kept(ch)
+        case .dead:
+            return .dead
+        case .other:
+            return .kept(ch)
+        case .transient(let networkLevel):
+            if Task.isCancelled { return .kept(ch) }
+            if networkLevel && mustBeServing(ch) { return .dead }
+            return .kept(ch)
         }
     }
 
@@ -1606,7 +1649,7 @@ private enum SourcePreflight {
     /// validator caps its read the same way, at 4 KB).
     private static func fetch(_ ch: Channel, url: URL, referrer: String, session: URLSession) async -> FetchResult {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 4
+        request.timeoutInterval = 3 // FIX-141: the one shot's cap (was 4)
         // The candidate's full header set: its declared pair,
         // plus — for addon (Nuvio) streams — the rest of the
         // behaviorHints.proxyHeaders set (Origin included) from
@@ -1723,7 +1766,11 @@ private enum SourceRaceProbe {
 /// ladder in parallel and publishes the playable order
 /// progressively — the client port of the Nuvio addon's progressive
 /// publication (research §3.3), with its own numbers: quorum 3
-/// verified, soft deadline 6 s, hard deadline 15 s.
+/// verified, soft deadline 3 s, hard deadline 3 s. (FIX-141:
+/// the deadlines were 6 s / 15 s — DIAG-140-SMOOTH §5 direction
+/// 3 caps the whole publish path at the race's 3 s shape, so a
+/// session's kept tail now lands at the same 3 s mark as its
+/// soft publish; the quorum is unchanged.)
 ///
 /// Publication contract (the player depends on it):
 /// - Nothing publishes until the quorum, or every candidate has
@@ -1793,10 +1840,16 @@ final class MatchPlaySession: ObservableObject {
     /// published prefix never moves (R-2).
     private var raceOrderURLs: [String]?
     private var raceTask: Task<Void, Never>?
+    /// FIX-141: the deferred single-rung warm armed by
+    /// beginPrewarming(after:) — see its doc. Cancelled and
+    /// re-armed on every switch; cancelled for good by
+    /// endPrewarming().
+    private var prewarmTask: Task<Void, Never>?
 
     nonisolated private static let quorum = 3
-    nonisolated private static let softDeadline: TimeInterval = 6
-    nonisolated private static let hardDeadline: TimeInterval = 15
+    // FIX-141: both deadlines at the 3 s cap (were 6 s / 15 s).
+    nonisolated private static let softDeadline: TimeInterval = 3
+    nonisolated private static let hardDeadline: TimeInterval = 3
 
     init(key: String) {
         self.key = key
@@ -2045,21 +2098,45 @@ final class MatchPlaySession: ObservableObject {
     }
 
     /// DB-07: the first frame is up (the view calls this on
-    /// every ready) — deep-warm the rest of the ladder behind
-    /// the playing rung in the shared pre-warm store. Pure
-    /// background work; it never blocks or slows playback.
+    /// every ready) — warm behind the playing rung in the
+    /// shared pre-warm store. Pure background work; it never
+    /// blocks or slows playback.
+    ///
+    /// FIX-141 (DIAG-140-SMOOTH §5 direction 4): the warm is
+    /// capped to the ONE next rung the player would advance
+    /// to — the rung after `index` in advanceOrder — instead
+    /// of the old deep-warm of the whole rest of the ladder
+    /// (~9 s of post-frame churn sharing the network with the
+    /// playing stream in the 1.40 log). It is also DEFERRED:
+    /// the warm fires 5 s after this call (the playback-
+    /// stability window), so a rung that dies inside its stall
+    /// watchdog and advances quickly never spends warm traffic
+    /// at all. Every call re-arms: a switch cancels the pending
+    /// warm and re-targets the new current rung's successor.
+    /// When `index` is the last rung of the advance order there
+    /// is nothing behind it to warm.
     func beginPrewarming(after index: Int) {
         let ladder = sources
-        guard ladder.count > 1, ladder.indices.contains(index) else { return }
-        let current = ladder[index]
-        SourcePrewarmStore.shared.warm(
-            ladder: ladder, startingAfter: current.url,
-            excluding: [current.url])
+        guard ladder.indices.contains(index) else { return }
+        let order = advanceOrder(in: ladder)
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        guard let position = order.firstIndex(of: index),
+              position + 1 < order.count else { return }
+        let target = ladder[order[position + 1]]
+        prewarmTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, self != nil else { return }
+            SourcePrewarmStore.shared.warm(ladder: [target])
+        }
     }
 
     /// The player closed: stop spending bandwidth on warm-ups
-    /// that have not started yet.
+    /// that have not started yet — including the deferred
+    /// FIX-141 warm, which may still be inside its 5 s window.
     func endPrewarming() {
+        prewarmTask?.cancel()
+        prewarmTask = nil
         SourcePrewarmStore.shared.cancelPending()
     }
 
@@ -2177,7 +2254,7 @@ final class MatchPlaySession: ObservableObject {
         let total = ladder.count
         let hardDeadline = Date().addingTimeInterval(Self.hardDeadline)
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForRequest = 3 // FIX-141 (was 6)
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
 
@@ -2279,7 +2356,10 @@ final class MatchPlaySession: ObservableObject {
                 }
             }
             // The deadlines ride the same group as nil outcomes:
-            // the soft tick at 6 s, the hard tick at 15 s.
+            // the soft tick at 3 s, the hard tick at 3 s
+            // (FIX-141 — both ticks now land together; the soft
+            // tick still publishes the verified batch first when
+            // it is processed ahead of the hard tick).
             group.addTask {
                 try? await Task.sleep(for: .seconds(Self.softDeadline))
                 return (-1, nil)
@@ -2575,6 +2655,16 @@ private enum SourcePrewarmer {
 /// never convicted and a later warm() may warm it again.
 /// Warmth is per app run: a source warmed once is not
 /// re-fetched for later boards or sessions of the same fixture.
+/// FIX-141: warm/dead states now also persist across launches
+/// via VerdictDisk (restored in init, ≤30 min old — see the
+/// horizon justification there); the FIX-139 read semantics
+/// above are unchanged for IN-RUN verdicts — pure reads,
+/// pick-bound expiry only. FIX-141 round 2: RESTORED verdicts
+/// are the exception — `state(of:)` enforces the 30 min
+/// horizon on read for a verdict still carrying its restored
+/// stamp (see `restoredStamps`), exactly as ResolveHub's
+/// restored tier does, so a restored verdict can never block
+/// a since-revived rung for the whole app run.
 @MainActor
 final class SourcePrewarmStore {
     static let shared = SourcePrewarmStore()
@@ -2583,27 +2673,108 @@ final class SourcePrewarmStore {
     /// pick-bound expiry in `expireDeadIfPicked` can age it
     /// against the hub's TTL. FIX-139: `state(of:)` itself no
     /// longer expires anything on read (see the class doc).
-    private enum WarmState: Equatable { case warming, warm, dead(Date) }
+    /// FIX-141: `.warm` carries its stamp too, so VerdictDisk
+    /// can persist warmth with the age it must be judged by on
+    /// restore (see the restore horizon there).
+    private enum WarmState: Equatable { case warming, warm(Date), dead(Date) }
     private var states: [String: WarmState] = [:]
+    /// FIX-141 round 2: the original stamp of every verdict
+    /// restored from disk in init, keyed by URL. A stored
+    /// state whose stamp still EQUALS its restored stamp is
+    /// that restored verdict; any in-run write replaces the
+    /// stamp, so equality is what tells the two tiers apart
+    /// in `state(of:)`. Mirrors ResolveHub.restoredDead.
+    private var restoredStamps: [String: Date] = [:]
+    /// FIX-141 round 2: the restored tier's horizon from the
+    /// original verdict stamp — restates VerdictDisk's
+    /// prewarmHorizon (private to VerdictDisk) here, exactly
+    /// as ResolveHub.restoredDeadHorizon restates the dead
+    /// horizon; the two must stay equal.
+    private static let restoredHorizon: TimeInterval = 30 * 60
     private var pending: [Channel] = []
     private var driver: Task<Void, Never>?
     private var driverToken: UUID?
 
-    private init() {}
+    private init() {
+        // FIX-141: restore the persisted warm/dead states
+        // (VerdictDisk already dropped anything past its
+        // 30 min horizon). A restored .dead keeps its original
+        // stamp, so FIX-139's pick-bound expiry
+        // (expireDeadIfPicked, aged against the hub's 30 s TTL)
+        // expires it at the first explicit pick — exactly the
+        // "a pick expires it" semantics the persisted tier is
+        // specified to have. FIX-141 round 2: each restored
+        // stamp is also recorded in restoredStamps, so
+        // `state(of:)` can enforce the 30 min horizon ON READ
+        // for the restored tier (a pick is no longer the only
+        // escape — see state(of:)); inside the horizon, reads
+        // honour the restored verdict as before.
+        for (url, stored) in VerdictDisk.prewarmSlice() {
+            let stamp = Date(timeIntervalSince1970: stored.stamp)
+            restoredStamps[url] = stamp
+            if stored.dead {
+                states[url] = .dead(stamp)
+            } else {
+                states[url] = .warm(stamp)
+            }
+        }
+    }
+
+    /// FIX-141: the persistable slice of the store for
+    /// VerdictDisk — settled warm/dead states with their
+    /// stamps. `.warming` is in-flight, not a verdict, and is
+    /// never persisted.
+    func verdictSnapshot() -> [String: VerdictDisk.StoredWarm] {
+        var out: [String: VerdictDisk.StoredWarm] = [:]
+        for (url, state) in states {
+            switch state {
+            case .warm(let stamp):
+                out[url] = VerdictDisk.StoredWarm(
+                    dead: false, stamp: stamp.timeIntervalSince1970)
+            case .dead(let stamp):
+                out[url] = VerdictDisk.StoredWarm(
+                    dead: true, stamp: stamp.timeIntervalSince1970)
+            case .warming:
+                break
+            }
+        }
+        return out
+    }
 
     func isDead(_ url: String) -> Bool {
         if case .dead? = state(of: url) { return true }
         return false
     }
 
-    /// The URL's state as read now — a PURE read (FIX-139):
-    /// it never mutates the store and never expires a verdict,
-    /// however old. Board-open / board-render callers (isDead,
-    /// warm) therefore cannot re-enable a dead host as a side
-    /// effect of merely being read. Expiry lives only in
-    /// `expireDeadIfPicked` below.
+    /// The URL's state as read now — a PURE read (FIX-139)
+    /// for IN-RUN verdicts: it never mutates the store and
+    /// never expires an in-run verdict, however old. Board-open
+    /// / board-render callers (isDead, warm) therefore cannot
+    /// re-enable a dead host as a side effect of merely being
+    /// read. In-run expiry lives only in `expireDeadIfPicked`
+    /// below.
+    /// FIX-141 round 2 — the RESTORED-tier exception: a state
+    /// still carrying its restored stamp (see restoredStamps)
+    /// is judged against the 30 min restored horizon ON READ,
+    /// mirroring ResolveHub.isProvenDead's restored tier: past
+    /// the horizon (or future-dated) it is dropped on the spot
+    /// — silently, with no VerdictDisk save scheduled; the next
+    /// snapshot simply omits it — and the URL reads as never
+    /// convicted, so advance() stops skipping it and warm()
+    /// may re-warm it. `.warming` carries no stamp and never
+    /// matches a restored verdict.
     private func state(of url: String) -> WarmState? {
-        states[url]
+        guard let state = states[url] else { return nil }
+        if let restoredStamp = restoredStamps[url],
+           state == .warm(restoredStamp) || state == .dead(restoredStamp) {
+            let age = Date().timeIntervalSince(restoredStamp)
+            if age < 0 || age > Self.restoredHorizon {
+                states[url] = nil
+                restoredStamps[url] = nil
+                return nil
+            }
+        }
+        return state
     }
 
     /// FIX-139: the ONLY expiry of a pre-warm dead verdict,
@@ -2727,12 +2898,14 @@ final class SourcePrewarmStore {
                     switch outcome {
                     case .dead:
                         states[url] = .dead(Date())
+                        VerdictDisk.scheduleSave() // FIX-141
                         if let ch = channelsByURL[url] {
                             DiagLog.log("player",
                                         "prewarm: source proven dead — the ladder will skip it: \(diagSourceTag(ch))")
                         }
                     case .verified:
-                        states[url] = .warm
+                        states[url] = .warm(Date()) // FIX-141: stamped (was bare .warm)
+                        VerdictDisk.scheduleSave() // FIX-141
                         if let ch = channelsByURL[url] {
                             // FIX-129 (Item B): the warm READY
                             // line (host + elapsed, via
@@ -2774,6 +2947,197 @@ final class SourcePrewarmStore {
     }
 }
 
+/// FIX-141: disk persistence for the verdict stores —
+/// ResolveHub's resolve cache + proven-dead set and
+/// SourcePrewarmStore's warm/dead states — so a launch or a
+/// board open starts from the previous run's knowledge instead
+/// of a cold re-verification drain (DIAG-140-SMOOTH §2.2/§5
+/// direction 1: every verdict was in-memory only, and the
+/// 1.40 log shows the identical drain repeated verbatim at
+/// relaunch). One JSON file in Caches, written atomically,
+/// mirroring PlaylistStore's invalid-urls.json pattern.
+///
+/// Restore horizons (applied at load, in the slices below):
+/// - Resolve entries: 30 min. The owner's mirror republishes
+///   the playlist every 30 min — beyond one republication the
+///   ladder itself may have rotated, so an older entry is not
+///   knowledge, it is archaeology. Inside the horizon the
+///   entry's own TTL / stale-adoption machinery governs:
+///   fresh entries replay instantly, stale ones are adopted
+///   and revalidated behind the tap.
+/// - Proven-dead: 10 min from the ORIGINAL stamp, restored
+///   into ResolveHub's separate restored tier (the in-run
+///   tier keeps its own 30 s TTL untouched). Long enough to
+///   spare a relaunch the dead-host re-proofs, short enough
+///   that a host which recovered is not convicted for long.
+/// - Prewarm states: 30 min, the same republication cadence
+///   as the resolve entries — warmth older than one playlist
+///   generation says nothing about the current ladder.
+///
+/// Failure doctrine: ANY load failure — missing file, corrupt
+/// or partial JSON, a version other than 1 — yields an empty
+/// payload, never a crash; the app simply starts cold, as it
+/// did before FIX-141. The payload is read from disk once per
+/// launch and cached; saves are coalesced (see scheduleSave).
+@MainActor
+enum VerdictDisk {
+
+    /// Field mirror of Channel, which is not Codable (it
+    /// carries a `let id = UUID()`); conversion runs both
+    /// ways through Channel's init.
+    struct StoredChannel: Codable {
+        var title: String
+        var logo: String
+        var group: String
+        var url: String
+        var kickoff: TimeInterval?
+        var leagueRank: Int
+        var referrer: String
+        var userAgent: String
+
+        init(_ ch: Channel) {
+            title = ch.title
+            logo = ch.logo
+            group = ch.group
+            url = ch.url
+            kickoff = ch.kickoff?.timeIntervalSince1970
+            leagueRank = ch.leagueRank
+            referrer = ch.referrer
+            userAgent = ch.userAgent
+        }
+
+        var channel: Channel {
+            Channel(title: title, logo: logo, group: group, url: url,
+                    kickoff: kickoff.map { Date(timeIntervalSince1970: $0) },
+                    leagueRank: leagueRank,
+                    referrer: referrer, userAgent: userAgent)
+        }
+    }
+
+    struct StoredEntry: Codable {
+        var key: String
+        var sources: [StoredChannel]
+        var verifiedURLs: [String]
+        var storedAt: TimeInterval
+        var ttl: TimeInterval
+    }
+
+    struct StoredWarm: Codable {
+        var dead: Bool
+        var stamp: TimeInterval
+    }
+
+    struct Payload: Codable {
+        var version: Int
+        var resolveEntries: [StoredEntry]
+        /// url → verdict stamp, epoch seconds.
+        var provenDead: [String: TimeInterval]
+        var prewarm: [String: StoredWarm]
+    }
+
+    private static let resolveHorizon: TimeInterval = 30 * 60
+    private static let deadHorizon: TimeInterval = 10 * 60
+    private static let prewarmHorizon: TimeInterval = 30 * 60
+
+    private static var fileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dabanh-verdicts.json")
+    }
+
+    private static var cachedPayload: Payload?
+    private static var didLoad = false
+    private static var pendingSave: Task<Void, Never>?
+
+    private static var emptyPayload: Payload {
+        Payload(version: 1, resolveEntries: [], provenDead: [:], prewarm: [:])
+    }
+
+    /// The payload, read from disk at most once per launch.
+    /// Any failure yields the empty payload (see the type
+    /// doc) — a cold start, never a crash.
+    static func load() -> Payload {
+        if didLoad { return cachedPayload ?? emptyPayload }
+        didLoad = true
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode(Payload.self, from: data),
+              decoded.version == 1 else {
+            cachedPayload = emptyPayload
+            return emptyPayload
+        }
+        cachedPayload = decoded
+        return decoded
+    }
+
+    /// ResolveHub's restore slice: entries and dead verdicts
+    /// inside their horizons (see the type doc), plus the
+    /// count of restorable prewarm records — for the hub's
+    /// one restore log line; the prewarm store restores its
+    /// own slice separately.
+    /// FIX-141 round 2: every age test here and in
+    /// prewarmSlice requires the age to lie in [0, horizon] —
+    /// a future-dated stamp (clock skew / corrupt-but-
+    /// decodable file) reads as expired, never as fresh.
+    static func resolveSlice(now: Date = Date())
+        -> (entries: [StoredEntry], dead: [String: Date], warmCount: Int) {
+        let payload = load()
+        let entries = payload.resolveEntries.filter {
+            (0...resolveHorizon).contains(
+                now.timeIntervalSince(Date(timeIntervalSince1970: $0.storedAt)))
+        }
+        var dead: [String: Date] = [:]
+        for (url, stamp) in payload.provenDead
+        where (0...deadHorizon).contains(
+            now.timeIntervalSince(Date(timeIntervalSince1970: stamp))) {
+            dead[url] = Date(timeIntervalSince1970: stamp)
+        }
+        let warmCount = payload.prewarm.values.filter {
+            (0...prewarmHorizon).contains(
+                now.timeIntervalSince(Date(timeIntervalSince1970: $0.stamp)))
+        }.count
+        return (entries, dead, warmCount)
+    }
+
+    /// SourcePrewarmStore's restore slice: records inside
+    /// the 30 min horizon, stamps still epoch seconds (the
+    /// store converts).
+    static func prewarmSlice(now: Date = Date()) -> [String: StoredWarm] {
+        load().prewarm.filter {
+            (0...prewarmHorizon).contains(
+                now.timeIntervalSince(Date(timeIntervalSince1970: $0.stamp)))
+        }
+    }
+
+    /// Coalesced save: cancel any pending save and start a
+    /// new one that sleeps 1 s, then assembles the payload
+    /// from the two stores' snapshots and writes it. Verdicts
+    /// land in bursts (a settle writes an entry + several
+    /// dead URLs at once); one write per burst is enough, and
+    /// the write itself is a small JSON kept synchronous on
+    /// the main actor — the invalid-urls.json precedent.
+    static func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task {
+            try? await Task.sleep(for: .seconds(1))
+            if Task.isCancelled { return }
+            writeNow()
+        }
+    }
+
+    private static func writeNow() {
+        let (entries, dead) = ResolveHub.shared.verdictSnapshot()
+        let payload = Payload(
+            version: 1,
+            resolveEntries: entries,
+            provenDead: dead.mapValues { $0.timeIntervalSince1970 },
+            prewarm: SourcePrewarmStore.shared.verdictSnapshot())
+        cachedPayload = payload
+        didLoad = true
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+}
+
 /// Resolve cache + single-flight hub (research §3.4): concurrent
 /// opens of the same fixture share one in-flight session; a fresh
 /// cached ladder replays instantly with no network; a fixture that
@@ -2781,9 +3145,14 @@ final class SourcePrewarmStore {
 /// dead fixture is not re-scraped on every tap; a healthy
 /// re-resolve doubles the entry's TTL (60 s floor, 10 min cap),
 /// while an empty resolve collapses the entry to the 30 s negative
-/// TTL. In-memory only, capped at 200 entries (least-recently-used
-/// evicted): a cold start re-verifies from the device — the only
-/// vantage point that shares the owner's network and tunnel.
+/// TTL. Capped at 200 entries (least-recently-used evicted).
+/// FIX-141: the cache and the dead set now persist across
+/// launches via VerdictDisk (DIAG-140-SMOOTH §5 direction 1 —
+/// the in-memory-only design re-verified the world at every
+/// cold start); restore horizons live in VerdictDisk. The
+/// device remains the only vantage point that shares the
+/// owner's network and tunnel — persistence only carries THIS
+/// device's own verdicts forward.
 ///
 /// FIX-128 (the tvOS tap-to-play read path, ported): a tap reads
 /// this registry in the order the SAME in-flight session → fresh
@@ -2842,6 +3211,21 @@ final class ResolveHub {
     /// no sweeps.
     private var provenDead: [String: Date] = [:]
 
+    /// FIX-141: dead verdicts restored from disk (VerdictDisk),
+    /// kept in a SEPARATE map so the in-run tier's 30 s
+    /// lazy-expiry logic above is untouched. A restored verdict
+    /// is honoured for 10 min from its ORIGINAL stamp (see
+    /// VerdictDisk for the horizon justification) and dropped
+    /// lazily past it, on read, exactly like the in-run tier.
+    /// When noteResolved / notePlayerDead re-convicts a URL it
+    /// lands in the in-run map as always; the persisted file
+    /// carries the union of both maps.
+    private var restoredDead: [String: Date] = [:]
+
+    /// FIX-141: the restored tier's horizon from the original
+    /// verdict stamp.
+    private static let restoredDeadHorizon: TimeInterval = 10 * 60
+
     /// The dead-verdict memory: 30 s, mirroring the web
     /// board's health map.
     /// Internal (not private) so SourcePrewarmStore's verdicts
@@ -2853,12 +3237,24 @@ final class ResolveHub {
     /// inside its 30 s TTL. An expired verdict is dropped on
     /// the spot and the URL reads as never convicted.
     func isProvenDead(_ url: String) -> Bool {
-        guard let stampedAt = provenDead[url] else { return false }
-        if Date().timeIntervalSince(stampedAt) > Self.provenDeadTTL {
-            provenDead[url] = nil
-            return false
+        if let stampedAt = provenDead[url] {
+            if Date().timeIntervalSince(stampedAt) > Self.provenDeadTTL {
+                provenDead[url] = nil
+            } else {
+                return true
+            }
         }
-        return true
+        // FIX-141: the restored tier — a verdict from a
+        // previous run, inside its 10 min horizon from the
+        // original stamp, lazily dropped past it.
+        if let stampedAt = restoredDead[url] {
+            if Date().timeIntervalSince(stampedAt) > Self.restoredDeadHorizon {
+                restoredDead[url] = nil
+                return false
+            }
+            return true
+        }
+        return false
     }
 
     /// FIX-129 (Item C): a PLAYER-observed definitive failure
@@ -2872,6 +3268,7 @@ final class ResolveHub {
     /// on the same 30 s TTL as a resolve's verdict.
     func notePlayerDead(url: String) {
         provenDead[url] = Date()
+        VerdictDisk.scheduleSave() // FIX-141
     }
     private var preresolveTask: Task<Void, Never>?
     private var preresolveSessions: [MatchPlaySession] = []
@@ -2882,7 +3279,59 @@ final class ResolveHub {
     /// in-flight table (noteResolved / forgetInFlight).
     private var tapAdopted: Set<ObjectIdentifier> = []
 
-    private init() {}
+    private init() {
+        restoreVerdictsFromDisk()
+    }
+
+    /// FIX-141: restore the persisted verdicts (VerdictDisk
+    /// has already applied the restore horizons: resolve
+    /// entries ≤30 min old, dead verdicts ≤10 min from their
+    /// original stamp). Restored entries re-enter the cache
+    /// with their original storedAt + TTL, so the hub's own
+    /// fresh/stale machinery governs them from here exactly
+    /// as if this run had produced them: a still-fresh entry
+    /// replays instantly, a stale one is adopted and
+    /// revalidated behind the tap.
+    private func restoreVerdictsFromDisk() {
+        let slice = VerdictDisk.resolveSlice()
+        for stored in slice.entries {
+            let stamp = Date(timeIntervalSince1970: stored.storedAt)
+            cache[stored.key] = Entry(
+                sources: stored.sources.map { $0.channel },
+                storedAt: stamp, ttl: stored.ttl, lastUsed: stamp,
+                verifiedURLs: Set(stored.verifiedURLs))
+        }
+        while cache.count > 200,
+              let lru = cache.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
+            cache[lru] = nil
+        }
+        restoredDead = slice.dead
+        DiagLog.log("player",
+                    "verdicts: restored \(slice.entries.count) resolve entries, "
+                    + "\(slice.dead.count) dead, \(slice.warmCount) warm from disk")
+    }
+
+    /// FIX-141: the persistable slice of the hub for
+    /// VerdictDisk — every cache entry (channels mirrored
+    /// field-by-field; Channel itself is not Codable) and the
+    /// dead set as the UNION of the in-run and restored maps
+    /// (the later stamp wins where both hold a URL).
+    func verdictSnapshot() -> (entries: [VerdictDisk.StoredEntry],
+                               dead: [String: Date]) {
+        let entries = cache.map { key, entry in
+            VerdictDisk.StoredEntry(
+                key: key,
+                sources: entry.sources.map(VerdictDisk.StoredChannel.init),
+                verifiedURLs: Array(entry.verifiedURLs),
+                storedAt: entry.storedAt.timeIntervalSince1970,
+                ttl: entry.ttl)
+        }
+        var dead = restoredDead
+        for (url, stamp) in provenDead {
+            dead[url] = max(dead[url] ?? .distantPast, stamp)
+        }
+        return (entries, dead)
+    }
 
     /// Cache identity of a ladder: its URL MULTISET — the
     /// URLs sorted, so ORDER plays no part. FIX-130 (P-8):
@@ -3165,6 +3614,7 @@ final class ResolveHub {
               let lru = cache.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
             cache[lru] = nil
         }
+        VerdictDisk.scheduleSave() // FIX-141
     }
 
     /// A cancelled session leaves the in-flight table without

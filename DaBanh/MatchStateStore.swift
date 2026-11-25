@@ -1261,6 +1261,20 @@ final class MatchStateStore: ObservableObject {
     @Published private(set) var revision = 0
 
     private(set) var states: [MatchState] = []
+    /// FIX-141: lazily built pairKey index over `states` for the
+    /// state lookup — the baseline `state(for:)` ran a linear
+    /// `states.filter` over all ~605 states for EVERY fixture
+    /// entry of EVERY board rebuild (DIAG-140-SMOOTH §3.2:
+    /// ~120k candidate evaluations per pass, ≥3–4 passes per
+    /// publish). The index groups states by pairKey, appending
+    /// in `states` order, so each bucket holds exactly the
+    /// subsequence the old filter produced for that key, in the
+    /// same order; the lookup then date-filters only that bucket.
+    /// nil = dirty: every mutation of `states` sets it back to
+    /// nil (the refresh publish assign, the empty-snapshot clear
+    /// and the detail-upgrade mutation loop), and the next lookup
+    /// rebuilds it on first use.
+    private var stateIndex: [String: [MatchState]]?
     /// Set by PlaylistStore after each publish: true while any
     /// fixture sits in its live window or is matched-live.
     var liveHint = false
@@ -1356,10 +1370,22 @@ final class MatchStateStore: ObservableObject {
             }
             if !states.isEmpty {
                 states = []
+                stateIndex = nil // FIX-141: `states` mutated — index dirty
                 revision += 1
             }
             return
         }
+        // FIX-141: the FotMob incidents upgrade (RC2) now runs
+        // HERE, on the merged snapshot itself, before the publish
+        // guard — the baseline ran it after the publish as
+        // `upgradeLiveFotMobDetails()`, fetching serially and
+        // bumping `revision` again per successful fetch (up to 4
+        // extra full board re-renders per cycle, DIAG-140-SMOOTH
+        // §3.1). Applied to `upgraded` pre-comparison, the details
+        // ride the cycle's one publish: the sameSnapshot guard
+        // below sees the final content, and the single assign +
+        // single bump publishes states and incidents together.
+        await applyFotMobDetails(to: &upgraded)
         // FIX-139 (review WP3 layer 2): publish only on change.
         // The baseline assigned and bumped `revision` on EVERY
         // cycle; PlaylistStore forwards every bump as
@@ -1373,7 +1399,10 @@ final class MatchStateStore: ObservableObject {
         // is NOT render state and keeps its unconditional
         // baseline behaviour.
         let snapshotChanged = !Self.sameSnapshot(states, upgraded)
-        if snapshotChanged { states = upgraded }
+        if snapshotChanged {
+            states = upgraded
+            stateIndex = nil // FIX-141: `states` mutated — index dirty
+        }
         lastSuccessAt = now
         if full { lastFullAt = now }
         if wantDateFeed { lastLiveScoreDateAt = now }
@@ -1388,11 +1417,9 @@ final class MatchStateStore: ObservableObject {
                     + "livescore=\(liveStates.count + dateStates.count) "
                     + "merged=\(upgraded.count) "
                     + "live=\(upgraded.filter { $0.status.isLiveish }.count)")
-        // RC2 (2026-11-19): the FotMob incidents upgrade also runs
-        // on this refresh cycle — the 60 s live cycle included —
-        // not only at playlist publish, so scorers/cards land
-        // within a cycle of the state that needs them.
-        await upgradeLiveFotMobDetails()
+        // FIX-141: no post-publish upgrade call remains — the
+        // RC2 FotMob incidents upgrade ran above, on the merged
+        // snapshot, so this cycle published exactly once.
     }
 
     /// When the NBA sweep last ran (FIX-139): the discovery
@@ -1452,13 +1479,18 @@ final class MatchStateStore: ObservableObject {
     }
 
     /// The refresh-cycle form of the FotMob incidents upgrade
-    /// (RC2): same discipline as `upgradeDetails(for:)` — FotMob
+    /// (RC2), restructured by FIX-141: same discipline as the
+    /// deleted post-publish `upgradeLiveFotMobDetails()` — FotMob
     /// states only (the details endpoint is FotMob-only), capped
-    /// at 4 per pass, live first, cached ids never refetched —
-    /// driven from the store's own states because the cycle has
-    /// no channel list. Only states lacking incidents qualify.
-    private func upgradeLiveFotMobDetails() async {
-        let ordered = states.sorted {
+    /// at 4 per pass, live first, cached ids never refetched,
+    /// only states lacking incidents qualify — but applied to
+    /// the cycle's merged snapshot BEFORE it is published, so
+    /// the incidents land in the same single publish as the
+    /// states that need them instead of bumping `revision` again
+    /// per fetch. `detailCache` is written exactly as before, so
+    /// the next cycle's inheritance pass sees the same cache.
+    private func applyFotMobDetails(to snapshot: inout [MatchState]) async {
+        let ordered = snapshot.sorted {
             ($0.status.isLiveish ? 0 : 1) < ($1.status.isLiveish ? 0 : 1)
         }
         var targets: [Int] = []
@@ -1474,14 +1506,11 @@ final class MatchStateStore: ObservableObject {
         for id in targets {
             if let details = await MatchStateClient.fetchFotMobDetails(matchID: id) {
                 detailCache[id] = details
-                var changed = false
-                for i in states.indices
-                where states[i].source == .fotmob && states[i].fotmobID == id {
-                    states[i].goals = details.goals
-                    states[i].cards = details.cards
-                    changed = true
+                for i in snapshot.indices
+                where snapshot[i].source == .fotmob && snapshot[i].fotmobID == id {
+                    snapshot[i].goals = details.goals
+                    snapshot[i].cards = details.cards
                 }
-                if changed { revision += 1 }
             }
         }
     }
@@ -1494,11 +1523,24 @@ final class MatchStateStore: ObservableObject {
         guard let key = MatchMatching.pairKey(of: channel),
               let kickoff = channel.kickoff else { return nil }
         let fixtureDateKey = FixtureGrouping.stampDateKey(of: kickoff)
-        let candidates = states.filter {
-            $0.pairKey == key
-                && MatchMatching.datesAgree(fixtureKickoff: kickoff,
-                                            fixtureDateKey: fixtureDateKey,
-                                            state: $0)
+        // FIX-141: candidates come from the pairKey index (built
+        // on first use after any `states` mutation), not a full
+        // scan. The bucket preserves the original `states` order,
+        // so filtering it by date agreement yields the identical
+        // candidate sequence the old whole-array filter produced;
+        // everything below (marker discipline, precedence,
+        // staleness override, pool fill) is untouched.
+        if stateIndex == nil {
+            var built: [String: [MatchState]] = [:]
+            for state in states {
+                built[state.pairKey, default: []].append(state)
+            }
+            stateIndex = built
+        }
+        let candidates = (stateIndex?[key] ?? []).filter {
+            MatchMatching.datesAgree(fixtureKickoff: kickoff,
+                                     fixtureDateKey: fixtureDateKey,
+                                     state: $0)
         }
         // Marker discipline (Addendum 2 §A2.1, applied to states):
         // a state whose women's markedness matches the fixture's
@@ -1671,17 +1713,38 @@ final class MatchStateStore: ObservableObject {
             targets.append(id)
         }
         if targets.isEmpty { return }
+        // FIX-141 round 2: the revision bump lands at the
+        // mutation itself — in the same non-suspending segment
+        // as the mutation and the index invalidation below, with
+        // no await between them. PlaylistStore's entries(for:)
+        // memo keys on `revision`, so the revision can never lag
+        // the states it names: a render landing between fetches
+        // (this loop suspends on each fetch) always keys on a
+        // revision that already counts every mutation so far.
+        // This restores the invariant every other mutation site
+        // in this store already keeps — the empty-snapshot clear
+        // (:1373–1374) and the refresh publish (:1404/:1412)
+        // pair each `states` mutation with its bump in the same
+        // synchronous segment. (Round 1 accumulated the bump and
+        // applied it once after the loop; gate round 2 showed
+        // that left "same revision ⇒ same states" false for the
+        // whole in-loop window.)
         for id in targets {
             if let details = await MatchStateClient.fetchFotMobDetails(matchID: id) {
                 detailCache[id] = details
-                var changed = false
                 for i in states.indices
                 where states[i].source == .fotmob && states[i].fotmobID == id {
                     states[i].goals = details.goals
                     states[i].cards = details.cards
-                    changed = true
+                    // FIX-141: invalidate — and bump — at the
+                    // mutation itself, not at the end — a render
+                    // landing between fetches must never read
+                    // index copies of a state this loop has
+                    // already rewritten, nor key the entries
+                    // memo on a revision that predates it.
+                    stateIndex = nil
+                    revision += 1
                 }
-                if changed { revision += 1 }
             }
         }
     }

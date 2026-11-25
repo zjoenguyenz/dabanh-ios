@@ -113,6 +113,20 @@ final class MUChromeViews {
     /// (FIX-MU-3, finding 9): chip font is 11 portrait /
     /// 10 landscape, so a rotation rebuilds the chips.
     var landscape = false
+    /// FIX-141: a rotation transition (viewWillTransition)
+    /// is in flight for this chrome. Set by the view
+    /// controller's transition override in PlayerView.swift,
+    /// read by muToggleFullscreen to coalesce fullscreen
+    /// toggles fired mid-rotation, and cleared in the
+    /// transition's completion (the settle re-assertion).
+    var transitionInFlight = false
+    /// FIX-141: the last (page, size) pair layoutMUChrome
+    /// wrote to DiagLog — layout passes log only when the
+    /// chosen page or the size used changes, so the strip
+    /// class (DIAG-140 §4.4) becomes observable without a
+    /// line per pass.
+    var lastLoggedLayoutPage: String?
+    var lastLoggedLayoutSize: CGSize?
     let scrimTop = UIView()
     let scrimBottom = UIView()
     var chipButtons: [UIButton] = []
@@ -638,13 +652,39 @@ extension LivePlayerViewController {
     /// routes here whenever the MU chrome is active, so a
     /// rotation reflows between the two pages live.
     func layoutMUChrome() {
+        layoutMUChrome(targetSize: view.bounds.size)
+    }
+
+    /// FIX-141: the same layout, computed against an
+    /// explicit target size instead of whatever bounds a
+    /// mid-transition layout pass happens to see (DIAG-140
+    /// §4.3, §5 direction 9). The portrait/landscape choice
+    /// and all page geometry derive from the passed bounds
+    /// exactly as they derived from view.bounds before —
+    /// one code path, no forked page layouts. The no-arg
+    /// form above delegates with the view's live bounds;
+    /// viewWillTransition (PlayerView.swift) passes the
+    /// transition's final size.
+    func layoutMUChrome(targetSize: CGSize) {
         guard let mu = muChrome else { return }
-        let bounds = view.bounds
+        let bounds = CGRect(origin: .zero, size: targetSize)
         let safe = view.safeAreaInsets
         // FIX-MU-3 (finding 9): the chip font differs per
         // orientation — when a rotation flips the page,
         // rebuild the chips so they pick up the new size.
         let isLandscape = bounds.width > bounds.height
+        // FIX-141: layout observability — one DiagLog line
+        // when the chosen page or the size used changes
+        // versus the last logged pair (see MUChromeViews).
+        let page = isLandscape ? "landscape" : "portrait"
+        if mu.lastLoggedLayoutPage != page
+            || mu.lastLoggedLayoutSize != bounds.size {
+            mu.lastLoggedLayoutPage = page
+            mu.lastLoggedLayoutSize = bounds.size
+            DiagLog.log("player",
+                        "mu layout: page=\(page) "
+                        + "size=\(Int(bounds.width.rounded()))x\(Int(bounds.height.rounded()))")
+        }
         if mu.landscape != isLandscape {
             mu.landscape = isLandscape
             // FIX-133 (audit D17): the landscape page's chip
@@ -1024,6 +1064,20 @@ extension LivePlayerViewController {
     /// chosen direction are logged with every toggle so the
     /// device log can convict any residual mismatch.
     @objc func muToggleFullscreen() {
+        // FIX-141: coalesce toggles fired while a rotation
+        // transition is in flight (DIAG-140 §4.3: 12 toggles
+        // in 28 s on device, each firing an un-coalesced
+        // geometry request). The tap still gives feedback
+        // via showControls(), but no second lock/geometry
+        // request starts until the in-flight transition has
+        // settled. The FIX-139 decision below is untouched
+        // and runs as before once no transition is in flight.
+        if muChrome?.transitionInFlight == true {
+            DiagLog.log("player",
+                        "mu fullscreen toggle: coalesced — rotation transition in flight")
+            showControls()
+            return
+        }
         let isLandscape = muChrome?.landscape ?? (view.bounds.width > view.bounds.height)
         let live = view.window?.windowScene?.interfaceOrientation
         DiagLog.log("player",

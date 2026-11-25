@@ -253,6 +253,111 @@ final class PlaylistStore: ObservableObject {
     let liveStates = MatchStateStore()
     private var stateForwarding: AnyCancellable?
 
+    // MARK: FIX-141 entries memo
+
+    /// Content fingerprint of one input channel for the
+    /// `entries(for:)` memo key. Every stored field except `id`
+    /// is hashed: FixtureGrouping reads title / url / kickoff
+    /// (pair identity, legacy identity, live merge), the group
+    /// representative that FixtureEntry carries renders from
+    /// logo / group / leagueRank, and the state binding +
+    /// competition attach read title / kickoff / leagueRank.
+    /// `id` is excluded deliberately — it is a fresh UUID per
+    /// parse, so an identity- or equality-based key (Channel's
+    /// Equatable includes `id`) would miss on every playlist
+    /// refresh even when nothing the computation reads changed.
+    private struct EntriesChannelFingerprint: Hashable {
+        let title: String
+        let logo: String
+        let group: String
+        let url: String
+        let kickoff: Date?
+        let leagueRank: Int
+        let referrer: String
+        let userAgent: String
+
+        init(_ channel: Channel) {
+            title = channel.title
+            logo = channel.logo
+            group = channel.group
+            url = channel.url
+            kickoff = channel.kickoff
+            leagueRank = channel.leagueRank
+            referrer = channel.referrer
+            userAgent = channel.userAgent
+        }
+    }
+
+    /// Everything `entries(for:)` depends on, in one key: the
+    /// input channels' contents (in order — grouping preserves
+    /// first-occurrence order, so order is part of the input)
+    /// and `liveStates.revision`, the store's version counter
+    /// for state content. Every mutation of the store's states
+    /// is paired with a revision bump (the guarded refresh
+    /// publish, the empty-snapshot clear, the detail upgrades —
+    /// after FIX-141 exactly one bump per cycle / per on-demand
+    /// call), so a changed state can never hide behind an equal
+    /// key. Wall-clock dependence is NOT in the key; it is the
+    /// entry's `validUntil` below.
+    private struct EntriesMemoKey: Hashable {
+        let revision: Int
+        let channels: [EntriesChannelFingerprint]
+    }
+
+    private struct EntriesMemoEntry {
+        let key: EntriesMemoKey
+        let entries: [FixtureEntry]
+        /// The first instant at which the stored result may stop
+        /// being what a fresh computation would return (see
+        /// `nextEntriesFlip(after:channels:)`). A hit requires
+        /// now < validUntil.
+        let validUntil: Date
+    }
+
+    /// FIFO memo for `entries(for:)`, oldest first, capped at 8
+    /// (the live call shapes are few: the full list, the Hot
+    /// list, per-league lists, the live list).
+    private var entriesMemo: [EntriesMemoEntry] = []
+    private static let entriesMemoCap = 8
+
+    /// The earliest future instant at which the wall clock can
+    /// change an `entries(for:)` result for these channels.
+    ///
+    /// The computation's ONLY clock dependence is
+    /// FixtureGrouping.group's live merge, gated by
+    /// `isLive(kickoff:now:)` — the window kickoff −10 min …
+    /// +125 min, the same constants as LeagueClassifier's
+    /// bucket 0 (`bucket(of:now:)`: sinceKick >= -10*60 &&
+    /// sinceKick <= 125*60). A fixture's bucket / live-merge
+    /// membership can therefore flip only at kickoff−600 s
+    /// (enters the window) or kickoff+7500 s (leaves it). The
+    /// live merge reads the EARLIEST stamp of each same-pair
+    /// cluster, and that earliest stamp is itself one of the
+    /// input kickoffs — so the minimum flip instant over ALL
+    /// input kickoffs is at or before every flip that could
+    /// change the grouping: expiring there is exact in the safe
+    /// direction (a memo may die early on a bystander channel's
+    /// flip; it can never be served after a real flip).
+    /// The leaving edge uses >= so a memo computed exactly at
+    /// kickoff+7500 s still expires at that instant; a hit
+    /// requires now < validUntil, so at the edge itself the
+    /// caller recomputes (and gets the same, still-live result).
+    /// Channels with no kickoff never flip. No future flip at
+    /// all → .distantFuture (the key's revision / contents are
+    /// then the only things that can change the result).
+    private static func nextEntriesFlip(after now: Date,
+                                        channels: [Channel]) -> Date {
+        var earliest = Date.distantFuture
+        for channel in channels {
+            guard let kickoff = channel.kickoff else { continue }
+            let enters = kickoff.addingTimeInterval(-10 * 60)
+            if enters > now, enters < earliest { earliest = enters }
+            let leaves = kickoff.addingTimeInterval(125 * 60)
+            if leaves >= now, leaves < earliest { earliest = leaves }
+        }
+        return earliest
+    }
+
     init() {
         stateForwarding = liveStates.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -318,6 +423,54 @@ final class PlaylistStore: ObservableObject {
         }
     }
 
+    // FIX-141: per-URL probe stamps for the incremental
+    // whole-list validation (see validateLinks): when each
+    // URL was last probed, persisted across launches so a
+    // validation pass only re-probes what is DUE. Same
+    // Caches + atomic-write pattern as invalid-urls.json;
+    // any decode failure (missing, corrupt, version ≠ 1)
+    // yields an empty map — every URL simply reads as due.
+    private var linkProbeStamps: [String: Date] = [:]
+    private var linkProbeStampsLoaded = false
+
+    /// A probe verdict is trusted for 30 min — the mirror's
+    /// republication cadence: inside one playlist generation
+    /// a URL's answer from this device is still the answer;
+    /// past it, the ladder may have rotated and the URL is
+    /// due again.
+    private static let linkProbeTTL: TimeInterval = 30 * 60
+
+    private var linkProbeStampsFileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("link-probe-stamps.json")
+    }
+
+    private struct LinkProbeStampsPayload: Codable {
+        var version: Int
+        var stamps: [String: TimeInterval]
+    }
+
+    private func loadLinkProbeStampsIfNeeded() {
+        guard !linkProbeStampsLoaded else { return }
+        linkProbeStampsLoaded = true
+        guard let data = try? Data(contentsOf: linkProbeStampsFileURL),
+              let payload = try? JSONDecoder().decode(
+                LinkProbeStampsPayload.self, from: data),
+              payload.version == 1 else { return }
+        linkProbeStamps = payload.stamps.mapValues {
+            Date(timeIntervalSince1970: $0)
+        }
+    }
+
+    private func saveLinkProbeStamps() {
+        let payload = LinkProbeStampsPayload(
+            version: 1,
+            stamps: linkProbeStamps.mapValues { $0.timeIntervalSince1970 })
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: linkProbeStampsFileURL, options: .atomic)
+        }
+    }
+
     var isStale: Bool {
         guard let lastFetch else { return true }
         return Date().timeIntervalSince(lastFetch) > Self.autoRefreshInterval
@@ -363,14 +516,44 @@ final class PlaylistStore: ObservableObject {
 
     /// Fixture entries with their matched state and competition
     /// attached — the board model every 1.21 list renders from.
+    ///
+    /// FIX-141: memoised. The baseline recomputed this from
+    /// scratch on every view render — ≥3–4 full passes per
+    /// publish, each with a per-entry state lookup
+    /// (DIAG-140-SMOOTH §3.2). A memo hit returns the previously
+    /// computed array itself; a miss runs the exact baseline
+    /// computation and stores its result under a content key
+    /// (channels' contents + states revision — see
+    /// EntriesMemoKey) with a wall-clock validity bound (see
+    /// `nextEntriesFlip`). Key construction is one O(n) hash
+    /// pass over the input, against the baseline's full
+    /// grouping + per-entry lookups.
     func entries(for channels: [Channel]) -> [FixtureEntry] {
-        FixtureEntry.group(channels).map { entry in
+        let now = Date()
+        let key = EntriesMemoKey(
+            revision: liveStates.revision,
+            channels: channels.map(EntriesChannelFingerprint.init))
+        if let hit = entriesMemo.first(where: {
+            $0.key == key && now < $0.validUntil
+        }) {
+            return hit.entries
+        }
+        let computed = FixtureEntry.group(channels).map { entry in
             var entry = entry
             entry.state = liveStates.state(for: entry.channel)
             entry.competition = LeagueClassifier.competition(
                 for: entry.channel, state: entry.state)
             return entry
         }
+        entriesMemo.removeAll { $0.key == key }
+        entriesMemo.append(EntriesMemoEntry(
+            key: key,
+            entries: computed,
+            validUntil: Self.nextEntriesFlip(after: now, channels: channels)))
+        while entriesMemo.count > Self.entriesMemoCap {
+            entriesMemo.removeFirst()
+        }
+        return computed
     }
 
     /// Every fixture entry of the main list (Hot listings ride the
@@ -395,7 +578,6 @@ final class PlaylistStore: ObservableObject {
     func start() async {
         DiagLog.boot()
         loadCache()
-        scheduleValidation()
         liveStates.start()
         await refresh()
         // Crest coverage updates ride the same GitHub mirror as the
@@ -503,7 +685,6 @@ final class PlaylistStore: ObservableObject {
                     "refresh done: \(channels.count) channels, "
                     + "\(hotChannels.count) hot, \(liveChannels.count) live")
         pickInitialTabIfNeeded()
-        scheduleValidation()
         // The state layer rides the playlist refresh (spec §1.6):
         // a full sweep here, the store's own loop polls live.
         Task { await liveStates.refreshNow() }
@@ -657,27 +838,28 @@ final class PlaylistStore: ObservableObject {
 
     /// The device's own vantage point is the only one that shares the
     /// owner's network and tunnel, so the app itself re-checks the
-    /// list: after every load it probes each link in the background
-    /// and hides the ones that are definitively unplayable HERE, so
-    /// dead links never reach the match screens. The mirror repo runs
-    /// the vantage-independent half of the same job (404s + filler).
-
-    private func scheduleValidation() {
-        Task { await validateLinks(reset: false) }
-    }
+    /// list and hides the links that are definitively unplayable
+    /// HERE, so dead links never reach the match screens. The mirror
+    /// repo runs the vantage-independent half of the same job
+    /// (404s + filler).
+    ///
+    /// FIX-141 (DIAG-140-SMOOTH §5 direction 5): validation is OFF
+    /// the browsing path — the scheduled after-every-load pass is
+    /// deleted (scheduleValidation and its start()/refresh() call
+    /// sites are gone), and the pass that remains is INCREMENTAL:
+    /// it probes only the URLs whose persisted probe stamp is
+    /// missing or older than the 30 min TTL (see linkProbeStamps),
+    /// so a repeat check minutes after the last one is nearly
+    /// free instead of another ~460-probe, minutes-long drain.
 
     /// The "Kiểm tra link" button: force-fetch the newest playlist,
-    /// then re-probe EVERYTHING from scratch (the hidden set is
-    /// cleared first, so a link that died under a dead tunnel gets a
-    /// fair second chance) and republish the match screens.
+    /// then run ONE incremental validation pass over the URLs
+    /// that are due. (FIX-141: the old shape ran the pass twice —
+    /// refresh's own scheduled pass, waited out, then a
+    /// from-scratch reset pass that cleared the hidden set first.)
     func refreshAndValidate() async {
         await refresh()
-        // refresh() schedules its own background pass; wait it out so
-        // the from-scratch pass below is the one that runs.
-        while validating {
-            try? await Task.sleep(for: .milliseconds(200))
-        }
-        await validateLinks(reset: true)
+        await validateLinks()
         let hidden = invalidURLs.count
         DiagLog.log("links", "manual link check: \(hidden) dead links hidden")
         statusMessage = hidden > 0
@@ -685,7 +867,7 @@ final class PlaylistStore: ObservableObject {
             : "Đã kiểm tra xong: không có link chết."
     }
 
-    private func validateLinks(reset: Bool) async {
+    private func validateLinks() async {
         if validating { return }
         validating = true
         isValidating = true
@@ -693,23 +875,39 @@ final class PlaylistStore: ObservableObject {
             validating = false
             isValidating = false
         }
-        if reset {
-            invalidURLs = []
-            saveInvalidSet()
-            publishFiltered()
-        }
+        loadLinkProbeStampsIfNeeded()
         let now = Date()
         var seen = Set<String>()
         var pool: [Channel] = []
         for ch in rawChannels + rawHotChannels where seen.insert(ch.url).inserted {
             if !Self.isFLV(ch.url) { pool.append(ch) }
         }
+        // FIX-141: only DUE channels are probed — no stamp yet,
+        // or a stamp older than the 30 min TTL. Fresh channels
+        // keep the verdict (and the hidden-set membership) their
+        // last probe earned.
+        let due = pool.filter { ch in
+            guard let stamp = linkProbeStamps[ch.url] else { return true }
+            return now.timeIntervalSince(stamp) > Self.linkProbeTTL
+        }
+        // FIX-141: the pass is observable (the old ambient pass
+        // wrote no log lines at all — DIAG-140-SMOOTH §2.4).
+        DiagLog.log("links",
+                    "link validation: start — pool \(pool.count), "
+                    + "\(due.count) due, \(pool.count - due.count) fresh")
+        let started = Date()
         // Live-window and always-on channels first — they are what
         // the home screen leads with; the rest follow in a second wave.
-        let liveWave = pool.filter { isLiveScope($0, now: now) }
-        let restWave = pool.filter { !isLiveScope($0, now: now) }
-        await probeWave(liveWave, now: now)
-        await probeWave(restWave, now: now)
+        let liveWave = due.filter { isLiveScope($0, now: now) }
+        let restWave = due.filter { !isLiveScope($0, now: now) }
+        let live = await probeWave(liveWave, now: now)
+        let rest = await probeWave(restWave, now: now)
+        let seconds = Date().timeIntervalSince(started)
+        DiagLog.log("links",
+                    String(format: "link validation: done in %.1fs — "
+                           + "%d valid, %d invalid, %d hidden total",
+                           seconds, live.valid + rest.valid,
+                           live.invalid + rest.invalid, invalidURLs.count))
     }
 
     /// "Should be serving right now": inside the live window, or a
@@ -718,8 +916,14 @@ final class PlaylistStore: ObservableObject {
         ch.kickoff == nil || LeagueClassifier.bucket(of: ch, now: now) == 0
     }
 
-    private func probeWave(_ wave: [Channel], now: Date) async {
-        if wave.isEmpty { return }
+    /// Probes one wave and merges its verdicts into the hidden
+    /// set. FIX-141: every probed URL — valid or invalid — is
+    /// stamped with the pass's `now` and the stamps file is
+    /// saved, so the next pass inside the TTL skips it; the
+    /// wave's own valid/invalid counts go back to the caller
+    /// for the completion log line.
+    private func probeWave(_ wave: [Channel], now: Date) async -> (valid: Int, invalid: Int) {
+        if wave.isEmpty { return (0, 0) }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         let session = URLSession(configuration: config)
@@ -742,9 +946,11 @@ final class PlaylistStore: ObservableObject {
             }
             for (url, ok) in results {
                 if ok { validNow.insert(url) } else { invalidNow.insert(url) }
+                linkProbeStamps[url] = now // FIX-141: probed is probed, either way
             }
             idx += chunkSize
         }
+        saveLinkProbeStamps() // FIX-141
         let before = invalidURLs
         invalidURLs.subtract(validNow)
         invalidURLs.formUnion(invalidNow)
@@ -752,6 +958,7 @@ final class PlaylistStore: ObservableObject {
             saveInvalidSet()
             publishFiltered()
         }
+        return (validNow.count, invalidNow.count)
     }
 }
 
