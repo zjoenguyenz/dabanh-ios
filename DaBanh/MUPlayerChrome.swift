@@ -258,20 +258,29 @@ enum MUFullscreenState {
 /// no custom transition (FIX-145, DIAG-145): the
 /// interface rotation itself stays with the window —
 /// the FIX-139 scene geometry update is the single
-/// rotation driver, exactly as in 1.43. It declares
-/// the landscape orientation itself (the decision's
-/// OrientationHelper.lock has already narrowed the
-/// app-wide mask to match — the two agree by
-/// construction); KSPlayer's controller returns `.all`
-/// and lets its global carry the narrowing, which is
-/// the one deliberate mapping difference, noted here.
+/// rotation driver, exactly as in 1.43. It returns
+/// `.all` for its supported orientations — KSPlayer's
+/// original architecture, restored by FIX-146
+/// (DIAG-146): the scene judges every geometry
+/// request against the TOPMOST presented controller,
+/// so this controller must never narrow the set — a
+/// `.landscape` declaration vetoed the app's own
+/// exit request (the 1.45 Code=101 rejections),
+/// because the FIX-139 lock fires before the
+/// dismissal while this controller is still on top.
+/// The narrowing while hosted is carried entirely
+/// by the app-wide mask (AppDelegate.orientationLock,
+/// asserted by OrientationHelper.lock), exactly as
+/// KSPlayer's global carries it; shouldAutorotate
+/// stays false, so physical rotation never moves
+/// the window while hosted.
 final class MUFullscreenViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
     }
 
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
     override var shouldAutorotate: Bool { false }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
