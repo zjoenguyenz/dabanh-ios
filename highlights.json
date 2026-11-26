@@ -1,7 +1,97 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-25T05:05:20Z",
+  "generatedAt": "2026-11-26T00:06:27Z",
   "matches": [
+    {
+      "competition": "champions-league",
+      "home": "Atlético Madrid",
+      "away": "Viking FK",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915291",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Club Brugge",
+      "away": "Liverpool",
+      "scoreHome": 0,
+      "scoreAway": 3,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915292",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Internazionale",
+      "away": "VfB Stuttgart",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915376",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Lille",
+      "away": "Bayern Munich",
+      "scoreHome": 2,
+      "scoreAway": 1,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915377",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Paris Saint-Germain",
+      "away": "AS Roma",
+      "scoreHome": 2,
+      "scoreAway": 2,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915374",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Shakhtar Donetsk",
+      "away": "Fenerbahce",
+      "scoreHome": 0,
+      "scoreAway": 1,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915375",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Sporting CP",
+      "away": "Manchester United",
+      "scoreHome": 2,
+      "scoreAway": 2,
+      "matchDate": "2026-11-25T20:00:00Z",
+      "espnEventId": "401915373",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Sabah FK",
+      "away": "Barcelona",
+      "scoreHome": 1,
+      "scoreAway": 4,
+      "matchDate": "2026-11-25T17:45:00Z",
+      "espnEventId": "401915378",
+      "sources": []
+    },
+    {
+      "competition": "champions-league",
+      "home": "Slavia Prague",
+      "away": "Villarreal",
+      "scoreHome": 0,
+      "scoreAway": 1,
+      "matchDate": "2026-11-25T17:45:00Z",
+      "espnEventId": "401915293",
+      "sources": []
+    },
     {
       "competition": "champions-league",
       "home": "Arsenal",
@@ -132,6 +222,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-24T00:38:53Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "wiQR6Nx28ik",
+          "label": "Brentford Football Club",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-26T00:00:18Z"
         }
       ]
     },
