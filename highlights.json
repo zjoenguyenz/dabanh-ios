@@ -1,7 +1,367 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-26T00:06:27Z",
+  "generatedAt": "2026-11-27T00:08:16Z",
   "matches": [
+    {
+      "competition": "europa-league",
+      "home": "Crystal Palace",
+      "away": "Real Sociedad",
+      "scoreHome": 2,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915504",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Ferencvaros",
+      "away": "NK Celje",
+      "scoreHome": 0,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915516",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Juventus",
+      "away": "Omonia Nicosia",
+      "scoreHome": 4,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915502",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Lyon",
+      "away": "Lillestrom",
+      "scoreHome": 0,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915501",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "NEC Nijmegen",
+      "away": "Stade Rennais",
+      "scoreHome": 3,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915505",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "OFI Crete",
+      "away": "Anderlecht",
+      "scoreHome": 1,
+      "scoreAway": 3,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915503",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Sparta Prague",
+      "away": "AZ Alkmaar",
+      "scoreHome": 2,
+      "scoreAway": 4,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915514",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Sunderland",
+      "away": "Jagiellonia Bialystok",
+      "scoreHome": 1,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915513",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Torreense",
+      "away": "Celtic",
+      "scoreHome": 1,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915512",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "TSG Hoffenheim",
+      "away": "SK Sturm Graz",
+      "scoreHome": 3,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915515",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Borac Banja Luka",
+      "away": "Atalanta",
+      "scoreHome": 2,
+      "scoreAway": 3,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915806",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Braga",
+      "away": "KuPS Kuopio",
+      "scoreHome": 4,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915802",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "CSKA Sofia",
+      "away": "Trabzonspor",
+      "scoreHome": 1,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915803",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "FC Nordsjælland",
+      "away": "Panathinaikos",
+      "scoreHome": 3,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915807",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Hajduk Split",
+      "away": "Sint-Truidense",
+      "scoreHome": 0,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915805",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Inter D'Escaldes",
+      "away": "F.C. København",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915738",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "KAA Gent",
+      "away": "Red Star Belgrade",
+      "scoreHome": 1,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915804",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "SC Freiburg",
+      "away": "FC Twente",
+      "scoreHome": 2,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T20:00:00Z",
+      "espnEventId": "401915801",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Besiktas",
+      "away": "Hapoel Be'er",
+      "scoreHome": 2,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915506",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Celta Vigo",
+      "away": "AFC Bournemouth",
+      "scoreHome": 1,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915519",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Dinamo Zagreb",
+      "away": "Bayer Leverkusen",
+      "scoreHome": 0,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915517",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Marseille",
+      "away": "Levski Sofia",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915507",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Olympiacos",
+      "away": "AC Milan",
+      "scoreHome": 2,
+      "scoreAway": 4,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915521",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "RB Salzburg",
+      "away": "Ararat-Armenia",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915520",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Union St.-Gilloise",
+      "away": "Lech Poznan",
+      "scoreHome": 2,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915508",
+      "sources": []
+    },
+    {
+      "competition": "europa-league",
+      "home": "Viktoria Plzen",
+      "away": "Benfica",
+      "scoreHome": 4,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915518",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Ajax Amsterdam",
+      "away": "FC Thun",
+      "scoreHome": 4,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915815",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Brighton & Hove Albion",
+      "away": "Universitatea Craiova",
+      "scoreHome": 4,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915814",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Egnatia",
+      "away": "Lincoln Red Imps",
+      "scoreHome": 2,
+      "scoreAway": 1,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915810",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Heart of Midlothian",
+      "away": "AS Monaco",
+      "scoreHome": 2,
+      "scoreAway": 3,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915811",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Iberia 1999",
+      "away": "Getafe",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915813",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Jablonec",
+      "away": "FC Lugano",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915812",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Kauno Zalgiris",
+      "away": "Riga FC",
+      "scoreHome": 2,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915739",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Pafos",
+      "away": "FC Midtjylland",
+      "scoreHome": 0,
+      "scoreAway": 2,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915809",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "SK Brann",
+      "away": "AGF",
+      "scoreHome": 1,
+      "scoreAway": 4,
+      "matchDate": "2026-11-26T17:45:00Z",
+      "espnEventId": "401915808",
+      "sources": []
+    },
+    {
+      "competition": "conference-league",
+      "home": "Kairat Almaty",
+      "away": "Mjällby AIF",
+      "scoreHome": 1,
+      "scoreAway": 0,
+      "matchDate": "2026-11-26T15:30:00Z",
+      "espnEventId": "401915816",
+      "sources": []
+    },
     {
       "competition": "champions-league",
       "home": "Atlético Madrid",
@@ -698,6 +1058,14 @@
           "official": false,
           "durationSec": null,
           "addedAt": "2026-11-24T15:39:23Z"
+        },
+        {
+          "kind": "youtube",
+          "ref": "tzIPCl4Oh64",
+          "label": "Telemundo Deportes",
+          "official": false,
+          "durationSec": null,
+          "addedAt": "2026-11-27T00:01:29Z"
         }
       ]
     },
