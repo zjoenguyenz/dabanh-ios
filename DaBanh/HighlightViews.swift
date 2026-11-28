@@ -1123,31 +1123,31 @@ struct HighlightMP4View: UIViewControllerRepresentable {
 
         // AVKit invokes these delegate methods on the main
         // thread, but this coordinator is not @MainActor, and
-        // `animate` is a main actor-isolated method: forming
-        // its completion closure outside the main actor's
-        // region is a Swift 6 sending error (CI run #114).
-        // Every compiling `animate` call in this tree lives in
-        // a @MainActor type (OrientationHelper, the player view
-        // controllers). assumeIsolated is the sanctioned bridge
-        // for main-thread-guaranteed callbacks; the handler is
-        // extracted to a local first so the only captures are
-        // the coordinator (a main-actor object) and that value.
+        // `animate` is a main actor-isolated method: its
+        // completion may capture ONLY main-actor-region values.
+        // Capturing self (run #114) or even a local copy of the
+        // handler (run #115) is a Swift 6 sending error — both
+        // live in this coordinator's non-isolated region. So
+        // the completion captures only the player view
+        // controller (a main-actor object) and reaches the
+        // coordinator back through its `delegate` property,
+        // read inside the main-actor region where it belongs.
         func playerViewController(_ playerViewController: AVPlayerViewController,
                                   willBeginFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
-            let handler = onNativeFullscreen
             MainActor.assumeIsolated {
                 coordinator.animate(alongsideTransition: nil) { context in
-                    if !context.isCancelled { handler(true) }
+                    guard !context.isCancelled else { return }
+                    (playerViewController.delegate as? Coordinator)?.onNativeFullscreen(true)
                 }
             }
         }
 
         func playerViewController(_ playerViewController: AVPlayerViewController,
                                   willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
-            let handler = onNativeFullscreen
             MainActor.assumeIsolated {
                 coordinator.animate(alongsideTransition: nil) { context in
-                    if !context.isCancelled { handler(false) }
+                    guard !context.isCancelled else { return }
+                    (playerViewController.delegate as? Coordinator)?.onNativeFullscreen(false)
                 }
             }
         }
