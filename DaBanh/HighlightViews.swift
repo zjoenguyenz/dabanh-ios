@@ -1044,19 +1044,56 @@ private struct HighlightCardButtonStyle: ViewModifier {
 /// property an app should observe so it can adjust/restore
 /// its native UI. Maps the four states onto one Bool; an
 /// unknown future state changes nothing. The caller owns the
-/// returned observation and invalidates it at teardown.
-private func hlFullscreenObservation(_ webView: WKWebView,
-                                     handler: @escaping (Bool) -> Void) -> NSKeyValueObservation {
-    webView.observe(\.fullscreenState, options: [.new]) { observed, _ in
-        switch observed.fullscreenState {
-        case .enteringFullscreen, .inFullscreen:
-            handler(true)
-        case .exitingFullscreen, .notInFullscreen:
-            handler(false)
-        @unknown default:
-            break
+/// returned observer and invalidates it at teardown.
+///
+/// STRING-BASED KVO ON PURPOSE (CI runs #112/#113): the
+/// Swift key-path form does not compile here — `fullscreenState`
+/// is a main actor-isolated property in the SDK, so forming
+/// `\.fullscreenState` from these non-isolated coordinators is
+/// a hard Swift 6 error, and the enum's Swift case name was
+/// misread from a third-party article to boot. The string form
+/// needs no key path and no isolated-property read: the raw
+/// WKFullscreenState value arrives in the change dictionary
+/// (header: NotInFullscreen 0, Entering 1, In 2, Exiting 3).
+/// Do not "modernise" this back into the key-path form.
+private final class HLFullscreenObserver: NSObject {
+    private weak var webView: WKWebView?
+    private let handler: (Bool) -> Void
+    private var observing = false
+
+    init(webView: WKWebView, handler: @escaping (Bool) -> Void) {
+        self.webView = webView
+        self.handler = handler
+        super.init()
+        webView.addObserver(self, forKeyPath: "fullscreenState",
+                            options: [.new], context: nil)
+        observing = true
+    }
+
+    func invalidate() {
+        guard observing else { return }
+        observing = false
+        webView?.removeObserver(self, forKeyPath: "fullscreenState")
+    }
+
+    deinit { invalidate() }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        guard keyPath == "fullscreenState",
+              let raw = change?[.newKey] as? NSNumber else { return }
+        switch raw.intValue {
+        case 1, 2: handler(true)
+        case 3, 0: handler(false)
+        default: break
         }
     }
+}
+
+private func hlFullscreenObservation(_ webView: WKWebView,
+                                     handler: @escaping (Bool) -> Void) -> HLFullscreenObserver {
+    HLFullscreenObserver(webView: webView, handler: handler)
 }
 
 // MARK: - Video layers
@@ -1172,7 +1209,7 @@ struct HighlightYouTubeView: UIViewRepresentable {
         var onFail: () -> Void = {}
         var onNativeFullscreen: (Bool) -> Void = { _ in }
         private var reported = false
-        private var fsObservation: NSKeyValueObservation?
+        private var fsObservation: HLFullscreenObserver?
 
         func report() {
             guard !reported else { return }
@@ -1303,7 +1340,7 @@ struct HighlightWebPageView: UIViewRepresentable {
         var onFail: () -> Void = {}
         var onNativeFullscreen: (Bool) -> Void = { _ in }
         private var reported = false
-        private var fsObservation: NSKeyValueObservation?
+        private var fsObservation: HLFullscreenObserver?
 
         func report() {
             guard !reported else { return }
