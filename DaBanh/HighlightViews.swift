@@ -1121,17 +1121,34 @@ struct HighlightMP4View: UIViewControllerRepresentable {
         private var statusObservation: NSKeyValueObservation?
         private var failObserver: NSObjectProtocol?
 
+        // AVKit invokes these delegate methods on the main
+        // thread, but this coordinator is not @MainActor, and
+        // `animate` is a main actor-isolated method: forming
+        // its completion closure outside the main actor's
+        // region is a Swift 6 sending error (CI run #114).
+        // Every compiling `animate` call in this tree lives in
+        // a @MainActor type (OrientationHelper, the player view
+        // controllers). assumeIsolated is the sanctioned bridge
+        // for main-thread-guaranteed callbacks; the handler is
+        // extracted to a local first so the only captures are
+        // the coordinator (a main-actor object) and that value.
         func playerViewController(_ playerViewController: AVPlayerViewController,
                                   willBeginFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
-            coordinator.animate(alongsideTransition: nil) { [weak self] context in
-                if !context.isCancelled { self?.onNativeFullscreen(true) }
+            let handler = onNativeFullscreen
+            MainActor.assumeIsolated {
+                coordinator.animate(alongsideTransition: nil) { context in
+                    if !context.isCancelled { handler(true) }
+                }
             }
         }
 
         func playerViewController(_ playerViewController: AVPlayerViewController,
                                   willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
-            coordinator.animate(alongsideTransition: nil) { [weak self] context in
-                if !context.isCancelled { self?.onNativeFullscreen(false) }
+            let handler = onNativeFullscreen
+            MainActor.assumeIsolated {
+                coordinator.animate(alongsideTransition: nil) { context in
+                    if !context.isCancelled { handler(false) }
+                }
             }
         }
 
