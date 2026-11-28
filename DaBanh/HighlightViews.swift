@@ -1051,7 +1051,7 @@ private func hlFullscreenObservation(_ webView: WKWebView,
         switch observed.fullscreenState {
         case .enteringFullscreen, .inFullscreen:
             handler(true)
-        case .exitingFullscreen, .notFullscreen:
+        case .exitingFullscreen, .notInFullscreen:
             handler(false)
         @unknown default:
             break
