@@ -586,6 +586,19 @@ struct HighlightPlayerView: View {
     /// layer is rebuilt (a source switch / failure-advance can
     /// retire a fullscreen surface without an exit event).
     @State private var nativeFullscreen = false
+    /// The landscape page's chrome auto-hide (DB-43): the
+    /// second, independent hiding flag — the chrome is hidden
+    /// when EITHER flag says hidden. Set only through
+    /// setChromeVisible(_:reason:).
+    @State private var chromeVisible = true
+    /// The current layer's last reported playing state
+    /// (DB-43), the pause-aware gate for the hide timer: set
+    /// only through setPlaying(_:kind:from:) and the chrome resets.
+    @State private var isPlaying = false
+    /// Bumped by any tap landing on the visible chrome
+    /// (DB-43); part of the hide task's identity, so an
+    /// interaction restarts the 3.0 s clock on its own.
+    @State private var chromeInteraction = 0
 
     private var sources: [HighlightSource] { match.rankedSources }
     private var current: HighlightSource? {
@@ -629,6 +642,26 @@ struct HighlightPlayerView: View {
             // A rebuilt layer starts inline; a retired layer's
             // exit event may never arrive (DB-38).
             nativeFullscreen = false
+            // The new layer starts with fresh chrome (DB-43).
+            resetChromeForSourceSwitch()
+        }
+        .onChange(of: isFullscreen) { _, entered in
+            // Entering/exiting the app fullscreen resets the
+            // auto-hide state to visible (DB-43); the playing
+            // state itself is the layer's and is left alone,
+            // except that a UEFA page — which never reports —
+            // counts as playing from here on.
+            chromeVisible = true
+            chromeInteraction += 1
+            if current?.kind == .uefaPage { isPlaying = true }
+            DiagLog.log("highlight",
+                        "chrome reset (\(entered ? "enter" : "exit") fullscreen): "
+                        + "'\(match.home) vs \(match.away)'")
+        }
+        .onChange(of: allFailed) { _, failed in
+            // Nothing left to play: the note and the close
+            // button stay reachable, never auto-hidden (DB-43).
+            if failed { setChromeVisible(true, reason: "all failed") }
         }
     }
 
@@ -714,9 +747,43 @@ struct HighlightPlayerView: View {
                         .padding(.bottom, 28)
                 }
             }
-            .opacity(nativeFullscreen ? 0 : 1)
-            .allowsHitTesting(!nativeFullscreen)
-            .animation(.easeInOut(duration: 0.2), value: nativeFullscreen)
+            .opacity(chromeHidden ? 0 : 1)
+            .allowsHitTesting(!chromeHidden)
+            .animation(.easeInOut(duration: 0.2), value: chromeHidden)
+            // Any tap landing on the visible chrome restarts
+            // the auto-hide clock (DB-43); simultaneous, so the
+            // controls themselves still receive their taps.
+            .simultaneousGesture(
+                TapGesture().onEnded { chromeInteraction += 1 }
+            )
+            if !chromeVisible && !nativeFullscreen {
+                // While the chrome is auto-hidden, the first
+                // tap anywhere wakes it and is consumed here —
+                // the standard first-tap-wakes rule (DB-43).
+                // While the chrome is visible there is NO
+                // catcher: the video surface keeps all its
+                // taps, incl. the YouTube player's own controls.
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { setChromeVisible(true, reason: "wake tap") }
+            }
+        }
+        .task(id: chromeHideTaskID) {
+            // The 3.0 s auto-hide (DB-43), the house standard
+            // of the live player's scheduleControlsHide: armed
+            // only while playback is actually flowing, and
+            // re-checked at fire time. Any identity change — a
+            // visibility or playing flip, a source switch, an
+            // interaction, the all-failed pin — cancels the
+            // task and restarts the clock.
+            guard chromeVisible, isPlaying, !allFailed, !nativeFullscreen
+            else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, chromeVisible, isPlaying, !allFailed,
+                  !nativeFullscreen
+            else { return }
+            setChromeVisible(false, reason: "timeout")
         }
     }
 
@@ -828,17 +895,25 @@ struct HighlightPlayerView: View {
             switch source.kind {
             case .espnMP4:
                 if let url = URL(string: source.ref) {
+                    // Bound NOW, at build time: the closure
+                    // must carry THIS layer's index, not read
+                    // the live one back at report time.
+                    let builtIndex = sourceIndex
                     HighlightMP4View(url: url,
                                      onFail: { advance(from: sourceIndex, reason: "mp4") },
-                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) })
+                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) },
+                                     onPlayingChange: { setPlaying($0, kind: source.kind.rawValue, from: builtIndex) })
                         .id(sourceIndex)
                 } else {
                     Color.clear.onAppear { advance(from: sourceIndex, reason: "mp4-bad-url") }
                 }
             case .youtube:
+                // Bound NOW, at build time — see the MP4 branch.
+                let builtIndex = sourceIndex
                 HighlightYouTubeView(videoID: source.ref,
                                      onFail: { advance(from: sourceIndex, reason: "youtube") },
-                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) })
+                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) },
+                                     onPlayingChange: { setPlaying($0, kind: source.kind.rawValue, from: builtIndex) })
                     .id(sourceIndex)
             case .uefaPage:
                 if let url = URL(string: source.ref) {
@@ -986,6 +1061,68 @@ struct HighlightPlayerView: View {
                     + "'\(match.home) vs \(match.away)'")
     }
 
+    // MARK: Chrome auto-hide (DB-43)
+
+    /// The landscape chrome is hidden when the surface's
+    /// native fullscreen is up (DB-38) OR the auto-hide has
+    /// faded it (DB-43); either flag restoring brings it back
+    /// exactly. (The portrait page keeps the DB-38 flag only.)
+    private var chromeHidden: Bool { nativeFullscreen || !chromeVisible }
+
+    /// The hide task's identity: every input that must
+    /// restart the 3.0 s clock is in here — including the
+    /// native-fullscreen flag, so a native fullscreen
+    /// suspends the clock outright and DB-38's exit restores
+    /// the chrome exactly (gate round 1, Lens A B-1).
+    private var chromeHideTaskID: String {
+        "\(chromeVisible)-\(isPlaying)-\(sourceIndex)-\(chromeInteraction)-\(allFailed)-\(nativeFullscreen)"
+    }
+
+    /// The one writer of the auto-hide flag: acts (and logs)
+    /// only on a real change, like setNativeFullscreen.
+    private func setChromeVisible(_ visible: Bool, reason: String) {
+        guard visible != chromeVisible else { return }
+        chromeVisible = visible
+        DiagLog.log("highlight",
+                    "chrome \(visible ? "show" : "hide") (\(reason)): "
+                    + "'\(match.home) vs \(match.away)'")
+    }
+
+    /// The one writer of the playing state: acts (and logs)
+    /// only on a real change. A pause gives the chrome back
+    /// and keeps it — the live player's pause-aware rule.
+    /// Reports carry the index of the layer that was built
+    /// to send them (the advance(from:) discipline): a
+    /// retired layer's late report — an MP4 layer pausing
+    /// itself during dismantle, after the switch — is
+    /// ignored, so it can never clobber the new layer's
+    /// state (gate round 1, Lens A M-1).
+    private func setPlaying(_ playing: Bool, kind: String, from index: Int) {
+        guard index == sourceIndex else { return }
+        guard playing != isPlaying else { return }
+        isPlaying = playing
+        DiagLog.log("highlight",
+                    "playback \(playing ? "playing" : "paused") (\(kind)): "
+                    + "'\(match.home) vs \(match.away)'")
+        if !playing { setChromeVisible(true, reason: "pause") }
+    }
+
+    /// A source switch starts the chrome fresh: visible,
+    /// with the playing state at the NEW layer's default. A
+    /// UEFA page never reports a state, so it counts as
+    /// playing (its timer runs; the wake tap restores the
+    /// chrome) — the one asymmetry among the kinds. The
+    /// signalling kinds start not-playing: the chrome stays
+    /// while the new layer loads, the live player's
+    /// waiting-for-signal rule, until the layer reports.
+    private func resetChromeForSourceSwitch() {
+        chromeVisible = true
+        isPlaying = current?.kind == .uefaPage
+        DiagLog.log("highlight",
+                    "chrome reset (source switch): "
+                    + "'\(match.home) vs \(match.away)'")
+    }
+
     // MARK: Auto-advance
 
     /// A source failed: log it and move to the next untried
@@ -1096,6 +1233,53 @@ private func hlFullscreenObservation(_ webView: WKWebView,
     HLFullscreenObserver(webView: webView, handler: handler)
 }
 
+/// Observes an AVPlayer's timeControlStatus — the MP4
+/// layer's playing state for the chrome auto-hide (DB-43).
+/// STRING-BASED KVO on purpose, the HLFullscreenObserver
+/// lesson (CI runs #112–#116): the raw AVPlayerTimeControlStatus
+/// value arrives in the change dictionary (AVFoundation
+/// header: Paused 0, WaitingToPlayAtSpecifiedRate 1,
+/// Playing 2), so no key path into an SDK property is ever
+/// formed from a non-isolated context. Waiting (1) reports
+/// NOTHING: it is the buffering state, and the page's rule
+/// is that buffering leaves the playing state unchanged —
+/// a stall mid-playback does not resurrect the chrome, and
+/// the initial wait does not arm the hide timer.
+private final class HLTimeControlObserver: NSObject {
+    private weak var player: AVPlayer?
+    private let handler: (Bool) -> Void
+    private var observing = false
+
+    init(player: AVPlayer, handler: @escaping (Bool) -> Void) {
+        self.player = player
+        self.handler = handler
+        super.init()
+        player.addObserver(self, forKeyPath: "timeControlStatus",
+                           options: [.new], context: nil)
+        observing = true
+    }
+
+    func invalidate() {
+        guard observing else { return }
+        observing = false
+        player?.removeObserver(self, forKeyPath: "timeControlStatus")
+    }
+
+    deinit { invalidate() }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?,
+                               context: UnsafeMutableRawPointer?) {
+        guard keyPath == "timeControlStatus",
+              let raw = change?[.newKey] as? NSNumber else { return }
+        switch raw.intValue {
+        case 2: handler(true)
+        case 0: handler(false)
+        default: break
+        }
+    }
+}
+
 // MARK: - Video layers
 
 /// ESPN MP4 layer: AVPlayerViewController (its own transport
@@ -1113,12 +1297,15 @@ struct HighlightMP4View: UIViewControllerRepresentable {
     let url: URL
     let onFail: () -> Void
     let onNativeFullscreen: (Bool) -> Void
+    let onPlayingChange: (Bool) -> Void
 
     final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         var onFail: () -> Void = {}
         var onNativeFullscreen: (Bool) -> Void = { _ in }
+        var onPlayingChange: (Bool) -> Void = { _ in }
         private var reported = false
         private var statusObservation: NSKeyValueObservation?
+        private var timeControlObserver: HLTimeControlObserver?
         private var failObserver: NSObjectProtocol?
 
         // AVKit invokes these delegate methods on the main
@@ -1163,6 +1350,15 @@ struct HighlightMP4View: UIViewControllerRepresentable {
             }
         }
 
+        /// The playing state for the page's chrome auto-hide
+        /// (DB-43): the player's own timeControlStatus,
+        /// observed through HLTimeControlObserver.
+        func watchPlayer(_ player: AVPlayer) {
+            timeControlObserver = HLTimeControlObserver(player: player) { [weak self] playing in
+                self?.onPlayingChange(playing)
+            }
+        }
+
         func report() {
             guard !reported else { return }
             reported = true
@@ -1172,6 +1368,8 @@ struct HighlightMP4View: UIViewControllerRepresentable {
         func teardown() {
             statusObservation?.invalidate()
             statusObservation = nil
+            timeControlObserver?.invalidate()
+            timeControlObserver = nil
             if let failObserver {
                 NotificationCenter.default.removeObserver(failObserver)
                 self.failObserver = nil
@@ -1189,7 +1387,9 @@ struct HighlightMP4View: UIViewControllerRepresentable {
         controller.delegate = context.coordinator
         context.coordinator.onFail = onFail
         context.coordinator.onNativeFullscreen = onNativeFullscreen
+        context.coordinator.onPlayingChange = onPlayingChange
         context.coordinator.watch(item)
+        context.coordinator.watchPlayer(player)
         player.play()
         return controller
     }
@@ -1213,6 +1413,9 @@ struct HighlightMP4View: UIViewControllerRepresentable {
 /// the player's onStateChange reporting an unrecoverable
 /// state is NOT treated as failure (a paused/ended video is
 /// not a dead source), and WKNavigationDelegate failures.
+/// onStateChange also feeds the page's playing state for
+/// the landscape chrome auto-hide (DB-43), through the same
+/// "hlYT" handler as a {event: 'state', code} message.
 /// Native fullscreen (DB-38) is reported two independent
 /// ways, both idempotent at the page's guarded setter: the
 /// web view's fullscreenState KVO, and the embed page's own
@@ -1221,10 +1424,12 @@ struct HighlightYouTubeView: UIViewRepresentable {
     let videoID: String
     let onFail: () -> Void
     let onNativeFullscreen: (Bool) -> Void
+    let onPlayingChange: (Bool) -> Void
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onFail: () -> Void = {}
         var onNativeFullscreen: (Bool) -> Void = { _ in }
+        var onPlayingChange: (Bool) -> Void = { _ in }
         private var reported = false
         private var fsObservation: HLFullscreenObserver?
 
@@ -1255,6 +1460,21 @@ struct HighlightYouTubeView: UIViewRepresentable {
                     report()
                 } else if event == "fullscreen", let active = body["active"] as? Bool {
                     onNativeFullscreen(active)
+                } else if event == "state", let code = body["code"] as? Int {
+                    // IFrame API onStateChange codes (official
+                    // IFrame API reference): 1 playing, 2 paused,
+                    // 0 ended, 5 cued, -1 unstarted. Code 3
+                    // (buffering) deliberately reports NOTHING:
+                    // buffering leaves the page's playing state
+                    // unchanged (DB-43).
+                    switch code {
+                    case 1:
+                        onPlayingChange(true)
+                    case 2, 0, 5, -1:
+                        onPlayingChange(false)
+                    default:
+                        break
+                    }
                 }
             }
         }
@@ -1288,6 +1508,7 @@ struct HighlightYouTubeView: UIViewRepresentable {
         webView.isOpaque = false
         context.coordinator.onFail = onFail
         context.coordinator.onNativeFullscreen = onNativeFullscreen
+        context.coordinator.onPlayingChange = onPlayingChange
         context.coordinator.watchFullscreen(webView)
         webView.loadHTMLString(Self.embedHTML(videoID: videoID),
                                baseURL: URL(string: "https://www.youtube-nocookie.com"))
@@ -1296,6 +1517,7 @@ struct HighlightYouTubeView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.onNativeFullscreen = onNativeFullscreen
+        context.coordinator.onPlayingChange = onPlayingChange
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
@@ -1330,6 +1552,11 @@ struct HighlightYouTubeView: UIViewRepresentable {
               onError: function(e){
                 if (window.webkit && window.webkit.messageHandlers.hlYT) {
                   window.webkit.messageHandlers.hlYT.postMessage({event: 'error', code: e.data});
+                }
+              },
+              onStateChange: function(e){
+                if (window.webkit && window.webkit.messageHandlers.hlYT) {
+                  window.webkit.messageHandlers.hlYT.postMessage({event: 'state', code: e.data});
                 }
               }
             }
