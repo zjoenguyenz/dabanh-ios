@@ -1320,7 +1320,12 @@ struct HighlightYouTubeView: UIViewRepresentable {
         function onYouTubeIframeAPIReady(){
           player = new YT.Player('player', {
             videoId: '\(videoID)',
-            playerVars: {playsinline: 1, autoplay: 1, rel: 0},
+            // fs: 0 hides the embed's own fullscreen button (owner
+            // ruling 2026-11-27, DB-38): that fullscreen stacks the
+            // app's chrome over the YouTube layer and cannot be
+            // observed reliably, so the app's own fullscreen button
+            // is the only fullscreen path for highlights.
+            playerVars: {playsinline: 1, autoplay: 1, rel: 0, fs: 0},
             events: {
               onError: function(e){
                 if (window.webkit && window.webkit.messageHandlers.hlYT) {
