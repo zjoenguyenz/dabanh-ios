@@ -559,6 +559,15 @@ struct ClassicHighlightTile: View {
 /// the existing designed full-bleed layout, unchanged. Under
 /// Classic the page keeps the classic player's convention
 /// (landscape lock while the player is up).
+///
+/// The video surface's OWN native fullscreen (the YouTube
+/// player's fullscreen button, an AVKit fullscreen, the UEFA
+/// page's player) is a different state from the DB-20 toggle
+/// above: WebKit moves the web view into its own fullscreen
+/// window for it, so this page's chrome — drawn in the app
+/// window — would keep floating over the video (DB-38).
+/// While a layer reports native fullscreen, every chrome
+/// element on the page hides; on exit it restores exactly.
 struct HighlightPlayerView: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.dismiss) private var dismiss
@@ -572,6 +581,11 @@ struct HighlightPlayerView: View {
     /// MU fullscreen (DB-20 behaviour): the designed full-bleed
     /// landscape state, entered/exited by the toggle only.
     @State private var isFullscreen = false
+    /// The video surface's native fullscreen (DB-38): set only
+    /// through setNativeFullscreen(_:kind:), reset whenever the
+    /// layer is rebuilt (a source switch / failure-advance can
+    /// retire a fullscreen surface without an exit event).
+    @State private var nativeFullscreen = false
 
     private var sources: [HighlightSource] { match.rankedSources }
     private var current: HighlightSource? {
@@ -611,6 +625,11 @@ struct HighlightPlayerView: View {
                 OrientationHelper.lock(.all, rotateTo: .portrait)
             }
         }
+        .onChange(of: sourceIndex) { _, _ in
+            // A rebuilt layer starts inline; a retired layer's
+            // exit event may never arrive (DB-38).
+            nativeFullscreen = false
+        }
     }
 
     // MARK: Layouts
@@ -635,6 +654,9 @@ struct HighlightPlayerView: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 56)
+            .opacity(nativeFullscreen ? 0 : 1)
+            .allowsHitTesting(!nativeFullscreen)
+            .animation(.easeInOut(duration: 0.2), value: nativeFullscreen)
 
             videoBlock
                 .aspectRatio(16 / 9, contentMode: .fit)
@@ -652,6 +674,9 @@ struct HighlightPlayerView: View {
                 }
                 .padding(16)
             }
+            .opacity(nativeFullscreen ? 0 : 1)
+            .allowsHitTesting(!nativeFullscreen)
+            .animation(.easeInOut(duration: 0.2), value: nativeFullscreen)
         }
     }
 
@@ -689,6 +714,9 @@ struct HighlightPlayerView: View {
                         .padding(.bottom, 28)
                 }
             }
+            .opacity(nativeFullscreen ? 0 : 1)
+            .allowsHitTesting(!nativeFullscreen)
+            .animation(.easeInOut(duration: 0.2), value: nativeFullscreen)
         }
     }
 
@@ -800,19 +828,23 @@ struct HighlightPlayerView: View {
             switch source.kind {
             case .espnMP4:
                 if let url = URL(string: source.ref) {
-                    HighlightMP4View(url: url, onFail: { advance(from: sourceIndex, reason: "mp4") })
+                    HighlightMP4View(url: url,
+                                     onFail: { advance(from: sourceIndex, reason: "mp4") },
+                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) })
                         .id(sourceIndex)
                 } else {
                     Color.clear.onAppear { advance(from: sourceIndex, reason: "mp4-bad-url") }
                 }
             case .youtube:
                 HighlightYouTubeView(videoID: source.ref,
-                                     onFail: { advance(from: sourceIndex, reason: "youtube") })
+                                     onFail: { advance(from: sourceIndex, reason: "youtube") },
+                                     onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) })
                     .id(sourceIndex)
             case .uefaPage:
                 if let url = URL(string: source.ref) {
                     HighlightWebPageView(url: url,
-                                         onFail: { advance(from: sourceIndex, reason: "uefa-page") })
+                                         onFail: { advance(from: sourceIndex, reason: "uefa-page") },
+                                         onNativeFullscreen: { setNativeFullscreen($0, kind: source.kind.rawValue) })
                         .id(sourceIndex)
                 } else {
                     Color.clear.onAppear { advance(from: sourceIndex, reason: "uefa-bad-url") }
@@ -940,6 +972,20 @@ struct HighlightPlayerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // MARK: Native fullscreen (DB-38)
+
+    /// The one writer of the native-fullscreen flag: acts (and
+    /// logs) only on a real change, so duplicate signals — the
+    /// KVO state and the embed's JS event on the YouTube layer,
+    /// an AVKit begin/end pair — collapse into one transition.
+    private func setNativeFullscreen(_ active: Bool, kind: String) {
+        guard active != nativeFullscreen else { return }
+        nativeFullscreen = active
+        DiagLog.log("highlight",
+                    "native fullscreen \(active ? "enter" : "exit") (\(kind)): "
+                    + "'\(match.home) vs \(match.away)'")
+    }
+
     // MARK: Auto-advance
 
     /// A source failed: log it and move to the next untried
@@ -990,6 +1036,29 @@ private struct HighlightCardButtonStyle: ViewModifier {
     }
 }
 
+/// Observes a WKWebView's fullscreen state — Apple's
+/// documented hook for exactly this (iOS 16+, WWDC22-10049):
+/// when an element in the web view enters fullscreen, WebKit
+/// moves the WKWebView into a fullscreen window and back on
+/// exit, and the header doc names `fullscreenState` as the
+/// property an app should observe so it can adjust/restore
+/// its native UI. Maps the four states onto one Bool; an
+/// unknown future state changes nothing. The caller owns the
+/// returned observation and invalidates it at teardown.
+private func hlFullscreenObservation(_ webView: WKWebView,
+                                     handler: @escaping (Bool) -> Void) -> NSKeyValueObservation {
+    webView.observe(\.fullscreenState, options: [.new]) { observed, _ in
+        switch observed.fullscreenState {
+        case .enteringFullscreen, .inFullscreen:
+            handler(true)
+        case .exitingFullscreen, .notFullscreen:
+            handler(false)
+        @unknown default:
+            break
+        }
+    }
+}
+
 // MARK: - Video layers
 
 /// ESPN MP4 layer: AVPlayerViewController (its own transport
@@ -999,16 +1068,35 @@ private struct HighlightCardButtonStyle: ViewModifier {
 /// one guarded onFail in the coordinator (the LivePlayerSurface
 /// precedent: plain representable, plain coordinator, closures
 /// stored on it; WebKit/AVKit callbacks arrive on the main
-/// thread).
+/// thread). The coordinator is also the player's fullscreen
+/// delegate (DB-38): AVKit's willBegin/willEnd pair, with the
+/// state applied in the transition completion so a cancelled
+/// presentation never flips it.
 struct HighlightMP4View: UIViewControllerRepresentable {
     let url: URL
     let onFail: () -> Void
+    let onNativeFullscreen: (Bool) -> Void
 
-    final class Coordinator {
+    final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         var onFail: () -> Void = {}
+        var onNativeFullscreen: (Bool) -> Void = { _ in }
         private var reported = false
         private var statusObservation: NSKeyValueObservation?
         private var failObserver: NSObjectProtocol?
+
+        func playerViewController(_ playerViewController: AVPlayerViewController,
+                                  willBeginFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
+            coordinator.animate(alongsideTransition: nil) { [weak self] context in
+                if !context.isCancelled { self?.onNativeFullscreen(true) }
+            }
+        }
+
+        func playerViewController(_ playerViewController: AVPlayerViewController,
+                                  willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
+            coordinator.animate(alongsideTransition: nil) { [weak self] context in
+                if !context.isCancelled { self?.onNativeFullscreen(false) }
+            }
+        }
 
         func watch(_ item: AVPlayerItem) {
             statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -1044,7 +1132,9 @@ struct HighlightMP4View: UIViewControllerRepresentable {
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
         controller.player = player
+        controller.delegate = context.coordinator
         context.coordinator.onFail = onFail
+        context.coordinator.onNativeFullscreen = onNativeFullscreen
         context.coordinator.watch(item)
         player.play()
         return controller
@@ -1069,13 +1159,20 @@ struct HighlightMP4View: UIViewControllerRepresentable {
 /// the player's onStateChange reporting an unrecoverable
 /// state is NOT treated as failure (a paused/ended video is
 /// not a dead source), and WKNavigationDelegate failures.
+/// Native fullscreen (DB-38) is reported two independent
+/// ways, both idempotent at the page's guarded setter: the
+/// web view's fullscreenState KVO, and the embed page's own
+/// fullscreenchange listener posted through "hlYT".
 struct HighlightYouTubeView: UIViewRepresentable {
     let videoID: String
     let onFail: () -> Void
+    let onNativeFullscreen: (Bool) -> Void
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onFail: () -> Void = {}
+        var onNativeFullscreen: (Bool) -> Void = { _ in }
         private var reported = false
+        private var fsObservation: NSKeyValueObservation?
 
         func report() {
             guard !reported else { return }
@@ -1083,12 +1180,28 @@ struct HighlightYouTubeView: UIViewRepresentable {
             onFail()
         }
 
+        func watchFullscreen(_ webView: WKWebView) {
+            fsObservation = hlFullscreenObservation(webView) { [weak self] active in
+                self?.onNativeFullscreen(active)
+            }
+        }
+
+        func teardownFullscreen() {
+            fsObservation?.invalidate()
+            fsObservation = nil
+            onNativeFullscreen(false)
+        }
+
         func userContentController(_ userContentController: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
             guard message.name == "hlYT" else { return }
             if let body = message.body as? [String: Any],
-               let event = body["event"] as? String, event == "error" {
-                report()
+               let event = body["event"] as? String {
+                if event == "error" {
+                    report()
+                } else if event == "fullscreen", let active = body["active"] as? Bool {
+                    onNativeFullscreen(active)
+                }
             }
         }
 
@@ -1120,14 +1233,19 @@ struct HighlightYouTubeView: UIViewRepresentable {
         webView.backgroundColor = .black
         webView.isOpaque = false
         context.coordinator.onFail = onFail
+        context.coordinator.onNativeFullscreen = onNativeFullscreen
+        context.coordinator.watchFullscreen(webView)
         webView.loadHTMLString(Self.embedHTML(videoID: videoID),
                                baseURL: URL(string: "https://www.youtube-nocookie.com"))
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onNativeFullscreen = onNativeFullscreen
+    }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.teardownFullscreen()
         uiView.stopLoading()
         uiView.navigationDelegate = nil
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "hlYT")
@@ -1158,6 +1276,13 @@ struct HighlightYouTubeView: UIViewRepresentable {
             }
           });
         }
+        function hlFSNotify(){
+          if (window.webkit && window.webkit.messageHandlers.hlYT) {
+            window.webkit.messageHandlers.hlYT.postMessage({event: 'fullscreen', active: !!(document.fullscreenElement || document.webkitFullscreenElement)});
+          }
+        }
+        document.addEventListener('fullscreenchange', hlFSNotify);
+        document.addEventListener('webkitfullscreenchange', hlFSNotify);
         </script></body></html>
         """
     }
@@ -1166,19 +1291,36 @@ struct HighlightYouTubeView: UIViewRepresentable {
 /// UEFA page layer: the uefa.com video page in a WKWebView
 /// (its own player inside). Only navigation failure is
 /// observable from outside the page — that is the failure
-/// signal (study §2).
+/// signal (study §2). Native fullscreen (DB-38) needs no
+/// page cooperation: the web view's fullscreenState KVO is
+/// the app's own observation of WebKit's bookkeeping.
 struct HighlightWebPageView: UIViewRepresentable {
     let url: URL
     let onFail: () -> Void
+    let onNativeFullscreen: (Bool) -> Void
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var onFail: () -> Void = {}
+        var onNativeFullscreen: (Bool) -> Void = { _ in }
         private var reported = false
+        private var fsObservation: NSKeyValueObservation?
 
         func report() {
             guard !reported else { return }
             reported = true
             onFail()
+        }
+
+        func watchFullscreen(_ webView: WKWebView) {
+            fsObservation = hlFullscreenObservation(webView) { [weak self] active in
+                self?.onNativeFullscreen(active)
+            }
+        }
+
+        func teardownFullscreen() {
+            fsObservation?.invalidate()
+            fsObservation = nil
+            onNativeFullscreen(false)
         }
 
         func webView(_ webView: WKWebView,
@@ -1201,13 +1343,18 @@ struct HighlightWebPageView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.backgroundColor = .black
         context.coordinator.onFail = onFail
+        context.coordinator.onNativeFullscreen = onNativeFullscreen
+        context.coordinator.watchFullscreen(webView)
         webView.load(URLRequest(url: url))
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onNativeFullscreen = onNativeFullscreen
+    }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.teardownFullscreen()
         uiView.stopLoading()
         uiView.navigationDelegate = nil
     }
